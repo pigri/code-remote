@@ -1,0 +1,9 @@
+# Built binaries
+/claude-remote-api
+/crctl
+/server
+*.exe
+
+# Local env / secrets (only the .example is tracked)
+*.env
+!deploy/*.env.example

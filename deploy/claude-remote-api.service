@@ -1,0 +1,70 @@
+[Unit]
+Description=Claude Remote API (launches detached claude sessions via screen)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pigri
+Group=pigri
+
+# Secrets + optional overrides. MUST contain CLAUDE_REMOTE_API_TOKEN.
+# Create it 0600 and owned by pigri (see install notes).
+EnvironmentFile=/etc/claude-remote-api.env
+# screen/claude live in the user's dirs, which aren't on systemd's default
+# PATH. Point at the real ones (claude here is a self-contained binary).
+Environment=PATH=/home/pigri/.local/bin:/home/pigri/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+ExecStart=/usr/local/bin/claude-remote-api
+
+# Stopping/restarting the API must NOT kill running claude sessions: only the
+# API process is signalled; the detached screen sessions keep running and are
+# rediscovered (via `screen -ls`) on the next start.
+KillMode=process
+Restart=on-failure
+RestartSec=2
+
+# ---- Hardening -----------------------------------------------------------
+NoNewPrivileges=true
+
+# Whole filesystem read-only except the few paths claude/screen write to:
+#   /home/pigri  -> ~/.claude, ~/.claude.json, claude version dir, caches
+#   /run/screen  -> the per-user screen socket dir (keep the default so you
+#                   can still `screen -r` the session from your login shell)
+ProtectSystem=strict
+ReadWritePaths=/home/pigri /run/screen
+PrivateTmp=true
+# Minimal /dev, but keeps /dev/pts for screen ptys.
+PrivateDevices=true
+
+# Explicit: ReadWritePaths above re-opens ~ for claude.
+ProtectHome=false
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# No capabilities needed: the listener uses a high port (>1024). If you set
+# CLAUDE_REMOTE_API_ADDR to a port <1024, add CAP_NET_BIND_SERVICE to both.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077
+
+# NOTE: MemoryDenyWriteExecute is deliberately omitted — the claude binary
+# embeds a JIT (writable+executable memory) and crashes under W^X enforcement.
+
+[Install]
+WantedBy=multi-user.target
