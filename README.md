@@ -119,6 +119,12 @@ curl -s        -H "Authorization: Bearer $TOKEN" localhost:8080/sessions
 
 Attach to a session from a shell on the host: `screen -r <screen>`.
 
+### From iPhone / Apple Watch (Shortcuts)
+
+You can start, list, and stop sessions from the Apple **Shortcuts** app — each is
+a one-action `Get Contents of URL` call to the public endpoint with the bearer
+token. See [`docs/apple-shortcut.md`](docs/apple-shortcut.md).
+
 ## crctl (local CLI)
 
 ```sh
