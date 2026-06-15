@@ -17,6 +17,7 @@ import (
 
 	"claude-remote-api/internal/cloud"
 	"claude-remote-api/internal/session"
+	"claude-remote-api/internal/store"
 )
 
 func main() {
@@ -130,8 +131,29 @@ func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome stri
 		MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
 	}
 
+	// Durable session mirror + ledger. Best-effort: on failure the reconciler
+	// falls back to its in-memory grace clock (mirror is dropped).
+	dbPath := envOr("CLAUDE_REMOTE_DB", defaultDBPath())
+	if db, err := store.Open(dbPath); err != nil {
+		logger.Warn("session_store_disabled", "reason", "open failed", "path", dbPath, "error", err.Error())
+	} else {
+		rec.Store = db
+		logger.Info("session_store_enabled", "path", dbPath)
+	}
+
 	logger.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
 	go rec.Run(context.Background())
+}
+
+// defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
+// /code-remote.db.
+func defaultDBPath() string {
+	dir := os.Getenv("XDG_DATA_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dir, "code-remote", "code-remote.db")
 }
 
 // newHandler builds the fully-wired HTTP handler (audit log + routes + bearer

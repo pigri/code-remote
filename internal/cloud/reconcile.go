@@ -46,8 +46,25 @@ type Reconciler struct {
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
 
-	mu   sync.Mutex
-	seen map[string]time.Time // local session id -> first observed archived
+	// Store persists the session mirror and the archive grace clock. Optional:
+	// defaults to an in-memory store (grace clock only, lost on restart).
+	Store Store
+
+	muStore  sync.Mutex
+	defStore Store
+}
+
+// store returns the configured Store, or a lazily-created in-memory one.
+func (r *Reconciler) store() Store {
+	if r.Store != nil {
+		return r.Store
+	}
+	r.muStore.Lock()
+	defer r.muStore.Unlock()
+	if r.defStore == nil {
+		r.defStore = newMemStore()
+	}
+	return r.defStore
 }
 
 // Run reconciles once immediately, then on every tick until ctx is cancelled.
@@ -87,32 +104,25 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		return
 	}
 
-	archivedBridge := map[string]bool{}  // server id -> archived
-	archivedTitle := map[titleKey]bool{} // title+cwd -> all archived
-	activeTitle := map[titleKey]bool{}   // title+cwd has a non-archived counterpart
+	cloudByBridge := map[string]Session{} // server id -> session
+	archivedTitle := map[titleKey]bool{}  // title+cwd -> all counterparts archived
+	activeTitle := map[titleKey]bool{}    // title+cwd has a non-archived counterpart
 	for _, s := range remote {
-		if s.ID != "" && s.IsArchivedSession() {
-			archivedBridge[s.ID] = true
+		if s.ID != "" {
+			cloudByBridge[s.ID] = s
 		}
 		if !r.MatchTitle || s.Title == "" {
 			continue
 		}
 		k := titleKey{s.Title, s.Cwd()}
 		if s.IsArchivedSession() {
-			if _, seen := activeTitle[k]; !seen {
+			if !activeTitle[k] {
 				archivedTitle[k] = true
 			}
 		} else {
 			activeTitle[k] = true
 			delete(archivedTitle, k)
 		}
-	}
-	if len(archivedBridge) == 0 && len(archivedTitle) == 0 {
-		// Nothing archived -> every grace clock resets.
-		r.mu.Lock()
-		r.seen = nil
-		r.mu.Unlock()
-		return
 	}
 
 	regs, err := r.Manager.Registrations()
@@ -132,62 +142,74 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		return
 	}
 
-	// Collect owned screens the server considers archived.
-	type candidate struct {
-		ls    session.Session
-		match string
-	}
-	var candidates []candidate
-	for _, ls := range local {
-		switch {
-		case bridgeByID[ls.ID] != "" && archivedBridge[bridgeByID[ls.ID]]:
-			candidates = append(candidates, candidate{ls, "bridge_id"})
-		case r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwdByID[ls.ID]}]:
-			candidates = append(candidates, candidate{ls, "title_cwd"})
-		}
-	}
-
 	now := time.Now
 	if r.Now != nil {
 		now = r.Now
 	}
 	nowT := now()
+	st := r.store()
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.seen == nil {
-		r.seen = map[string]time.Time{}
-	}
+	for _, ls := range local {
+		cwd := cwdByID[ls.ID]
+		bridge := bridgeByID[ls.ID]
 
-	current := make(map[string]bool, len(candidates))
-	for _, c := range candidates {
-		current[c.ls.ID] = true
-		first, ok := r.seen[c.ls.ID]
+		// Determine the server view + whether (and how) it's an archive target.
+		var cloudStatus, connStatus, match string
+		archived := false
+		if bridge != "" {
+			if cs, ok := cloudByBridge[bridge]; ok {
+				cloudStatus, connStatus = cs.SessionStatus, cs.ConnectionStatus
+				if cs.IsArchivedSession() {
+					archived, match = true, "bridge_id"
+				}
+			}
+		}
+		if !archived && r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwd}] {
+			archived, match = true, "title_cwd"
+			if cloudStatus == "" {
+				cloudStatus = "archived"
+			}
+		}
+
+		// Mirror the joined view.
+		if err := st.UpsertSession(SessionRecord{
+			UUID: ls.ID, Screen: ls.Screen, Title: ls.Title, Cwd: cwd,
+			LocalStatus: ls.Status, CloudStatus: cloudStatus, ConnectionStatus: connStatus,
+			BridgeSessionID: bridge, CreatedAt: ls.CreatedAt, Archived: archived,
+		}); err != nil {
+			r.Log.Warn("session_sync", "phase", "mirror", "id", ls.ID, "error", err.Error())
+		}
+
+		if !archived {
+			_ = st.ClearArchiveClock(ls.ID)
+			continue
+		}
+
+		// Grace: quit only after observed archived for >= Grace.
+		first, ok, ferr := st.FirstSeenArchived(ls.ID)
+		if ferr != nil {
+			r.Log.Warn("session_sync", "phase", "grace", "id", ls.ID, "error", ferr.Error())
+			continue
+		}
 		if !ok {
-			r.seen[c.ls.ID] = nowT
 			first = nowT
+			_ = st.SetFirstSeenArchived(ls.ID, nowT)
 		}
 		if waited := nowT.Sub(first); waited < r.Grace {
-			r.Log.Info("archive_pending", "id", c.ls.ID, "title", c.ls.Title,
+			r.Log.Info("archive_pending", "id", ls.ID, "title", ls.Title,
 				"remaining", (r.Grace - waited).Round(time.Second).String())
 			continue
 		}
-		existed, err := r.Manager.Kill(c.ls.ID)
+
+		existed, err := r.Manager.Kill(ls.ID)
 		if err != nil {
-			r.Log.Error("auto_archive", "id", c.ls.ID, "screen", c.ls.Screen, "error", err.Error())
+			r.Log.Error("auto_archive", "id", ls.ID, "screen", ls.Screen, "error", err.Error())
 			continue
 		}
-		delete(r.seen, c.ls.ID)
+		_ = st.MarkArchived(ls.ID, nowT)
 		if existed {
-			r.Log.Info("auto_archive", "id", c.ls.ID, "screen", c.ls.Screen, "title", c.ls.Title,
-				"match", c.match, "reason", "archived_on_server")
-		}
-	}
-
-	// Reset the grace clock for sessions no longer archived (or gone).
-	for id := range r.seen {
-		if !current[id] {
-			delete(r.seen, id)
+			r.Log.Info("auto_archive", "id", ls.ID, "screen", ls.Screen, "title", ls.Title,
+				"match", match, "reason", "archived_on_server")
 		}
 	}
 }
