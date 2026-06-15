@@ -2,6 +2,7 @@
 /crctl
 /server
 /ngrok-forward
+/bin/
 *.exe
 
 # Local env / secrets (only the .example is tracked)
