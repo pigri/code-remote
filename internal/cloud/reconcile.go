@@ -29,6 +29,12 @@ type Reconciler struct {
 	Manager  screenManager
 	Interval time.Duration
 	Log      *slog.Logger
+
+	// MatchTitle enables the title+cwd fallback for sessions that lack a
+	// bridgeSessionId in the local registry (never-bridged empties). It is
+	// off by default because titles are user-mutable (a rename breaks the
+	// join) and not unique; bridgeSessionId is the stable, rename-proof key.
+	MatchTitle bool
 }
 
 // Run reconciles once immediately, then on every tick until ctx is cancelled.
@@ -56,11 +62,11 @@ type titleKey struct{ title, cwd string }
 // ReconcileOnce lists server sessions and quits the screen of any local session
 // the server has archived.
 //
-// The server never exposes our --session-id UUID, so we map server→local two
-// ways: (1) precise — the registry's bridgeSessionId equals the server id;
-// (2) fallback — Title+Cwd match. The fallback only fires when EVERY server
-// session sharing that Title+Cwd is archived, so a session with a live cloud
-// counterpart is never killed.
+// The server never exposes our --session-id UUID, so we map server→local by the
+// registry's bridgeSessionId == server id (stable, rename-proof). When
+// MatchTitle is set, sessions lacking a bridgeSessionId fall back to a Title+Cwd
+// match that only fires when EVERY server session sharing that Title+Cwd is
+// archived, so a session with a live cloud counterpart is never killed.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	remote, err := r.Cloud.List(ctx)
 	if err != nil {
@@ -75,7 +81,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		if s.ID != "" && s.IsArchivedSession() {
 			archivedBridge[s.ID] = true
 		}
-		if s.Title == "" {
+		if !r.MatchTitle || s.Title == "" {
 			continue
 		}
 		k := titleKey{s.Title, s.Cwd()}
@@ -113,7 +119,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		match := ""
 		if bid := bridgeByID[ls.ID]; bid != "" && archivedBridge[bid] {
 			match = "bridge_id"
-		} else if ls.Title != "" && archivedTitle[titleKey{ls.Title, cwdByID[ls.ID]}] {
+		} else if r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwdByID[ls.ID]}] {
 			match = "title_cwd"
 		}
 		if match == "" {

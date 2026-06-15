@@ -152,11 +152,26 @@ func TestReconcileQuitsArchivedByTitleCwd(t *testing.T) {
 			{SessionID: "uuid-keep", Cwd: "/repo"},
 		},
 	}
-	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), MatchTitle: true}
 	r.ReconcileOnce(context.Background())
 
 	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-arch" {
 		t.Fatalf("killed = %v, want [uuid-arch]", mgr.killed)
+	}
+}
+
+// Title matching is off by default: a title-only archived match (no bridge id)
+// must NOT be quit, since titles are mutable.
+func TestReconcileTitleIgnoredByDefault(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{archived("test-2", "/repo")}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-arch", Title: "test-2"}},
+		regs:     []session.Registration{{SessionID: "uuid-arch", Cwd: "/repo"}}, // no bridge id
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()} // MatchTitle defaults false
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (title match off by default)", mgr.killed)
 	}
 }
 
@@ -186,7 +201,7 @@ func TestReconcileSkipsWhenActiveCounterpartExists(t *testing.T) {
 		sessions: []session.Session{{ID: "uuid-dup", Title: "dup"}},
 		regs:     []session.Registration{{SessionID: "uuid-dup", Cwd: "/repo"}},
 	}
-	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), MatchTitle: true}
 	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed = %v, want none (active counterpart exists)", mgr.killed)
@@ -200,7 +215,7 @@ func TestReconcileTitleRequiresMatchingCwd(t *testing.T) {
 		sessions: []session.Session{{ID: "uuid-1", Title: "same"}},
 		regs:     []session.Registration{{SessionID: "uuid-1", Cwd: "/repo"}},
 	}
-	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), MatchTitle: true}
 	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed = %v, want none (cwd mismatch)", mgr.killed)

@@ -89,6 +89,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
 | `CLAUDE_REMOTE_CREDENTIALS` | `$CLAUDE_HOME/.credentials.json` | OAuth credentials file (token source for the Sessions API) |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
+| `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
 
 ## API
 
@@ -176,11 +177,14 @@ msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
 - Disable with `CLAUDE_REMOTE_SESSION_SYNC=off`.
 
 > The server never exposes our `--session-id` UUID, so local screens are joined
-> to server sessions by **title + cwd** (and by the registry's `bridgeSessionId`
-> when it's populated). The title+cwd fallback only fires when *every* server
-> session sharing that title+cwd is archived, so a session with a live
-> counterpart is never quit. The API shape (`session_status`, `session_context`)
-> isn't a documented contract and may change across versions.
+> to server sessions by the registry's **`bridgeSessionId` == server `id`** — a
+> stable, rename-proof key (a session's `bridgeSessionId` doesn't change when you
+> rename it). Sessions that never bridged have a `null` bridge id; those are
+> matched only if you opt in with `CLAUDE_REMOTE_MATCH_TITLE=on`, which falls
+> back to **title + cwd** (mutable, so off by default) and only fires when
+> *every* server session sharing that title+cwd is archived. The API shape
+> (`session_status`, `session_context`, `bridgeSessionId`) isn't a documented
+> contract and may change across versions.
 
 ## crctl (local CLI)
 
