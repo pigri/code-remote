@@ -161,9 +161,13 @@ msg=session_delete remote=127.0.0.1 id=<uuid> existed=true
 host running the screens — so the server is the only source of truth. Every
 `CLAUDE_REMOTE_SYNC_INTERVAL` (default **30s**) the server polls the Anthropic
 Sessions API (`GET /v1/sessions`), and for any session reporting
-`session_status: archived` it quits the matching local `screen`. It only ever
-touches screens this service owns (prefix-scoped); unrelated screens are never
-affected. Each action is audit-logged:
+`session_status: archived` it quits the matching local `screen`. A **deleted**
+session is handled too: it drops out of the list entirely, so for any owned
+session missing from the page the reconciler confirms via `GET /v1/sessions/{id}`
+— a **404** means deleted (quit it; `reason=deleted_on_server`), a **200** uses
+the real status (this also catches archived sessions beyond the list's 100-item
+page). It only ever touches screens this service owns (prefix-scoped); unrelated
+screens are never affected. Each action is audit-logged:
 
 ```
 msg=session_sync_enabled interval=30s credentials=/home/you/.claude/.credentials.json
