@@ -12,23 +12,27 @@ INSTALL  ?= install
 VERSION  ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
 DEB_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 
-SRV_SRC := $(filter-out %_test.go,$(wildcard *.go))
+# All non-test Go sources (incl. internal/) so a change anywhere triggers a
+# rebuild. The targets are also .PHONY: go's build cache keeps this cheap, and
+# it avoids stale binaries when only internal packages change.
+GO_SRC := $(shell find . -name '*.go' -not -name '*_test.go') go.mod go.sum
 
-.PHONY: all build install uninstall deploy deb test vet fmt tidy clean
+.PHONY: all build install uninstall deploy deb test vet fmt tidy clean \
+        $(BINDIR)/claude-remote-api $(BINDIR)/crctl $(BINDIR)/ngrok-forward
 
 all: build
 
 build: $(BINDIR)/claude-remote-api $(BINDIR)/crctl $(BINDIR)/ngrok-forward
 
-$(BINDIR)/claude-remote-api: $(SRV_SRC) go.mod
+$(BINDIR)/claude-remote-api: $(GO_SRC)
 	@mkdir -p $(BINDIR)
 	$(GO) build -o $@ .
 
-$(BINDIR)/crctl: cmd/crctl/main.go go.mod go.sum
+$(BINDIR)/crctl: $(GO_SRC)
 	@mkdir -p $(BINDIR)
 	$(GO) build -o $@ ./cmd/crctl
 
-$(BINDIR)/ngrok-forward: cmd/ngrok-forward/main.go go.mod go.sum
+$(BINDIR)/ngrok-forward: $(GO_SRC)
 	@mkdir -p $(BINDIR)
 	$(GO) build -o $@ ./cmd/ngrok-forward
 
