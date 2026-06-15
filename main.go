@@ -112,9 +112,15 @@ func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome stri
 		BaseURL:         envOr("CLAUDE_REMOTE_CLOUD_BASE", cloud.DefaultBaseURL),
 		CredentialsPath: credsPath,
 	}
-	rec := &cloud.Reconciler{Cloud: client, Manager: mgr, Interval: interval, Log: logger}
+	rec := &cloud.Reconciler{
+		Cloud:      client,
+		Manager:    mgr,
+		Interval:   interval,
+		Log:        logger,
+		MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
+	}
 
-	logger.Info("session_sync_enabled", "interval", interval.String(), "credentials", credsPath)
+	logger.Info("session_sync_enabled", "interval", interval.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
 	go rec.Run(context.Background())
 }
 
