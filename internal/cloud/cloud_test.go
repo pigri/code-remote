@@ -119,9 +119,25 @@ func TestArchivePostsToCorrectPath(t *testing.T) {
 type fakeCloud struct {
 	sessions []Session
 	err      error
+	// getNotFound: server ids that Get should report as 404 (deleted), even
+	// though they're absent from the list.
+	getNotFound map[string]bool
 }
 
 func (f *fakeCloud) List(context.Context) ([]Session, error) { return f.sessions, f.err }
+
+func (f *fakeCloud) Get(_ context.Context, id string) (Session, bool, error) {
+	for _, s := range f.sessions {
+		if s.ID == id {
+			return s, true, nil
+		}
+	}
+	if f.getNotFound[id] {
+		return Session{}, false, nil
+	}
+	// Unknown id with no explicit verdict: treat as still-present (safe).
+	return Session{ID: id, SessionStatus: "idle"}, true, nil
+}
 
 type fakeManager struct {
 	sessions []session.Session
@@ -173,6 +189,38 @@ func TestReconcileTitleIgnoredByDefault(t *testing.T) {
 	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed = %v, want none (title match off by default)", mgr.killed)
+	}
+}
+
+// Deleted session: bridge id absent from the list and 404 on Get -> quit.
+func TestReconcileQuitsDeletedSession(t *testing.T) {
+	cloudCl := &fakeCloud{
+		sessions:    []Session{}, // session no longer listed
+		getNotFound: map[string]bool{"session_gone": true},
+	}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_gone"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-1" {
+		t.Fatalf("killed = %v, want [uuid-1] (deleted)", mgr.killed)
+	}
+}
+
+// Bridge id missing from the list but Get says it still exists (pagination) and
+// is not archived -> must NOT quit.
+func TestReconcileMissingButAliveNotQuit(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{}} // not listed; Get returns idle (default)
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_paged"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (still alive via Get)", mgr.killed)
 	}
 }
 
