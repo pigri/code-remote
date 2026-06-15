@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-remote ngrok edge (reserved domain -> Synapse :8080)
+After=code-remote-synapse.service network-online.target
+Wants=code-remote-synapse.service network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/work/private/claude-code-remote/.env
+ExecStart=%h/.local/share/code-remote/ngrok-forward
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -196,6 +196,27 @@ rules see `127.0.0.1` — the content/method/path rules carry the protection.
 > The Synapse configs were authored against its documented schema but not run
 > here; validate them against your installed Synapse version.
 
+### Persistent deploy (systemd --user)
+
+For a durable, boot-surviving deploy, three `--user` units in
+[`deploy/systemd/`](deploy/systemd/) run the stack (API → Synapse → ngrok),
+all reading `.env` via `EnvironmentFile`:
+
+```sh
+go build -o ~/.local/share/code-remote/claude-remote-api .
+go build -o ~/.local/share/code-remote/ngrok-forward ./cmd/ngrok-forward
+chmod +x deploy/render-config.sh
+
+sudo loginctl enable-linger "$USER"          # run without an active login
+cp deploy/systemd/code-remote-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now code-remote-{api,synapse,ngrok}.service
+```
+
+The synapse unit's `ExecStartPre` runs `render-config.sh`, which substitutes
+`NGROK_DOMAIN` into the upstreams host at start. Note `CLAUDE_BIN` must be an
+absolute path in `.env` — systemd's PATH doesn't include `~/.local/bin`.
+
 ## Security notes
 
 - The token is checked in constant time; the server is fail-closed (won't start
