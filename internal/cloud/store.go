@@ -35,6 +35,10 @@ type Store interface {
 	ClearArchiveClock(id string) error
 	// MarkArchived records that the session's screen was quit, clearing the clock.
 	MarkArchived(id string, t time.Time) error
+	// LastBridge returns the most recently recorded bridge session id for a
+	// local session, or "" if unknown. Used to confirm deletion after the live
+	// registry has reset bridgeSessionId to null.
+	LastBridge(id string) (string, error)
 }
 
 // memStore is the default in-process Store: it tracks the grace clock and drops
@@ -70,3 +74,5 @@ func (m *memStore) ClearArchiveClock(id string) error {
 }
 
 func (m *memStore) MarkArchived(id string, _ time.Time) error { return m.ClearArchiveClock(id) }
+
+func (m *memStore) LastBridge(string) (string, error) { return "", nil }

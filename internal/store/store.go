@@ -126,6 +126,19 @@ func (d *DB) MarkArchived(id string, t time.Time) error {
 	return d.logEvent(id, "auto_archive", "")
 }
 
+// LastBridge returns the most recently recorded bridge session id for a session.
+func (d *DB) LastBridge(id string) (string, error) {
+	var b sql.NullString
+	err := d.db.QueryRow(`SELECT bridge_session_id FROM sessions WHERE uuid=?`, id).Scan(&b)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return b.String, nil
+}
+
 func (d *DB) logEvent(uuid, kind, detail string) error {
 	_, err := d.db.Exec(`INSERT INTO events (uuid, kind, detail, at) VALUES (?, ?, ?, ?)`,
 		uuid, kind, detail, time.Now().Unix())
