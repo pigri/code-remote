@@ -15,6 +15,7 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+          cache: false # no external deps / go.sum — nothing to cache
 
       - name: gofmt
         run: |

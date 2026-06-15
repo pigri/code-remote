@@ -80,3 +80,55 @@ func TestListEmptyOK(t *testing.T) {
 		t.Errorf("content-type = %q, want application/json", ct)
 	}
 }
+
+// TestAuthCannotBeBypassed asserts that every protected route requires the
+// exact bearer token regardless of method, auth scheme, or path tricks, and
+// that the only unauthenticated surface is the non-sensitive /healthz handler.
+func TestAuthCannotBeBypassed(t *testing.T) {
+	h := testHandler()
+	const validID = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	cases := []struct {
+		name, method, path, auth string
+		want                     int
+	}{
+		// Mutating routes must never be reachable without the token.
+		{"create no token", http.MethodPost, "/sessions", "", http.StatusUnauthorized},
+		{"delete no token", http.MethodDelete, "/sessions/" + validID, "", http.StatusUnauthorized},
+		{"list no token", http.MethodGet, "/sessions", "", http.StatusUnauthorized},
+
+		// Wrong credentials / schemes.
+		{"empty bearer", http.MethodGet, "/sessions", "Bearer ", http.StatusUnauthorized},
+		{"wrong token", http.MethodGet, "/sessions", "Bearer wrong", http.StatusUnauthorized},
+		{"lowercase scheme", http.MethodGet, "/sessions", "bearer " + testToken, http.StatusUnauthorized},
+		{"basic scheme", http.MethodGet, "/sessions", "Basic " + testToken, http.StatusUnauthorized},
+		{"token without scheme", http.MethodGet, "/sessions", testToken, http.StatusUnauthorized},
+		{"token with junk prefix", http.MethodGet, "/sessions", "X Bearer " + testToken, http.StatusUnauthorized},
+
+		// /healthz exemption must not leak to protected paths via path tricks.
+		{"healthz traversal", http.MethodGet, "/healthz/../sessions", "", http.StatusUnauthorized},
+		{"healthz prefix", http.MethodGet, "/healthzz", "", http.StatusUnauthorized},
+		{"healthz subpath", http.MethodGet, "/healthz/sessions", "", http.StatusUnauthorized},
+		{"double slash healthz", http.MethodGet, "//healthz", "", http.StatusUnauthorized},
+		{"uppercase healthz", http.MethodGet, "/Healthz", "", http.StatusUnauthorized},
+
+		// Unknown routes are still gated (no existence oracle without auth).
+		{"unknown route", http.MethodGet, "/admin", "", http.StatusUnauthorized},
+
+		// Positive controls.
+		{"correct token", http.MethodGet, "/sessions", "Bearer " + testToken, http.StatusOK},
+		{"healthz is exempt", http.MethodGet, "/healthz", "", http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(c.method, c.path, nil)
+			if c.auth != "" {
+				req.Header.Set("Authorization", c.auth)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != c.want {
+				t.Errorf("%s %s [auth=%q] = %d, want %d", c.method, c.path, c.auth, rr.Code, c.want)
+			}
+		})
+	}
+}
