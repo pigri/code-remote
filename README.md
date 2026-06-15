@@ -1,8 +1,9 @@
 # code-remote
 
-A small REST API (Go, stdlib only) that launches detached [Claude Code](https://claude.com/claude-code)
+A small REST API (Go) that launches detached [Claude Code](https://claude.com/claude-code)
 sessions inside GNU `screen` and lets you drive them remotely — plus `crctl`, a
-local CLI to list/start/stop them.
+local CLI to list/start/stop them. The API and `crctl` are dependency-free
+(stdlib only); the optional `ngrok-forward` helper uses the ngrok Go SDK.
 
 Each session is pinned to a UUID passed as both `--session-id` and
 `--remote-control`, and that same UUID is the `screen` session name suffix. So
@@ -34,8 +35,9 @@ screen -dmS <prefix>-<uuid> claude --session-id <uuid> --remote-control <uuid>
 ## Build
 
 ```sh
-go build -o claude-remote-api .        # the API server
-go build -o crctl ./cmd/crctl          # the local CLI
+go build -o claude-remote-api .                       # the API server
+go build -o crctl ./cmd/crctl                         # the local CLI
+go build -o ngrok-forward ./cmd/ngrok-forward         # optional: ngrok tunnel (Go SDK)
 ```
 
 ## Run the server
@@ -152,8 +154,10 @@ Internet
 | `8080` | localhost | Synapse WAF (the only port ngrok forwards to) |
 | `9000` | `127.0.0.1` | the API (Synapse is its only client) |
 
-Configs live in [`deploy/`](deploy/): `ngrok.yml`, `synapse/config.yaml`,
-`synapse/upstreams.yaml`, `synapse/security_rules.yaml`.
+Synapse configs live in [`deploy/synapse/`](deploy/synapse/) (`config.yaml`,
+`upstreams.yaml`, `security_rules.yaml`). The ngrok tunnel is the `ngrok-forward`
+helper (ngrok Go SDK) — it forwards the reserved domain to Synapse, so the WAF
+stays in the path.
 
 Run (three processes):
 
@@ -166,8 +170,9 @@ CLAUDE_REMOTE_API_ADDR=127.0.0.1:9000 ./claude-remote-api
 synapse --mode proxy -c deploy/synapse/config.yaml \
         --security-rules-config deploy/synapse/security_rules.yaml
 
-# 3) ngrok edge -> :8080
-ngrok start --config deploy/ngrok.yml claude-remote
+# 3) ngrok tunnel (Go SDK) -> :8080 (Synapse). Default upstream is
+#    http://localhost:8080, so traffic goes THROUGH the WAF.
+NGROK_AUTHTOKEN=<token> NGROK_DOMAIN=your-domain.ngrok.dev ./ngrok-forward
 ```
 
 The WAF blocks SQLi/XSS markers, path traversal/dotfile probes, oversized POSTs,

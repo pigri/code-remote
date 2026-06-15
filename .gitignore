@@ -1,7 +1,7 @@
-# Built binaries
 /claude-remote-api
 /crctl
 /server
+/ngrok-forward
 *.exe
 
 # Local env / secrets (only the .example is tracked)
