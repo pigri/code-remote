@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"claude-remote-api/internal/session"
@@ -14,7 +17,7 @@ func testHandler() http.Handler {
 	// ScreenBin/ClaudeHome empty: List shells out to a missing binary, the
 	// error is ignored, and it returns an empty list — enough to exercise
 	// routing/auth/validation without needing screen installed.
-	return newHandler(testToken, &session.Manager{Prefix: "test-rc"})
+	return newHandler(testToken, &session.Manager{Prefix: "test-rc"}, nil)
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string) *httptest.ResponseRecorder {
@@ -132,5 +135,33 @@ func TestAuthCannotBeBypassed(t *testing.T) {
 				t.Errorf("%s %s [auth=%q] = %d, want %d", c.method, c.path, c.auth, rr.Code, c.want)
 			}
 		})
+	}
+}
+
+// TestAuditLog asserts the audit trail records both rejected and accepted
+// requests, never leaks the bearer token, and tags the auth outcome.
+func TestAuditLog(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	h := newHandler(testToken, &session.Manager{Prefix: "test-rc"}, logger)
+
+	// A denied attempt and an accepted one.
+	do(t, h, http.MethodGet, "/sessions", "wrong")
+	do(t, h, http.MethodGet, "/sessions", testToken)
+
+	out := buf.String()
+	if strings.Contains(out, testToken) {
+		t.Fatalf("audit log leaked the bearer token:\n%s", out)
+	}
+	for _, want := range []string{
+		`"path":"/sessions"`,
+		`"status":401`,
+		`"auth":"denied"`,
+		`"status":200`,
+		`"auth":"ok"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("audit log missing %s\ngot:\n%s", want, out)
+		}
 	}
 }

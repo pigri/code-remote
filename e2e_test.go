@@ -52,7 +52,7 @@ func TestE2ELifecycle(t *testing.T) {
 		}
 	})
 
-	ts := httptest.NewServer(newHandler(e2eToken, mgr))
+	ts := httptest.NewServer(newHandler(e2eToken, mgr, nil))
 	defer ts.Close()
 
 	// create
@@ -114,7 +114,7 @@ func TestE2ELifecycle(t *testing.T) {
 
 func TestE2EAuthRequired(t *testing.T) {
 	mgr := &session.Manager{Prefix: "crapi-e2e-auth"}
-	ts := httptest.NewServer(newHandler(e2eToken, mgr))
+	ts := httptest.NewServer(newHandler(e2eToken, mgr, nil))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/sessions") // no Authorization header

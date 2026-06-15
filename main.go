@@ -3,7 +3,10 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,25 +49,42 @@ func main() {
 
 	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome}
 
+	logger := auditLogger()
+
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(token, mgr),
+		Handler:           newHandler(token, mgr, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("claude-remote-api listening on %s (session prefix %q)", addr, prefix)
+	logger.Info("starting", "addr", addr, "prefix", prefix)
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// newHandler builds the fully-wired HTTP handler (routes + bearer auth) for the
-// given session manager. Shared by main() and the e2e tests.
-func newHandler(token string, mgr *session.Manager) http.Handler {
-	srv := &server{mgr: mgr}
+// auditLogger builds the structured logger used for the audit trail.
+// CLAUDE_REMOTE_LOG_FORMAT=json emits JSON (one object per line) for log
+// shippers; anything else (default) emits human-readable key=value text.
+func auditLogger() *slog.Logger {
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	var h slog.Handler = slog.NewTextHandler(os.Stdout, opts)
+	if strings.EqualFold(envOr("CLAUDE_REMOTE_LOG_FORMAT", "text"), "json") {
+		h = slog.NewJSONHandler(os.Stdout, opts)
+	}
+	return slog.New(h)
+}
+
+// newHandler builds the fully-wired HTTP handler (audit log + routes + bearer
+// auth) for the given session manager. Shared by main() and the e2e tests.
+func newHandler(token string, mgr *session.Manager, logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	srv := &server{mgr: mgr, log: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -73,17 +93,22 @@ func newHandler(token string, mgr *session.Manager) http.Handler {
 	mux.HandleFunc("GET /sessions", srv.list)
 	mux.HandleFunc("GET /sessions/{id}", srv.get)
 	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
-	return authMiddleware(token, mux)
+	return auditMiddleware(logger, authMiddleware(token, mux))
 }
 
-type server struct{ mgr *session.Manager }
+type server struct {
+	mgr *session.Manager
+	log *slog.Logger
+}
 
-func (s *server) create(w http.ResponseWriter, _ *http.Request) {
+func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.mgr.Create()
 	if err != nil {
+		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error())
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
@@ -125,13 +150,16 @@ func (s *server) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	existed, err := s.mgr.Kill(id)
 	if err != nil {
+		s.log.Error("session_delete", "remote", clientIP(r), "id", id, "error", err.Error())
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !existed {
+		s.log.Info("session_delete", "remote", clientIP(r), "id", id, "existed", false)
 		writeErr(w, http.StatusNotFound, "session not found")
 		return
 	}
+	s.log.Info("session_delete", "remote", clientIP(r), "id", id, "existed", true)
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "stopped"})
 }
 
@@ -151,6 +179,64 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// auditMiddleware emits one structured audit line per request — including
+// rejected ones — capturing method, path, response status, latency, client IP,
+// and the auth outcome. It is the outermost wrapper so unauthorized attempts
+// (401s from authMiddleware) are logged too. The bearer token is never logged.
+func auditMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+
+		auth := "ok"
+		switch {
+		case r.URL.Path == "/healthz":
+			auth = "n/a"
+		case rec.status == http.StatusUnauthorized:
+			auth = "denied"
+		}
+
+		attrs := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"dur_ms", time.Since(start).Milliseconds(),
+			"remote", clientIP(r),
+			"auth", auth,
+		}
+		if ff := r.Header.Get("X-Forwarded-For"); ff != "" {
+			attrs = append(attrs, "forwarded_for", ff)
+		}
+		logger.Info("request", attrs...)
+	})
+}
+
+// statusRecorder captures the response status code for the audit log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rec *statusRecorder) WriteHeader(code int) {
+	rec.status = code
+	rec.ResponseWriter.WriteHeader(code)
+}
+
+// clientIP is the request's source address without the port. Behind ngrok +
+// Synapse this is 127.0.0.1; the real client is in the X-Forwarded-For header
+// (logged separately, and only as trustworthy as the upstream that set it).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
