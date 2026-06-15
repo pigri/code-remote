@@ -153,6 +153,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	for _, ls := range local {
 		cwd := cwdByID[ls.ID]
 		bridge := bridgeByID[ls.ID]
+		// A deleted session's live registry resets bridgeSessionId to null;
+		// fall back to the last-known bridge id so we can still confirm it.
+		if bridge == "" {
+			if lb, lerr := st.LastBridge(ls.ID); lerr == nil && lb != "" {
+				bridge = lb
+			}
+		}
 
 		// Determine the server view + whether (and how) it's a quit target.
 		// quit covers both archived and deleted (404) sessions.

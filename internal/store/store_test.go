@@ -79,6 +79,15 @@ type fakeCloud struct{ sessions []cloud.Session }
 
 func (f *fakeCloud) List(context.Context) ([]cloud.Session, error) { return f.sessions, nil }
 
+func (f *fakeCloud) Get(_ context.Context, id string) (cloud.Session, bool, error) {
+	for _, s := range f.sessions {
+		if s.ID == id {
+			return s, true, nil
+		}
+	}
+	return cloud.Session{}, false, nil
+}
+
 type fakeManager struct {
 	sessions []session.Session
 	regs     []session.Registration
@@ -122,5 +131,31 @@ func TestReconcilerWithSQLiteStorePersistsGrace(t *testing.T) {
 	}
 	if rows, _ := d.AllSessions(); !rows[0].ArchivedAt.Valid {
 		t.Error("archived_at should be recorded after auto-quit")
+	}
+}
+
+// A deleted session resets the live registry's bridgeSessionId to null; the
+// store's last-known bridge id lets us still confirm the 404 and quit.
+func TestReconcileDeletedViaStoredBridge(t *testing.T) {
+	d := openTemp(t)
+	// Seed the mirror with the bridge id from before deletion.
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: "u1", Screen: "p-u1", BridgeSessionID: "session_gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge("u1"); b != "session_gone" {
+		t.Fatalf("LastBridge = %q, want session_gone", b)
+	}
+
+	cl := &fakeCloud{sessions: nil} // empty list; Get returns not-found (deleted)
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "u1", Screen: "p-u1"}},
+		regs:     []session.Registration{{SessionID: "u1", BridgeSessionID: ""}}, // live registry reset to null
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r := &cloud.Reconciler{Cloud: cl, Manager: mgr, Log: logger, Store: d} // Grace 0
+
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 1 || mgr.killed[0] != "u1" {
+		t.Fatalf("killed = %v, want [u1] (deleted via stored bridge)", mgr.killed)
 	}
 }
