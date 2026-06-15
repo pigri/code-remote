@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"claude-remote-api/internal/session"
 )
 
 const testToken = "secret-test-token"
@@ -12,7 +14,7 @@ func testHandler() http.Handler {
 	// ScreenBin/ClaudeHome empty: List shells out to a missing binary, the
 	// error is ignored, and it returns an empty list — enough to exercise
 	// routing/auth/validation without needing screen installed.
-	return newHandler(testToken, &Manager{Prefix: "test-rc"})
+	return newHandler(testToken, &session.Manager{Prefix: "test-rc"})
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string) *httptest.ResponseRecorder {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"claude-remote-api/internal/session"
 )
 
 func main() {
@@ -42,7 +44,7 @@ func main() {
 		}
 	}
 
-	mgr := &Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome}
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome}
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -61,7 +63,7 @@ func main() {
 
 // newHandler builds the fully-wired HTTP handler (routes + bearer auth) for the
 // given session manager. Shared by main() and the e2e tests.
-func newHandler(token string, mgr *Manager) http.Handler {
+func newHandler(token string, mgr *session.Manager) http.Handler {
 	srv := &server{mgr: mgr}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -74,7 +76,7 @@ func newHandler(token string, mgr *Manager) http.Handler {
 	return authMiddleware(token, mux)
 }
 
-type server struct{ mgr *Manager }
+type server struct{ mgr *session.Manager }
 
 func (s *server) create(w http.ResponseWriter, _ *http.Request) {
 	sess, err := s.mgr.Create()
@@ -92,7 +94,7 @@ func (s *server) list(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	if sessions == nil {
-		sessions = []Session{}
+		sessions = []session.Session{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }

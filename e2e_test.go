@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"claude-remote-api/internal/session"
 )
 
 const e2eToken = "e2e-token"
@@ -41,7 +43,7 @@ func TestE2ELifecycle(t *testing.T) {
 	}
 
 	prefix := fmt.Sprintf("crapi-e2e-%d", os.Getpid())
-	mgr := &Manager{Prefix: prefix, ClaudeBin: stub, ScreenBin: screenBin, ClaudeHome: home}
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: stub, ScreenBin: screenBin, ClaudeHome: home}
 	t.Cleanup(func() {
 		if ss, _ := mgr.List(); ss != nil {
 			for _, s := range ss {
@@ -54,7 +56,7 @@ func TestE2ELifecycle(t *testing.T) {
 	defer ts.Close()
 
 	// create
-	var created Session
+	var created session.Session
 	if code := req(t, ts, http.MethodPost, "/sessions", &created); code != http.StatusCreated {
 		t.Fatalf("POST /sessions = %d", code)
 	}
@@ -67,7 +69,7 @@ func TestE2ELifecycle(t *testing.T) {
 
 	// list contains it
 	var listed struct {
-		Sessions []Session `json:"sessions"`
+		Sessions []session.Session `json:"sessions"`
 	}
 	if code := req(t, ts, http.MethodGet, "/sessions", &listed); code != http.StatusOK {
 		t.Fatalf("GET /sessions = %d", code)
@@ -77,7 +79,7 @@ func TestE2ELifecycle(t *testing.T) {
 	}
 
 	// title (written by the stub) propagates through to GET
-	var got Session
+	var got session.Session
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		req(t, ts, http.MethodGet, "/sessions/"+created.ID, &got)
@@ -111,7 +113,7 @@ func TestE2ELifecycle(t *testing.T) {
 }
 
 func TestE2EAuthRequired(t *testing.T) {
-	mgr := &Manager{Prefix: "crapi-e2e-auth"}
+	mgr := &session.Manager{Prefix: "crapi-e2e-auth"}
 	ts := httptest.NewServer(newHandler(e2eToken, mgr))
 	defer ts.Close()
 
@@ -143,7 +145,7 @@ func req(t *testing.T, ts *httptest.Server, method, path string, out any) int {
 	return resp.StatusCode
 }
 
-func containsID(ss []Session, id string) bool {
+func containsID(ss []session.Session, id string) bool {
 	for _, s := range ss {
 		if s.ID == id {
 			return true

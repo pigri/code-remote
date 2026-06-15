@@ -1,4 +1,7 @@
-package main
+// Package session manages detached claude sessions running inside GNU screen.
+// Shared by the API server and the crctl CLI (which can drive it directly,
+// without the HTTP API).
+package session
 
 import (
 	"crypto/rand"
@@ -29,8 +32,8 @@ type Session struct {
 // "<Prefix>-<uuid>", so it can't see or kill unrelated screens on the host.
 type Manager struct {
 	Prefix     string // e.g. "pigri-dev-remote"
-	ClaudeBin  string // absolute path to the claude binary
-	ScreenBin  string // absolute path to the screen binary
+	ClaudeBin  string // path to the claude binary
+	ScreenBin  string // path to the screen binary
 	ClaudeHome string // ~/.claude (for reading session titles)
 }
 

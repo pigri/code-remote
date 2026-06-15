@@ -100,12 +100,16 @@ crctl new           # start a new session
 crctl rm <id>       # stop a session
 ```
 
-Config:
+By default `crctl` runs **locally** — it drives `screen`/`claude` directly, with
+no API process, token, or URL. Set `CLAUDE_REMOTE_API_URL` to talk to a remote
+API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 
-| Variable | Default | Purpose |
+| Variable | Mode | Purpose |
 | --- | --- | --- |
-| `CLAUDE_REMOTE_API_URL` | `http://127.0.0.1:8080` | API base URL |
-| `CLAUDE_REMOTE_API_TOKEN` | — (**required**) | Bearer token |
+| _(none)_ | local (default) | drive `screen`/`claude` directly on this host |
+| `CLAUDE_REMOTE_API_URL` | remote | API base URL (e.g. `http://127.0.0.1:9000`) |
+| `CLAUDE_REMOTE_API_TOKEN` | remote | bearer token (required when the URL is set) |
+| `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides |
 
 ```
 $ crctl ls
