@@ -91,6 +91,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_CREDENTIALS` | `$CLAUDE_HOME/.credentials.json` | OAuth credentials file (token source for the Sessions API) |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 | `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
+| `CLAUDE_REMOTE_DB` | `$XDG_DATA_HOME/code-remote/code-remote.db` | SQLite session mirror + ledger path |
 
 ## API
 
@@ -181,6 +182,16 @@ msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
   headless server where you've never logged in `claude`), sync logs
   `session_sync_disabled` once and the rest of the API runs normally.
 - Disable with `CLAUDE_REMOTE_SESSION_SYNC=off`.
+
+State is persisted in a **SQLite store** (`CLAUDE_REMOTE_DB`, pure-Go
+`modernc.org/sqlite` so binaries still build with `CGO_ENABLED=0`). Each cycle it
+mirrors every owned session — `uuid, screen, title, cwd, local + cloud status,
+connection status, bridgeSessionId, created_at` — plus the ledger columns
+(`first_seen_archived` grace clock, `archived_at`), and writes an `events` row
+per auto-archive. This makes the grace clock survive restarts and gives a durable
+view/history even after a screen is gone. If the DB can't be opened the
+reconciler logs `session_store_disabled` and falls back to an in-memory grace
+clock (no mirror).
 
 > The server never exposes our `--session-id` UUID, so local screens are joined
 > to server sessions by the registry's **`bridgeSessionId` == server `id`** — a
