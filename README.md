@@ -159,20 +159,32 @@ Synapse configs live in [`deploy/synapse/`](deploy/synapse/) (`config.yaml`,
 helper (ngrok Go SDK) — it forwards the reserved domain to Synapse, so the WAF
 stays in the path.
 
+Config goes in a gitignored `.env` (secrets + your private domain); only
+`deploy/.env.example` is committed:
+
+```sh
+cp deploy/.env.example .env && "$EDITOR" .env   # tokens + NGROK_DOMAIN
+set -a; . ./.env; set +a
+```
+
 Run (three processes):
 
 ```sh
+# Synapse routes by Host header, so render your real domain into the
+# upstreams host (the repo keeps a placeholder):
+sed "s/your-domain.ngrok.dev/$NGROK_DOMAIN/" deploy/synapse/upstreams.yaml \
+  | sudo tee /etc/synapse/upstreams.yaml >/dev/null
+
 # 1) API on an internal port (Synapse is the only thing that reaches it)
-CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24) \
-CLAUDE_REMOTE_API_ADDR=127.0.0.1:9000 ./claude-remote-api
+./claude-remote-api &
 
 # 2) Synapse WAF on :8080 -> API
 synapse --mode proxy -c deploy/synapse/config.yaml \
-        --security-rules-config deploy/synapse/security_rules.yaml
+        --security-rules-config deploy/synapse/security_rules.yaml &
 
-# 3) ngrok tunnel (Go SDK) -> :8080 (Synapse). Default upstream is
-#    http://localhost:8080, so traffic goes THROUGH the WAF.
-NGROK_AUTHTOKEN=<token> NGROK_DOMAIN=your-domain.ngrok.dev ./ngrok-forward
+# 3) ngrok tunnel (Go SDK). Default upstream http://localhost:8080, so
+#    traffic goes THROUGH the WAF.
+./ngrok-forward &
 ```
 
 The WAF blocks SQLi/XSS markers, path traversal/dotfile probes, oversized POSTs,
