@@ -61,6 +61,40 @@ pick-and-kill flow.
 
 ---
 
+## Importable file
+
+Shortcuts are **not JSON** — Apple's format is a property-list (`.shortcut`), and
+iCloud-shared ones are Apple-signed. An **unsigned** one is provided here:
+
+- [`shortcuts/code-remote-new-session.shortcut`](../shortcuts/code-remote-new-session.shortcut)
+  — the New-session flow (POST → read `id` → notification).
+
+**Before editing**, set your values (the file ships with placeholders):
+
+- `https://your-domain.ngrok.dev/sessions` → your real endpoint
+- `Bearer YOUR_TOKEN_HERE` → `Bearer <your CLAUDE_REMOTE_API_TOKEN>`
+
+You can edit those two strings in the file first, or just import and change them
+in the Shortcuts editor (tap the URL field and the `Authorization` header value).
+
+**Import on iPhone/iPad:** AirDrop or email the file to the device, tap it →
+*Add Shortcut*. Unsigned shortcuts require **Settings → Shortcuts → Advanced →
+Allow Untrusted Shortcuts** (the toggle only appears after you've run at least
+one shortcut).
+
+**Import / sign on Mac:**
+
+```sh
+shortcuts sign -m anyone -i shortcuts/code-remote-new-session.shortcut \
+                          -o code-remote-new-session-signed.shortcut
+open code-remote-new-session-signed.shortcut
+```
+
+> Hand-authored shortcut plists are version-sensitive. If import fails on your
+> iOS/macOS version, fall back to the manual recipe above — it's only a few taps.
+
+---
+
 ## What the shortcuts do (curl equivalents)
 
 ```sh
