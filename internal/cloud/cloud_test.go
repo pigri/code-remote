@@ -26,25 +26,21 @@ func writeCreds(t *testing.T, token string) string {
 }
 
 func TestIsArchivedSession(t *testing.T) {
-	tr, fa := true, false
-	at := "2026-06-15T00:00:00Z"
-	empty := ""
 	cases := []struct {
-		name string
-		s    Session
-		want bool
+		status string
+		want   bool
 	}{
-		{"archived true", Session{Archived: &tr}, true},
-		{"archived false", Session{Archived: &fa}, false},
-		{"is_archived true", Session{IsArchived: &tr}, true},
-		{"archived_at set", Session{ArchivedAt: &at}, true},
-		{"archived_at empty", Session{ArchivedAt: &empty}, false},
-		{"none set", Session{}, false},
+		{"archived", true},
+		{"Archived", true},
+		{"idle", false},
+		{"running", false},
+		{"requires_action", false},
+		{"", false},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := c.s.IsArchivedSession(); got != c.want {
-				t.Errorf("IsArchivedSession() = %v, want %v", got, c.want)
+		t.Run(c.status, func(t *testing.T) {
+			if got := (Session{SessionStatus: c.status}).IsArchivedSession(); got != c.want {
+				t.Errorf("IsArchivedSession(%q) = %v, want %v", c.status, got, c.want)
 			}
 		})
 	}
@@ -58,8 +54,8 @@ func TestListSendsAuthAndParses(t *testing.T) {
 		gotBeta = r.Header.Get("anthropic-beta")
 		gotVer = r.Header.Get("anthropic-version")
 		_, _ = w.Write([]byte(`{"data":[
-			{"id":"a","name":"one","connection_status":"connected","archived":false},
-			{"id":"b","name":"two","connection_status":"disconnected","archived":true}
+			{"id":"session_a","title":"one","session_status":"idle","connection_status":"connected","session_context":{"cwd":"/x"}},
+			{"id":"session_b","title":"two","session_status":"archived","connection_status":"connected","session_context":{"cwd":"/y"}}
 		]}`))
 	}))
 	defer srv.Close()
@@ -77,6 +73,9 @@ func TestListSendsAuthAndParses(t *testing.T) {
 	}
 	if len(sessions) != 2 || !sessions[1].IsArchivedSession() || sessions[0].IsArchivedSession() {
 		t.Fatalf("unexpected sessions: %+v", sessions)
+	}
+	if sessions[1].Cwd() != "/y" {
+		t.Errorf("Cwd() = %q, want /y", sessions[1].Cwd())
 	}
 }
 
@@ -125,39 +124,97 @@ func (f *fakeCloud) List(context.Context) ([]Session, error) { return f.sessions
 
 type fakeManager struct {
 	sessions []session.Session
+	regs     []session.Registration
 	killed   []string
 }
 
-func (f *fakeManager) List() ([]session.Session, error) { return f.sessions, nil }
+func (f *fakeManager) List() ([]session.Session, error)               { return f.sessions, nil }
+func (f *fakeManager) Registrations() ([]session.Registration, error) { return f.regs, nil }
 func (f *fakeManager) Kill(id string) (bool, error) {
 	f.killed = append(f.killed, id)
 	return true, nil
 }
 
-func TestReconcileQuitsOnlyArchivedOwnedScreens(t *testing.T) {
-	tr := true
+// Title+Cwd join: archived cloud sessions map to our screens via the registry's
+// cwd, and only archived ones get quit.
+func TestReconcileQuitsArchivedByTitleCwd(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{
-		{ID: "arch-1", Archived: &tr},
-		{ID: "live-1"},
-		{ID: "arch-not-local", Archived: &tr}, // archived but no local screen
+		archived("test-2", "/repo"),
+		idle("test-keep", "/repo"),
 	}}
-	mgr := &fakeManager{sessions: []session.Session{
-		{ID: "arch-1", Screen: "p-arch-1"},
-		{ID: "live-1", Screen: "p-live-1"},
-	}}
+	mgr := &fakeManager{
+		sessions: []session.Session{
+			{ID: "uuid-arch", Screen: "p-uuid-arch", Title: "test-2"},
+			{ID: "uuid-keep", Screen: "p-uuid-keep", Title: "test-keep"},
+		},
+		regs: []session.Registration{
+			{SessionID: "uuid-arch", Cwd: "/repo"},
+			{SessionID: "uuid-keep", Cwd: "/repo"},
+		},
+	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
-	r.reconcileOnce(context.Background())
+	r.ReconcileOnce(context.Background())
 
-	if len(mgr.killed) != 1 || mgr.killed[0] != "arch-1" {
-		t.Fatalf("killed = %v, want [arch-1]", mgr.killed)
+	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-arch" {
+		t.Fatalf("killed = %v, want [uuid-arch]", mgr.killed)
+	}
+}
+
+// Precise join: a non-null bridgeSessionId matching an archived server id.
+func TestReconcileQuitsArchivedByBridgeID(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{
+		{ID: "session_X", SessionStatus: "archived"}, // no title
+	}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}, // no title either
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-1" {
+		t.Fatalf("killed = %v, want [uuid-1]", mgr.killed)
+	}
+}
+
+// Safety: if any cloud session sharing Title+Cwd is still active, don't quit.
+func TestReconcileSkipsWhenActiveCounterpartExists(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{
+		archived("dup", "/repo"),
+		idle("dup", "/repo"), // same title+cwd, still active
+	}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-dup", Title: "dup"}},
+		regs:     []session.Registration{{SessionID: "uuid-dup", Cwd: "/repo"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (active counterpart exists)", mgr.killed)
+	}
+}
+
+// Different cwd must not match even with the same title.
+func TestReconcileTitleRequiresMatchingCwd(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{archived("same", "/other")}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Title: "same"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", Cwd: "/repo"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (cwd mismatch)", mgr.killed)
 	}
 }
 
 func TestReconcileNoArchivedIsNoop(t *testing.T) {
-	cloudCl := &fakeCloud{sessions: []Session{{ID: "live-1"}}}
-	mgr := &fakeManager{sessions: []session.Session{{ID: "live-1"}}}
+	cloudCl := &fakeCloud{sessions: []Session{idle("live", "/repo")}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Title: "live"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", Cwd: "/repo"}},
+	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
-	r.reconcileOnce(context.Background())
+	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed = %v, want none", mgr.killed)
 	}
@@ -165,12 +222,20 @@ func TestReconcileNoArchivedIsNoop(t *testing.T) {
 
 func TestReconcileCloudErrorDoesNotKill(t *testing.T) {
 	cloudCl := &fakeCloud{err: context.DeadlineExceeded}
-	mgr := &fakeManager{sessions: []session.Session{{ID: "x"}}}
+	mgr := &fakeManager{sessions: []session.Session{{ID: "x", Title: "t"}}}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
-	r.reconcileOnce(context.Background())
+	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed on cloud error: %v", mgr.killed)
 	}
+}
+
+func archived(title, cwd string) Session { return mkSession(title, cwd, "archived") }
+func idle(title, cwd string) Session     { return mkSession(title, cwd, "idle") }
+func mkSession(title, cwd, status string) Session {
+	s := Session{Title: title, SessionStatus: status}
+	s.SessionContext.Cwd = cwd
+	return s
 }
 
 // helpers

@@ -157,10 +157,10 @@ msg=session_delete remote=127.0.0.1 id=<uuid> existed=true
 "Archived" is a **server-side** state — it isn't written into `~/.claude` on the
 host running the screens — so the server is the only source of truth. Every
 `CLAUDE_REMOTE_SYNC_INTERVAL` (default **30s**) the server polls the Anthropic
-Sessions API (`GET /v1/sessions`), and for any session the server reports as
-**archived** it quits the matching local `screen` (joined by session UUID). It
-only ever touches screens this service owns (prefix-scoped); unrelated screens
-are never affected. Each action is audit-logged:
+Sessions API (`GET /v1/sessions`), and for any session reporting
+`session_status: archived` it quits the matching local `screen`. It only ever
+touches screens this service owns (prefix-scoped); unrelated screens are never
+affected. Each action is audit-logged:
 
 ```
 msg=session_sync_enabled interval=30s credentials=/home/you/.claude/.credentials.json
@@ -175,9 +175,12 @@ msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
   `session_sync_disabled` once and the rest of the API runs normally.
 - Disable with `CLAUDE_REMOTE_SESSION_SYNC=off`.
 
-> The archive flag's exact field name in the API response isn't contractually
-> documented; the client accepts `archived` / `is_archived` / `archived_at` and
-> treats any of them as authoritative.
+> The server never exposes our `--session-id` UUID, so local screens are joined
+> to server sessions by **title + cwd** (and by the registry's `bridgeSessionId`
+> when it's populated). The title+cwd fallback only fires when *every* server
+> session sharing that title+cwd is archived, so a session with a live
+> counterpart is never quit. The API shape (`session_status`, `session_context`)
+> isn't a documented contract and may change across versions.
 
 ## crctl (local CLI)
 

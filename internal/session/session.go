@@ -177,6 +177,51 @@ func parseTitle(data []byte) string {
 	return title
 }
 
+// Registration is one entry from claude's live process registry
+// (~/.claude/sessions/<pid>.json). It links our session id (SessionID) to the
+// working directory and, when present, the server-side bridge session id.
+type Registration struct {
+	SessionID       string // claude session UUID (== our screen suffix)
+	Cwd             string
+	BridgeSessionID string // server session id; "" when not bridged
+	Status          string // idle | busy | shell | waiting | ...
+}
+
+// Registrations reads claude's process registry under
+// $CLAUDE_HOME/sessions/*.json. Best-effort: unreadable/!malformed files are
+// skipped. Used to join local sessions to server-side state (cwd + bridge id).
+func (m *Manager) Registrations() ([]Registration, error) {
+	if m.ClaudeHome == "" {
+		return nil, nil
+	}
+	matches, err := filepath.Glob(filepath.Join(m.ClaudeHome, "sessions", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var regs []Registration
+	for _, p := range matches {
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			continue
+		}
+		var rec struct {
+			SessionID       string  `json:"sessionId"`
+			Cwd             string  `json:"cwd"`
+			BridgeSessionID *string `json:"bridgeSessionId"`
+			Status          string  `json:"status"`
+		}
+		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
+			continue
+		}
+		reg := Registration{SessionID: rec.SessionID, Cwd: rec.Cwd, Status: rec.Status}
+		if rec.BridgeSessionID != nil {
+			reg.BridgeSessionID = *rec.BridgeSessionID
+		}
+		regs = append(regs, reg)
+	}
+	return regs, nil
+}
+
 func genUUID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
