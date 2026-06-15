@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"claude-remote-api/internal/cloud"
 	"claude-remote-api/internal/session"
 )
 
@@ -51,6 +53,8 @@ func main() {
 
 	logger := auditLogger()
 
+	startSessionSync(logger, mgr, claudeHome)
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           newHandler(token, mgr, logger),
@@ -76,6 +80,42 @@ func auditLogger() *slog.Logger {
 		h = slog.NewJSONHandler(os.Stdout, opts)
 	}
 	return slog.New(h)
+}
+
+// startSessionSync launches the background reconciler that polls the Anthropic
+// Sessions API and quits the screen of any session archived server-side.
+//
+// It's enabled by default but degrades gracefully: if the OAuth credentials
+// file is absent (e.g. a headless host with no logged-in claude), it logs once
+// and does nothing. Disable explicitly with CLAUDE_REMOTE_SESSION_SYNC=off.
+func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome string) {
+	if !envBool("CLAUDE_REMOTE_SESSION_SYNC", true) {
+		return
+	}
+
+	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(claudeHome, ".credentials.json"))
+	if _, err := os.Stat(credsPath); err != nil {
+		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
+		return
+	}
+
+	interval := 30 * time.Second
+	if v := os.Getenv("CLAUDE_REMOTE_SYNC_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			interval = d
+		} else {
+			logger.Warn("session_sync", "msg", "bad CLAUDE_REMOTE_SYNC_INTERVAL, using default", "value", v)
+		}
+	}
+
+	client := &cloud.Client{
+		BaseURL:         envOr("CLAUDE_REMOTE_CLOUD_BASE", cloud.DefaultBaseURL),
+		CredentialsPath: credsPath,
+	}
+	rec := &cloud.Reconciler{Cloud: client, Manager: mgr, Interval: interval, Log: logger}
+
+	logger.Info("session_sync_enabled", "interval", interval.String(), "credentials", credsPath)
+	go rec.Run(context.Background())
 }
 
 // newHandler builds the fully-wired HTTP handler (audit log + routes + bearer
@@ -254,4 +294,17 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool reads a boolean env var (on/off/true/false/1/0), returning def when
+// unset or unrecognized.
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "on", "yes":
+		return true
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return def
+	}
 }

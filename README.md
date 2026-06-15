@@ -85,6 +85,10 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
 | `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) are read from |
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
+| `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
+| `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
+| `CLAUDE_REMOTE_CREDENTIALS` | `$CLAUDE_HOME/.credentials.json` | OAuth credentials file (token source for the Sessions API) |
+| `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 
 ## API
 
@@ -147,6 +151,33 @@ msg=session_delete remote=127.0.0.1 id=<uuid> existed=true
 - Set `CLAUDE_REMOTE_LOG_FORMAT=json` for one JSON object per line (log
   shippers). Under systemd the trail is captured by journald:
   `journalctl --user -u code-remote-api`.
+
+## Session sync (auto-archive)
+
+"Archived" is a **server-side** state — it isn't written into `~/.claude` on the
+host running the screens — so the server is the only source of truth. Every
+`CLAUDE_REMOTE_SYNC_INTERVAL` (default **30s**) the server polls the Anthropic
+Sessions API (`GET /v1/sessions`), and for any session the server reports as
+**archived** it quits the matching local `screen` (joined by session UUID). It
+only ever touches screens this service owns (prefix-scoped); unrelated screens
+are never affected. Each action is audit-logged:
+
+```
+msg=session_sync_enabled interval=30s credentials=/home/you/.claude/.credentials.json
+msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
+```
+
+- Auth uses the local OAuth token from `CLAUDE_REMOTE_CREDENTIALS` (the same one
+  `claude` uses). The token is **never logged**, and the file is re-read each
+  cycle so refreshed tokens are picked up automatically.
+- It **degrades gracefully**: on a host with no credentials file (e.g. a
+  headless server where you've never logged in `claude`), sync logs
+  `session_sync_disabled` once and the rest of the API runs normally.
+- Disable with `CLAUDE_REMOTE_SESSION_SYNC=off`.
+
+> The archive flag's exact field name in the API response isn't contractually
+> documented; the client accepts `archived` / `is_archived` / `archived_at` and
+> treats any of them as authoritative.
 
 ## crctl (local CLI)
 
