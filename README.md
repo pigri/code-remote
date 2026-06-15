@@ -1,0 +1,149 @@
+# code-remote
+
+A small REST API (Go, stdlib only) that launches detached [Claude Code](https://claude.com/claude-code)
+sessions inside GNU `screen` and lets you drive them remotely — plus `crctl`, a
+local CLI to list/start/stop them.
+
+Each session is pinned to a UUID passed as both `--session-id` and
+`--remote-control`, and that same UUID is the `screen` session name suffix. So
+the listing can always join **screen ↔ Claude session ↔ title** and show the
+live display name you set inside Claude.
+
+## How it works
+
+`POST /sessions` runs, roughly:
+
+```sh
+screen -dmS <prefix>-<uuid> claude --session-id <uuid> --remote-control <uuid>
+```
+
+- `<uuid>` is the Claude session id (the file `~/.claude/projects/*/<uuid>.jsonl`)
+  and the Remote Control name.
+- The `title` is read live from that session log's latest `custom-title` record,
+  so renaming the session **inside Claude** is reflected automatically — no
+  second rename needed.
+- Stopping/restarting the API does **not** kill running sessions (the systemd
+  unit uses `KillMode=process`); they're rediscovered via `screen -ls`.
+
+## Requirements
+
+- Go 1.26+
+- `screen`
+- `claude` (Claude Code) on the host
+
+## Build
+
+```sh
+go build -o claude-remote-api .        # the API server
+go build -o crctl ./cmd/crctl          # the local CLI
+```
+
+## Run the server
+
+```sh
+export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
+./claude-remote-api
+```
+
+### Server configuration (env)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLAUDE_REMOTE_API_TOKEN` | — (**required**) | Bearer token; the server refuses to start without it |
+| `CLAUDE_REMOTE_API_ADDR` | `:8080` | Listen address |
+| `CLAUDE_REMOTE_SESSION_PREFIX` | `pigri-dev-remote` | Screen session name prefix (ownership scope) |
+| `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
+| `SCREEN_BIN` | `screen` | Path/name of the screen binary |
+| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) are read from |
+
+## API
+
+All routes except `/healthz` require `Authorization: Bearer <token>`.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/healthz` | Liveness (no auth) |
+| `POST` | `/sessions` | Start a session → `201` |
+| `GET` | `/sessions` | List running sessions |
+| `GET` | `/sessions/{id}` | One session (`404` if gone) |
+| `DELETE` | `/sessions/{id}` | Stop a session (`screen -X quit`) |
+
+`{id}` is the Claude session UUID. Session shape:
+
+```json
+{
+  "id": "6fd0b321-a454-4b40-9aed-131afe120d36",
+  "screen": "pigri-dev-remote-6fd0b321-a454-4b40-9aed-131afe120d36",
+  "title": "Synapse - platform - k8s",
+  "pid": "3993347",
+  "status": "Detached",
+  "created_at": "06/15/2026 08:41:26 AM"
+}
+```
+
+Example:
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" localhost:8080/sessions
+curl -s        -H "Authorization: Bearer $TOKEN" localhost:8080/sessions
+```
+
+Attach to a session from a shell on the host: `screen -r <screen>`.
+
+## crctl (local CLI)
+
+```sh
+crctl ls            # list running sessions (default)
+crctl new           # start a new session
+crctl rm <id>       # stop a session
+```
+
+Config:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLAUDE_REMOTE_API_URL` | `http://127.0.0.1:8080` | API base URL |
+| `CLAUDE_REMOTE_API_TOKEN` | — (**required**) | Bearer token |
+
+```
+$ crctl ls
+ID                                    TITLE                     STATUS    ATTACH
+6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  screen -r pigri-dev-remote-6fd0b321-...
+```
+
+## Deploy (systemd)
+
+A hardened system unit and env template are in [`deploy/`](deploy/):
+
+```sh
+go build -o claude-remote-api .
+sudo install -m0755 claude-remote-api /usr/local/bin/
+
+sudo install -m0600 -o "$USER" -g "$USER" deploy/claude-remote-api.env.example /etc/claude-remote-api.env
+sudo sed -i "s/replace-with-a-long-random-token/$(openssl rand -hex 24)/" /etc/claude-remote-api.env
+
+sudo install -m0644 deploy/claude-remote-api.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now claude-remote-api
+```
+
+The unit runs as your user (it needs your `claude` install, `~/.claude`
+credentials, and the per-user `screen` sockets), with `ProtectSystem=strict`,
+no capabilities, a syscall filter, and `ReadWritePaths` limited to `~` and
+`/run/screen`. `MemoryDenyWriteExecute` is intentionally **off** — the claude
+binary's JIT needs writable+executable memory.
+
+## Security notes
+
+- The token is checked in constant time; the server is fail-closed (won't start
+  without a token).
+- The default bind is `:8080` — put it behind TLS (reverse proxy / tunnel), or
+  bind `127.0.0.1`, since the bearer token rides the wire.
+- The manager only ever lists/kills `screen` sessions matching the prefix, and
+  session ids are UUID-validated, so it can't touch unrelated screens.
+
+## Caveat
+
+The `title` is read from Claude's internal `~/.claude/.../<id>.jsonl`
+(`type:custom-title`) format, which is **not a stable public API** and may
+change across Claude versions. It's best-effort; everything else works without
+it.
