@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -11,8 +12,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"claude-remote-api/internal/cloud"
@@ -54,7 +57,11 @@ func main() {
 
 	logger := auditLogger()
 
-	startSessionSync(logger, mgr, claudeHome)
+	// ctx is cancelled on SIGINT/SIGTERM to drive a graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sync := startSessionSync(ctx, logger, mgr, claudeHome)
 
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -66,8 +73,32 @@ func main() {
 	}
 
 	logger.Info("starting", "addr", addr, "prefix", prefix)
-	if err := httpSrv.ListenAndServe(); err != nil {
-		log.Fatal(err)
+	srvErr := make(chan error, 1)
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			srvErr <- err
+		}
+	}()
+
+	var exitErr error
+	select {
+	case <-ctx.Done(): // signal received
+		logger.Info("shutting_down")
+	case exitErr = <-srvErr: // server failed to run
+		logger.Error("server_error", "error", exitErr.Error())
+	}
+
+	// Drain in-flight requests, then stop the reconciler and checkpoint+close
+	// the SQLite store.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+	if err := sync.Close(); err != nil {
+		logger.Warn("store_close", "error", err.Error())
+	}
+
+	if exitErr != nil {
+		os.Exit(1)
 	}
 }
 
@@ -83,21 +114,44 @@ func auditLogger() *slog.Logger {
 	return slog.New(h)
 }
 
+// syncHandle owns the background reconciler's lifecycle and its store. Close
+// waits for the reconciler goroutine to stop, then closes the store (which
+// checkpoints the SQLite WAL). Safe to call on a nil handle.
+type syncHandle struct {
+	db   io.Closer
+	done <-chan struct{}
+}
+
+func (h *syncHandle) Close() error {
+	if h == nil {
+		return nil
+	}
+	if h.done != nil {
+		<-h.done // let the in-flight reconcile finish before closing the DB
+	}
+	if h.db != nil {
+		return h.db.Close()
+	}
+	return nil
+}
+
 // startSessionSync launches the background reconciler that polls the Anthropic
-// Sessions API and quits the screen of any session archived server-side.
+// Sessions API and quits the screen of any session archived (or deleted)
+// server-side. The reconciler stops when ctx is cancelled; the returned handle's
+// Close waits for it and closes the store.
 //
 // It's enabled by default but degrades gracefully: if the OAuth credentials
 // file is absent (e.g. a headless host with no logged-in claude), it logs once
 // and does nothing. Disable explicitly with CLAUDE_REMOTE_SESSION_SYNC=off.
-func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome string) {
+func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Manager, claudeHome string) *syncHandle {
 	if !envBool("CLAUDE_REMOTE_SESSION_SYNC", true) {
-		return
+		return nil
 	}
 
 	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(claudeHome, ".credentials.json"))
 	if _, err := os.Stat(credsPath); err != nil {
 		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
-		return
+		return nil
 	}
 
 	interval := 30 * time.Second
@@ -133,16 +187,24 @@ func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome stri
 
 	// Durable session mirror + ledger. Best-effort: on failure the reconciler
 	// falls back to its in-memory grace clock (mirror is dropped).
+	h := &syncHandle{}
 	dbPath := envOr("CLAUDE_REMOTE_DB", defaultDBPath())
 	if db, err := store.Open(dbPath); err != nil {
 		logger.Warn("session_store_disabled", "reason", "open failed", "path", dbPath, "error", err.Error())
 	} else {
 		rec.Store = db
+		h.db = db
 		logger.Info("session_store_enabled", "path", dbPath)
 	}
 
 	logger.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
-	go rec.Run(context.Background())
+	done := make(chan struct{})
+	h.done = done
+	go func() {
+		defer close(done)
+		rec.Run(ctx)
+	}()
+	return h
 }
 
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
