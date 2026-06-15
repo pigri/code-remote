@@ -87,6 +87,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
+| `CLAUDE_REMOTE_ARCHIVE_GRACE` | `15m` | A session must stay archived this long before its screen is quit (`0` = immediate) |
 | `CLAUDE_REMOTE_CREDENTIALS` | `$CLAUDE_HOME/.credentials.json` | OAuth credentials file (token source for the Sessions API) |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 | `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
@@ -168,6 +169,11 @@ msg=session_sync_enabled interval=30s credentials=/home/you/.claude/.credentials
 msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
 ```
 
+- A **grace period** (`CLAUDE_REMOTE_ARCHIVE_GRACE`, default **15m**) protects
+  against accidental archives: a screen is only quit after its session has been
+  *continuously observed* archived for that long. Unarchiving within the window
+  resets the clock (the API exposes no archive timestamp, so this is clocked
+  locally). A pending quit logs `archive_pending` with the time remaining.
 - Auth uses the local OAuth token from `CLAUDE_REMOTE_CREDENTIALS` (the same one
   `claude` uses). The token is **never logged**, and the file is re-read each
   cycle so refreshed tokens are picked up automatically.

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"claude-remote-api/internal/session"
 )
@@ -232,6 +233,59 @@ func TestReconcileNoArchivedIsNoop(t *testing.T) {
 	r.ReconcileOnce(context.Background())
 	if len(mgr.killed) != 0 {
 		t.Fatalf("killed = %v, want none", mgr.killed)
+	}
+}
+
+// Grace: a session must be observed archived for >= Grace before it's quit, and
+// unarchiving resets the clock.
+func TestReconcileGracePeriod(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_X", SessionStatus: "archived"}}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	}
+	clk := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(),
+		Grace: 15 * time.Minute, Now: func() time.Time { return clk }}
+
+	r.ReconcileOnce(context.Background()) // t=0: starts the clock, no kill
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed within grace: %v", mgr.killed)
+	}
+
+	clk = clk.Add(10 * time.Minute) // t=10m: still within grace
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed at 10m (<15m grace): %v", mgr.killed)
+	}
+
+	clk = clk.Add(6 * time.Minute) // t=16m: past grace
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-1" {
+		t.Fatalf("killed = %v, want [uuid-1] after grace", mgr.killed)
+	}
+}
+
+func TestReconcileGraceResetsOnUnarchive(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_X", SessionStatus: "archived"}}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	}
+	clk := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(),
+		Grace: 15 * time.Minute, Now: func() time.Time { return clk }}
+
+	r.ReconcileOnce(context.Background()) // start clock
+	clk = clk.Add(10 * time.Minute)
+	cloudCl.sessions[0].SessionStatus = "idle" // unarchived -> clock resets
+	r.ReconcileOnce(context.Background())
+
+	cloudCl.sessions[0].SessionStatus = "archived" // archived again
+	clk = clk.Add(10 * time.Minute)                // only 10m since re-archive
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (clock reset by unarchive)", mgr.killed)
 	}
 }
 
