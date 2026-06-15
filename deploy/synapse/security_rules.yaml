@@ -1,11 +1,15 @@
 # Synapse local security rules (used when no platform API key is set).
-# WAF defense for claude-remote-api behind ngrok. Passed via:
-#   --security-rules-config deploy/synapse/security_rules.yaml
+# Schema mirrors Synapse's security_rules_example.yaml — all top-level sections
+# (access_rules, amygdala_rules, waf_rules, content_scanning, timestamps) must
+# be present or the file fails to parse and the WAF stays disabled.
+#
+# Passed via: --security-rules-config deploy/synapse/security_rules.yaml
 #
 # Note: behind an ngrok HTTP tunnel every request arrives from the local agent,
-# so ip.src-based rules see 127.0.0.1 and threat-intel fields are unavailable
-# (no API key). The content/method/path rules below do the real work; the
-# bearer-token auth in the API is the primary access control.
+# so ip.src / threat-intel fields see 127.0.0.1 and aren't useful here. The
+# content/method/path rules below do the work; the API's bearer token remains
+# the primary access control. Rate-limiting needs the platform API, so it's not
+# included in local mode.
 
 access_rules:
   id: "local-rules"
@@ -21,6 +25,10 @@ access_rules:
     ips: []
     country: []
     asn: []
+
+amygdala_rules:
+  block: []
+  allow: []
 
 waf_rules:
   rules:
@@ -41,7 +49,7 @@ waf_rules:
     - id: "waf-traversal"
       name: "Block path traversal / dotfiles"
       org_id: "local"
-      description: "Block ../ traversal and hidden/.env file probes"
+      description: "Block ../ traversal and hidden/.env/.git probes"
       action: "block"
       expression: 'http.request.path contains "/.." or http.request.path contains "/.env" or http.request.path contains "/.git"'
 
@@ -59,17 +67,15 @@ waf_rules:
       action: "block"
       expression: 'not (http.request.method eq "GET" or http.request.method eq "POST" or http.request.method eq "DELETE" or http.request.method eq "OPTIONS" or http.request.method eq "HEAD")'
 
-    - id: "waf-ratelimit-sessions"
-      name: "Rate limit session API"
-      org_id: "local"
-      description: "Throttle session create/list/delete"
-      action: "ratelimit"
-      expression: 'starts_with(http.request.path, "/sessions")'
-      config:
-        rateLimit:
-          period: "60" # window, seconds
-          duration: "60" # enforce for, seconds
-          requests: "60" # max requests per window
-
 content_scanning:
   enabled: false
+  clamav_server: "localhost:3310"
+  max_file_size: 10485760
+  scan_content_types:
+    - "application/json"
+  skip_extensions: []
+  scan_expression: 'http.request.method eq "POST" or http.request.method eq "PUT"'
+
+created_at: "2026-01-01T00:00:00Z"
+updated_at: "2026-01-01T00:00:00Z"
+last_modified: "2026-01-01T00:00:00Z"

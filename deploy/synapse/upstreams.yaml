@@ -1,8 +1,11 @@
-# Synapse upstreams — route the ngrok domain to the local API.
-version: 2
-
-hosts:
+# Synapse upstreams — v1/legacy schema (no `version:` field). This is the
+# schema the HTTP proxy actually routes by. The API backend is plain HTTP
+# (ssl_enabled: false); ngrok already terminated TLS at the edge, so no per-host
+# `tls:` block is needed (the v2 schema would require one).
+upstreams:
   your-domain.ngrok.dev:
-    # No `tls:` block => served on the plaintext HTTP listener (ngrok already
-    # terminated TLS). Whole-host single-upstream sugar -> the API.
-    upstream: 127.0.0.1:9000
+    paths:
+      "/":
+        servers:
+          - "127.0.0.1:9000"
+        ssl_enabled: false
