@@ -84,6 +84,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
 | `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) are read from |
+| `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 
 ## API
 
@@ -124,6 +125,28 @@ Attach to a session from a shell on the host: `screen -r <screen>`.
 You can start, list, and stop sessions from the Apple **Shortcuts** app — each is
 a one-action `Get Contents of URL` call to the public endpoint with the bearer
 token. See [`docs/apple-shortcut.md`](docs/apple-shortcut.md).
+
+## Audit log
+
+The server writes a structured audit line to **stdout** for every request —
+including rejected ones — plus explicit events when a session is created or
+stopped. The bearer token is **never** logged.
+
+```
+msg=request        method=POST   path=/sessions  status=201 dur_ms=18 remote=127.0.0.1 auth=ok forwarded_for=203.0.113.9
+msg=request        method=GET    path=/sessions  status=401 dur_ms=0  remote=127.0.0.1 auth=denied
+msg=session_create remote=127.0.0.1 id=<uuid> screen=<prefix>-<uuid>
+msg=session_delete remote=127.0.0.1 id=<uuid> existed=true
+```
+
+- `auth` is `ok` / `denied` / `n/a` (the latter for the unauthenticated
+  `/healthz`).
+- `remote` is the TCP peer (behind ngrok + Synapse that's `127.0.0.1`);
+  `forwarded_for` carries the `X-Forwarded-For` client IP when present — only as
+  trustworthy as the upstream that set it.
+- Set `CLAUDE_REMOTE_LOG_FORMAT=json` for one JSON object per line (log
+  shippers). Under systemd the trail is captured by journald:
+  `journalctl --user -u code-remote-api`.
 
 ## crctl (local CLI)
 
