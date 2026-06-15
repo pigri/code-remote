@@ -132,6 +132,53 @@ no capabilities, a syscall filter, and `ReadWritePaths` limited to `~` and
 `/run/screen`. `MemoryDenyWriteExecute` is intentionally **off** — the claude
 binary's JIT needs writable+executable memory.
 
+## Remote access: ngrok + Synapse WAF
+
+Expose the API publicly at a reserved domain with a WAF in front. ngrok
+terminates TLS and forwards to a single local port (8080), where
+[Synapse](https://gen0sec.com) runs as an L7 reverse proxy + WAF and proxies to
+the API. The API itself binds `127.0.0.1` only — it is never directly reachable.
+
+```
+Internet
+  → ngrok  https://your-domain.ngrok.dev   (TLS terminated here)
+  → :8080  Synapse (WAF: SQLi/XSS/traversal/oversize/method allow-list + rate limit)
+  → 127.0.0.1:9000  claude-remote-api  (bearer-token auth)
+```
+
+| Port | Bound | Role |
+| --- | --- | --- |
+| `your-domain.ngrok.dev:443` | ngrok edge | public HTTPS |
+| `8080` | localhost | Synapse WAF (the only port ngrok forwards to) |
+| `9000` | `127.0.0.1` | the API (Synapse is its only client) |
+
+Configs live in [`deploy/`](deploy/): `ngrok.yml`, `synapse/config.yaml`,
+`synapse/upstreams.yaml`, `synapse/security_rules.yaml`.
+
+Run (three processes):
+
+```sh
+# 1) API on an internal port (Synapse is the only thing that reaches it)
+CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24) \
+CLAUDE_REMOTE_API_ADDR=127.0.0.1:9000 ./claude-remote-api
+
+# 2) Synapse WAF on :8080 -> API
+synapse --mode proxy -c deploy/synapse/config.yaml \
+        --security-rules-config deploy/synapse/security_rules.yaml
+
+# 3) ngrok edge -> :8080
+ngrok start --config deploy/ngrok.yml claude-remote
+```
+
+The WAF blocks SQLi/XSS markers, path traversal/dotfile probes, oversized POSTs,
+and non-API HTTP methods, and rate-limits `/sessions`. The API's bearer token
+remains the primary access control (defense in depth). Behind an ngrok HTTP
+tunnel all requests arrive from the local agent, so `ip.src`/threat-intel WAF
+rules see `127.0.0.1` — the content/method/path rules carry the protection.
+
+> The Synapse configs were authored against its documented schema but not run
+> here; validate them against your installed Synapse version.
+
 ## Security notes
 
 - The token is checked in constant time; the server is fail-closed (won't start

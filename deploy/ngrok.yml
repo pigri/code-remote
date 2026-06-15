@@ -1,0 +1,20 @@
+# ngrok agent config — exposes the Synapse WAF (port 8080) at the reserved
+# domain. ngrok terminates TLS at the edge and forwards plaintext HTTP to
+# Synapse, which applies the WAF and proxies to the API.
+#
+# Auth: ngrok reads the NGROK_AUTHTOKEN env var automatically, or run once:
+#   ngrok config add-authtoken <token>
+#
+# Start:
+#   ngrok start --config deploy/ngrok.yml claude-remote
+# Equivalent one-liner:
+#   ngrok http 8080 --domain your-domain.ngrok.dev
+version: "2"
+
+tunnels:
+  claude-remote:
+    proto: http
+    addr: 8080 # -> Synapse WAF listener (the only port ngrok forwards to)
+    domain: your-domain.ngrok.dev
+    schemes: [https] # public endpoint is HTTPS-only
+    inspect: false

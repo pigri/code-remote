@@ -1,0 +1,75 @@
+# Synapse local security rules (used when no platform API key is set).
+# WAF defense for claude-remote-api behind ngrok. Passed via:
+#   --security-rules-config deploy/synapse/security_rules.yaml
+#
+# Note: behind an ngrok HTTP tunnel every request arrives from the local agent,
+# so ip.src-based rules see 127.0.0.1 and threat-intel fields are unavailable
+# (no API key). The content/method/path rules below do the real work; the
+# bearer-token auth in the API is the primary access control.
+
+access_rules:
+  id: "local-rules"
+  name: "claude-remote access rules"
+  description: "Static access rules"
+  allow:
+    ips:
+      - "127.0.0.1"
+      - "::1"
+    country: []
+    asn: []
+  block:
+    ips: []
+    country: []
+    asn: []
+
+waf_rules:
+  rules:
+    - id: "waf-sqli"
+      name: "Block SQL injection"
+      org_id: "local"
+      description: "Common SQLi markers in body/query"
+      action: "block"
+      expression: 'http.request.body contains "DROP TABLE" or http.request.body contains "UNION SELECT" or http.request.query contains "1=1"'
+
+    - id: "waf-xss"
+      name: "Block XSS"
+      org_id: "local"
+      description: "Inline <script> in body/query"
+      action: "block"
+      expression: 'http.request.body contains "<script>" or http.request.query contains "<script>"'
+
+    - id: "waf-traversal"
+      name: "Block path traversal / dotfiles"
+      org_id: "local"
+      description: "Block ../ traversal and hidden/.env file probes"
+      action: "block"
+      expression: 'http.request.path contains "/.." or http.request.path contains "/.env" or http.request.path contains "/.git"'
+
+    - id: "waf-large-post"
+      name: "Block oversized POST"
+      org_id: "local"
+      description: "Reject POST bodies larger than 1MB (the API takes tiny JSON)"
+      action: "block"
+      expression: 'http.request.method eq "POST" and http.request.content_length > 1048576'
+
+    - id: "waf-methods"
+      name: "Allow only the methods the API uses"
+      org_id: "local"
+      description: "Block anything that isn't GET/POST/DELETE/OPTIONS/HEAD"
+      action: "block"
+      expression: 'not (http.request.method eq "GET" or http.request.method eq "POST" or http.request.method eq "DELETE" or http.request.method eq "OPTIONS" or http.request.method eq "HEAD")'
+
+    - id: "waf-ratelimit-sessions"
+      name: "Rate limit session API"
+      org_id: "local"
+      description: "Throttle session create/list/delete"
+      action: "ratelimit"
+      expression: 'starts_with(http.request.path, "/sessions")'
+      config:
+        rateLimit:
+          period: "60" # window, seconds
+          duration: "60" # enforce for, seconds
+          requests: "60" # max requests per window
+
+content_scanning:
+  enabled: false

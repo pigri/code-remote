@@ -1,0 +1,8 @@
+# Synapse upstreams — route the ngrok domain to the local API.
+version: 2
+
+hosts:
+  your-domain.ngrok.dev:
+    # No `tls:` block => served on the plaintext HTTP listener (ngrok already
+    # terminated TLS). Whole-host single-upstream sugar -> the API.
+    upstream: 127.0.0.1:9000

@@ -1,0 +1,49 @@
+# Synapse — L7 reverse proxy + WAF in front of claude-remote-api.
+#
+# Proxy-only deployment (no eBPF/NDR sensing): ngrok terminates TLS and forwards
+# HTTP to Synapse on :8080; Synapse applies the WAF rules in security_rules.yaml
+# and proxies to the API on 127.0.0.1:9000.
+#
+#   synapse --mode proxy -c deploy/synapse/config.yaml \
+#           --security-rules-config deploy/synapse/security_rules.yaml
+#
+# Tune against your installed Synapse version with its own validation — this
+# config was authored against the documented schema, not run here.
+
+mode: proxy
+
+# This box is a WAF gateway, not a sensor: no packet capture, IDS, or kernel
+# firewall (those need eBPF/privileges and aren't relevant to an L7 WAF).
+capture:
+  enabled: false
+ids:
+  enabled: false
+firewall:
+  mode: none
+
+proxy:
+  # ngrok forwards the public domain here (plaintext; TLS ends at ngrok).
+  # This is the only listener — "only listening on 8080".
+  address_http: "127.0.0.1:8080"
+  # No TLS listener (address_tls omitted): ngrok owns the certificate for
+  # your-domain.ngrok.dev.
+
+  upstream:
+    conf: "/etc/synapse/upstreams.yaml"
+
+  # ngrok HTTP tunnels send X-Forwarded-For, not the PROXY protocol.
+  protocol:
+    enabled: false
+
+  # ngrok handles TLS; no ACME, ClamAV, or captcha services on this box.
+  acme:
+    enabled: false
+  content_scanning:
+    enabled: false
+  internal_services:
+    enabled: false
+
+# Local rules only (security_rules.yaml) — no platform API key / telemetry.
+platform:
+  api_key: ""
+  telemetry_sending_enabled: false
