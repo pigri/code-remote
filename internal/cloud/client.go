@@ -30,34 +30,29 @@ const (
 	apiVersion     = "2023-06-01"
 )
 
-// Session is one Remote Control session as reported by the server. The id
-// matches the claude session UUID we assign with --session-id, so it joins
-// directly to our local screen sessions.
+// Session is one Remote Control session as reported by the server.
 //
-// The archive flag's exact name isn't contractually documented, so we accept
-// the plausible variants and treat any of them as authoritative.
+// The server id is a bridge id (e.g. "session_017RC...") — NOT the claude
+// session UUID we assign with --session-id (that UUID does not appear in the
+// API payload). So local screens are joined to these by Title + Cwd (and, when
+// available, the registry's bridgeSessionId == ID). Archive state lives in the
+// string SessionStatus ("archived"), not a boolean.
 type Session struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
+	ID               string `json:"id"`             // server/bridge session id
+	Title            string `json:"title"`          // user-set display name (== custom-title)
+	SessionStatus    string `json:"session_status"` // archived | idle | running | pending | requires_action
 	ConnectionStatus string `json:"connection_status"`
-
-	Archived   *bool   `json:"archived"`
-	IsArchived *bool   `json:"is_archived"`
-	ArchivedAt *string `json:"archived_at"`
+	SessionContext   struct {
+		Cwd string `json:"cwd"`
+	} `json:"session_context"`
 }
 
-// IsArchivedSession reports whether the server considers this session archived,
-// tolerating whichever field name the API uses.
+// Cwd is the session's working directory (from session_context).
+func (s Session) Cwd() string { return s.SessionContext.Cwd }
+
+// IsArchivedSession reports whether the server considers this session archived.
 func (s Session) IsArchivedSession() bool {
-	switch {
-	case s.Archived != nil && *s.Archived:
-		return true
-	case s.IsArchived != nil && *s.IsArchived:
-		return true
-	case s.ArchivedAt != nil && strings.TrimSpace(*s.ArchivedAt) != "":
-		return true
-	}
-	return false
+	return strings.EqualFold(strings.TrimSpace(s.SessionStatus), "archived")
 }
 
 // Client is a minimal Anthropic Sessions API client.
