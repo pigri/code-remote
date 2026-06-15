@@ -9,9 +9,10 @@ import (
 	"claude-remote-api/internal/session"
 )
 
-// lister is the slice of the cloud client the reconciler needs (for testing).
-type lister interface {
+// cloudAPI is the slice of the cloud client the reconciler needs (for testing).
+type cloudAPI interface {
 	List(ctx context.Context) ([]Session, error)
+	Get(ctx context.Context, id string) (Session, bool, error)
 }
 
 // screenManager is the slice of session.Manager the reconciler needs.
@@ -26,7 +27,7 @@ type screenManager interface {
 // only ever acts on sessions the manager already owns (prefix-scoped), so it
 // cannot touch unrelated screens.
 type Reconciler struct {
-	Cloud    lister
+	Cloud    cloudAPI
 	Manager  screenManager
 	Interval time.Duration
 	Log      *slog.Logger
@@ -153,19 +154,36 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		cwd := cwdByID[ls.ID]
 		bridge := bridgeByID[ls.ID]
 
-		// Determine the server view + whether (and how) it's an archive target.
+		// Determine the server view + whether (and how) it's a quit target.
+		// quit covers both archived and deleted (404) sessions.
 		var cloudStatus, connStatus, match string
-		archived := false
+		quit, confirmFailed := false, false
 		if bridge != "" {
-			if cs, ok := cloudByBridge[bridge]; ok {
+			cs, ok := cloudByBridge[bridge]
+			if !ok {
+				// Not on the fetched page: confirm by id to tell a genuine
+				// deletion (404) from a pagination gap or archived-beyond-100.
+				got, found, gerr := r.Cloud.Get(ctx, bridge)
+				switch {
+				case gerr != nil:
+					confirmFailed = true
+					r.Log.Warn("session_sync", "phase", "confirm", "id", ls.ID, "error", gerr.Error())
+				case !found:
+					cs, ok = Session{SessionStatus: "deleted"}, true
+					quit, match = true, "deleted"
+				default:
+					cs, ok = got, true
+				}
+			}
+			if ok {
 				cloudStatus, connStatus = cs.SessionStatus, cs.ConnectionStatus
-				if cs.IsArchivedSession() {
-					archived, match = true, "bridge_id"
+				if !quit && cs.IsArchivedSession() {
+					quit, match = true, "bridge_id"
 				}
 			}
 		}
-		if !archived && r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwd}] {
-			archived, match = true, "title_cwd"
+		if !quit && !confirmFailed && r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwd}] {
+			quit, match = true, "title_cwd"
 			if cloudStatus == "" {
 				cloudStatus = "archived"
 			}
@@ -175,17 +193,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		if err := st.UpsertSession(SessionRecord{
 			UUID: ls.ID, Screen: ls.Screen, Title: ls.Title, Cwd: cwd,
 			LocalStatus: ls.Status, CloudStatus: cloudStatus, ConnectionStatus: connStatus,
-			BridgeSessionID: bridge, CreatedAt: ls.CreatedAt, Archived: archived,
+			BridgeSessionID: bridge, CreatedAt: ls.CreatedAt, Archived: quit,
 		}); err != nil {
 			r.Log.Warn("session_sync", "phase", "mirror", "id", ls.ID, "error", err.Error())
 		}
 
-		if !archived {
+		// On an inconclusive confirm, do nothing (don't quit, don't reset).
+		if confirmFailed {
+			continue
+		}
+		if !quit {
 			_ = st.ClearArchiveClock(ls.ID)
 			continue
 		}
 
-		// Grace: quit only after observed archived for >= Grace.
+		// Grace: quit only after observed archived/deleted for >= Grace.
 		first, ok, ferr := st.FirstSeenArchived(ls.ID)
 		if ferr != nil {
 			r.Log.Warn("session_sync", "phase", "grace", "id", ls.ID, "error", ferr.Error())
@@ -196,7 +218,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 			_ = st.SetFirstSeenArchived(ls.ID, nowT)
 		}
 		if waited := nowT.Sub(first); waited < r.Grace {
-			r.Log.Info("archive_pending", "id", ls.ID, "title", ls.Title,
+			r.Log.Info("archive_pending", "id", ls.ID, "title", ls.Title, "match", match,
 				"remaining", (r.Grace - waited).Round(time.Second).String())
 			continue
 		}
@@ -208,8 +230,12 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		}
 		_ = st.MarkArchived(ls.ID, nowT)
 		if existed {
+			reason := "archived_on_server"
+			if match == "deleted" {
+				reason = "deleted_on_server"
+			}
 			r.Log.Info("auto_archive", "id", ls.ID, "screen", ls.Screen, "title", ls.Title,
-				"match", match, "reason", "archived_on_server")
+				"match", match, "reason", reason)
 		}
 	}
 }

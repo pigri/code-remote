@@ -91,6 +91,32 @@ func (c *Client) List(ctx context.Context) ([]Session, error) {
 	return env.Data, nil
 }
 
+// Get fetches one session by server id. found is false on a 404 (e.g. the
+// session was deleted), with a nil error — letting callers distinguish a
+// genuine deletion from a transient failure.
+func (c *Client) Get(ctx context.Context, id string) (s Session, found bool, err error) {
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/sessions/"+id, nil)
+	if err != nil {
+		return Session{}, false, err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return Session{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return Session{}, false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return Session{}, false, fmt.Errorf("sessions API GET %s: %s: %s", req.URL.Path, resp.Status, strings.TrimSpace(string(snippet)))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return Session{}, false, err
+	}
+	return s, true, nil
+}
+
 // Archive marks a session archived on the server.
 func (c *Client) Archive(ctx context.Context, id string) error {
 	req, err := c.newRequest(ctx, http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
