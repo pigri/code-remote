@@ -76,8 +76,15 @@ func (m *Manager) Create() (Session, error) {
 func (m *Manager) List() ([]Session, error) {
 	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
 	out, _ := exec.Command(m.ScreenBin, "-ls").CombinedOutput()
+	return m.parseSessions(string(out)), nil
+}
+
+// parseSessions turns `screen -ls` output into our sessions (prefix-scoped,
+// UUID-validated). Pure except for the per-session title read, which is skipped
+// when ClaudeHome is empty.
+func (m *Manager) parseSessions(out string) []Session {
 	var sessions []Session
-	for _, raw := range strings.Split(string(out), "\n") {
+	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(raw)
 		match := screenLineRe.FindStringSubmatch(line)
 		if match == nil {
@@ -100,7 +107,7 @@ func (m *Manager) List() ([]Session, error) {
 		}
 		sessions = append(sessions, s)
 	}
-	return sessions, nil
+	return sessions
 }
 
 // Get returns the session for the given claude session id, if running.
@@ -146,6 +153,11 @@ func (m *Manager) title(id string) string {
 	if err != nil {
 		return ""
 	}
+	return parseTitle(data)
+}
+
+// parseTitle returns the latest custom-title from a claude session .jsonl.
+func parseTitle(data []byte) string {
 	title := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.Contains(line, `"custom-title"`) {

@@ -43,20 +43,10 @@ func main() {
 	}
 
 	mgr := &Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome}
-	srv := &server{mgr: mgr}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("POST /sessions", srv.create)
-	mux.HandleFunc("GET /sessions", srv.list)
-	mux.HandleFunc("GET /sessions/{id}", srv.get)
-	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
 
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           authMiddleware(token, mux),
+		Handler:           newHandler(token, mgr),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -67,6 +57,21 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// newHandler builds the fully-wired HTTP handler (routes + bearer auth) for the
+// given session manager. Shared by main() and the e2e tests.
+func newHandler(token string, mgr *Manager) http.Handler {
+	srv := &server{mgr: mgr}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("POST /sessions", srv.create)
+	mux.HandleFunc("GET /sessions", srv.list)
+	mux.HandleFunc("GET /sessions/{id}", srv.get)
+	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
+	return authMiddleware(token, mux)
 }
 
 type server struct{ mgr *Manager }
