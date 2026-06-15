@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"claude-remote-api/internal/session"
@@ -35,6 +36,18 @@ type Reconciler struct {
 	// off by default because titles are user-mutable (a rename breaks the
 	// join) and not unique; bridgeSessionId is the stable, rename-proof key.
 	MatchTitle bool
+
+	// Grace is how long a session must be *continuously observed* archived
+	// before its screen is quit. The API exposes no archive timestamp, so we
+	// clock it locally: the timer starts when we first see a session archived
+	// and resets if it's unarchived. Zero means quit on first observation.
+	Grace time.Duration
+
+	// Now is injectable for tests; defaults to time.Now.
+	Now func() time.Time
+
+	mu   sync.Mutex
+	seen map[string]time.Time // local session id -> first observed archived
 }
 
 // Run reconciles once immediately, then on every tick until ctx is cancelled.
@@ -95,6 +108,10 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		}
 	}
 	if len(archivedBridge) == 0 && len(archivedTitle) == 0 {
+		// Nothing archived -> every grace clock resets.
+		r.mu.Lock()
+		r.seen = nil
+		r.mu.Unlock()
 		return
 	}
 
@@ -115,23 +132,62 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		return
 	}
 
+	// Collect owned screens the server considers archived.
+	type candidate struct {
+		ls    session.Session
+		match string
+	}
+	var candidates []candidate
 	for _, ls := range local {
-		match := ""
-		if bid := bridgeByID[ls.ID]; bid != "" && archivedBridge[bid] {
-			match = "bridge_id"
-		} else if r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwdByID[ls.ID]}] {
-			match = "title_cwd"
+		switch {
+		case bridgeByID[ls.ID] != "" && archivedBridge[bridgeByID[ls.ID]]:
+			candidates = append(candidates, candidate{ls, "bridge_id"})
+		case r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwdByID[ls.ID]}]:
+			candidates = append(candidates, candidate{ls, "title_cwd"})
 		}
-		if match == "" {
+	}
+
+	now := time.Now
+	if r.Now != nil {
+		now = r.Now
+	}
+	nowT := now()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.seen == nil {
+		r.seen = map[string]time.Time{}
+	}
+
+	current := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		current[c.ls.ID] = true
+		first, ok := r.seen[c.ls.ID]
+		if !ok {
+			r.seen[c.ls.ID] = nowT
+			first = nowT
+		}
+		if waited := nowT.Sub(first); waited < r.Grace {
+			r.Log.Info("archive_pending", "id", c.ls.ID, "title", c.ls.Title,
+				"remaining", (r.Grace - waited).Round(time.Second).String())
 			continue
 		}
-		existed, err := r.Manager.Kill(ls.ID)
+		existed, err := r.Manager.Kill(c.ls.ID)
 		if err != nil {
-			r.Log.Error("auto_archive", "id", ls.ID, "screen", ls.Screen, "error", err.Error())
+			r.Log.Error("auto_archive", "id", c.ls.ID, "screen", c.ls.Screen, "error", err.Error())
 			continue
 		}
+		delete(r.seen, c.ls.ID)
 		if existed {
-			r.Log.Info("auto_archive", "id", ls.ID, "screen", ls.Screen, "title", ls.Title, "match", match, "reason", "archived_on_server")
+			r.Log.Info("auto_archive", "id", c.ls.ID, "screen", c.ls.Screen, "title", c.ls.Title,
+				"match", c.match, "reason", "archived_on_server")
+		}
+	}
+
+	// Reset the grace clock for sessions no longer archived (or gone).
+	for id := range r.seen {
+		if !current[id] {
+			delete(r.seen, id)
 		}
 	}
 }

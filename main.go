@@ -108,6 +108,15 @@ func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome stri
 		}
 	}
 
+	grace := 15 * time.Minute
+	if v := os.Getenv("CLAUDE_REMOTE_ARCHIVE_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			grace = d
+		} else {
+			logger.Warn("session_sync", "msg", "bad CLAUDE_REMOTE_ARCHIVE_GRACE, using default", "value", v)
+		}
+	}
+
 	client := &cloud.Client{
 		BaseURL:         envOr("CLAUDE_REMOTE_CLOUD_BASE", cloud.DefaultBaseURL),
 		CredentialsPath: credsPath,
@@ -116,11 +125,12 @@ func startSessionSync(logger *slog.Logger, mgr *session.Manager, claudeHome stri
 		Cloud:      client,
 		Manager:    mgr,
 		Interval:   interval,
+		Grace:      grace,
 		Log:        logger,
 		MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
 	}
 
-	logger.Info("session_sync_enabled", "interval", interval.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
+	logger.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
 	go rec.Run(context.Background())
 }
 
