@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build binaries
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p bin
+          go build -trimpath -ldflags="-s -w" -o bin/claude-remote-api .
+          go build -trimpath -ldflags="-s -w" -o bin/crctl ./cmd/crctl
+          go build -trimpath -ldflags="-s -w" -o bin/ngrok-forward ./cmd/ngrok-forward
+
+      - name: Build .deb
+        env:
+          VERSION: ${{ env.VERSION }}
+          ARCH: ${{ matrix.arch }}
+        run: sh packaging/deb/build.sh dist
+
+      - name: Tarball
+        run: tar -C bin -czf "dist/code-remote_${VERSION}_linux_${{ matrix.arch }}.tar.gz" claude-remote-api crctl ngrok-forward
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

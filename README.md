@@ -40,6 +40,33 @@ go build -o crctl ./cmd/crctl                         # the local CLI
 go build -o ngrok-forward ./cmd/ngrok-forward         # optional: ngrok tunnel (Go SDK)
 ```
 
+## Install (Debian/Ubuntu)
+
+One-liner (latest release):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pigri/code-remote/main/install.sh | sh
+```
+
+Or grab the `.deb` from [Releases](https://github.com/pigri/code-remote/releases)
+and `sudo dpkg -i code-remote_<version>_<arch>.deb`. It installs the three
+binaries to `/usr/bin`, per-user systemd units to `/usr/lib/systemd/user`, and
+Synapse templates + `env.example` to `/usr/share/code-remote`. `crctl` then
+works immediately; the postinst prints the steps to enable the API/WAF/ngrok
+services.
+
+Build a `.deb` locally: `make deb` (output in `./dist`).
+
+## Releasing
+
+Push a `vX.Y.Z` tag; CI (`.github/workflows/release.yaml`) cross-builds the
+binaries for amd64/arm64, packages a `.deb` and a tarball per arch, and
+publishes a GitHub release with `SHA256SUMS.txt` and generated notes.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Run the server
 
 ```sh

@@ -1,0 +1,17 @@
+[Unit]
+Description=claude-remote API (localhost; Synapse is its only client)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/code-remote/.env
+ExecStart=/usr/bin/claude-remote-api
+KillMode=process
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -3,6 +3,7 @@
 /server
 /ngrok-forward
 /bin/
+/dist/
 *.exe
 
 # Local env / secrets (only the .example is tracked)

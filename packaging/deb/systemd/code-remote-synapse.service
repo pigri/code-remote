@@ -1,0 +1,20 @@
+[Unit]
+Description=claude-remote Synapse WAF (:8080 -> API)
+After=code-remote-api.service
+Wants=code-remote-api.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/code-remote/.env
+# Render runtime config (substitutes the real NGROK_DOMAIN into the upstreams host).
+ExecStartPre=/usr/share/code-remote/render-config.sh
+ExecStart=/usr/bin/synapse --mode proxy \
+  -c %h/.local/share/code-remote/config.yaml \
+  --security-rules-config %h/.local/share/code-remote/security_rules.yaml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

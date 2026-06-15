@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    cat <<'EOF'
+code-remote installed.
+
+Local CLI (no setup needed):
+  crctl ls | crctl new | crctl rm <id>
+
+Remote API + Synapse WAF + ngrok (per-user systemd):
+  mkdir -p ~/.config/code-remote
+  cp /usr/share/code-remote/env.example ~/.config/code-remote/.env   # set tokens + NGROK_DOMAIN
+  chmod 600 ~/.config/code-remote/.env
+  systemctl --user daemon-reload
+  systemctl --user enable --now code-remote-api code-remote-synapse code-remote-ngrok
+  loginctl enable-linger "$USER"     # keep running after logout / on boot
+
+The API/WAF/ngrok path needs the `claude` and `synapse` binaries on PATH.
+EOF
+fi
+
+exit 0

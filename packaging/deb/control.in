@@ -1,0 +1,15 @@
+Package: code-remote
+Version: __VERSION__
+Architecture: __ARCH__
+Maintainer: pigri <david@papp.ai>
+Section: utils
+Priority: optional
+Depends: screen
+Homepage: https://github.com/pigri/code-remote
+Description: Remote control for detached Claude Code sessions
+ REST API and the crctl CLI to launch and manage detached Claude Code
+ sessions over GNU screen. Ships per-user systemd units for an optional
+ remote edge (ngrok) fronted by a Synapse WAF.
+ .
+ crctl works locally out of the box (no API or token). The API/WAF/ngrok
+ path additionally needs the `claude` and `synapse` binaries.

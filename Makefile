@@ -4,15 +4,17 @@
 #   sudo make install   # install crctl -> /usr/local/bin
 #   make deploy     # install server + ngrok-forward into the systemd runtime dir
 
-GO      ?= go
-BINDIR  ?= bin
-PREFIX  ?= /usr/local
-RUNDIR  ?= $(HOME)/.local/share/code-remote
-INSTALL ?= install
+GO       ?= go
+BINDIR   ?= bin
+PREFIX   ?= /usr/local
+RUNDIR   ?= $(HOME)/.local/share/code-remote
+INSTALL  ?= install
+VERSION  ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
+DEB_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 
 SRV_SRC := $(filter-out %_test.go,$(wildcard *.go))
 
-.PHONY: all build install uninstall deploy test vet fmt tidy clean
+.PHONY: all build install uninstall deploy deb test vet fmt tidy clean
 
 all: build
 
@@ -45,6 +47,10 @@ deploy: $(BINDIR)/claude-remote-api $(BINDIR)/ngrok-forward
 	$(INSTALL) -m 0755 $(BINDIR)/claude-remote-api $(RUNDIR)/
 	$(INSTALL) -m 0755 $(BINDIR)/ngrok-forward $(RUNDIR)/
 
+## deb: build a .deb (code-remote_$(VERSION)_$(DEB_ARCH).deb) into ./dist
+deb: build
+	VERSION=$(VERSION) ARCH=$(DEB_ARCH) BIN_DIR=$(BINDIR) sh packaging/deb/build.sh dist
+
 test:
 	$(GO) test ./...
 
@@ -58,4 +64,4 @@ tidy:
 	$(GO) mod tidy
 
 clean:
-	rm -rf $(BINDIR)
+	rm -rf $(BINDIR) dist
