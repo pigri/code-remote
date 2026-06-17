@@ -25,8 +25,9 @@ func TestResolveDir(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got != filepath.Clean(proj) {
-			t.Errorf("got %q want %q", got, proj)
+		want, _ := filepath.EvalSymlinks(proj) // resolveDir returns the symlink-resolved path
+		if got != want {
+			t.Errorf("got %q want %q", got, want)
 		}
 	})
 
@@ -58,10 +59,21 @@ func TestResolveDir(t *testing.T) {
 		}
 	})
 
-	t.Run("no workspace root allows any existing dir", func(t *testing.T) {
+	t.Run("no workspace root is rejected (fail closed)", func(t *testing.T) {
 		m := &Manager{}
-		if _, err := m.resolveDir(outside); err != nil {
-			t.Errorf("unexpected error: %v", err)
+		if _, err := m.resolveDir(outside); !errors.Is(err, ErrInvalidDir) {
+			t.Errorf("want ErrInvalidDir when no root configured, got %v", err)
+		}
+	})
+
+	t.Run("symlink inside root pointing outside is rejected", func(t *testing.T) {
+		link := filepath.Join(root, "escape")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+		m := &Manager{WorkspaceRoot: root}
+		if _, err := m.resolveDir(link); !errors.Is(err, ErrInvalidDir) {
+			t.Errorf("want ErrInvalidDir for symlink escape, got %v", err)
 		}
 	})
 }

@@ -55,30 +55,48 @@ func (m *Manager) ValidID(id string) bool { return uuidRe.MatchString(id) }
 
 func (m *Manager) screenName(id string) string { return m.Prefix + "-" + id }
 
-// resolveDir validates that dir exists, is a directory, and (when
-// WorkspaceRoot is set) lives inside that root — no traversal escapes. Returns
-// the cleaned absolute path. Errors wrap ErrInvalidDir.
+// resolveDir validates that dir exists, is a directory, and lives inside the
+// configured WorkspaceRoot — with no traversal escapes. Returns the
+// symlink-resolved absolute path. Errors wrap ErrInvalidDir.
+//
+// Fail-closed: the dir feature requires CLAUDE_WORKSPACE_ROOT to be set. Without
+// a root there is no containment boundary, so we refuse rather than allow an
+// arbitrary working directory. Symlinks are resolved on BOTH sides so a symlink
+// *inside* the workspace can't point outside it (a lexical check would miss that).
 func (m *Manager) resolveDir(dir string) (string, error) {
+	if m.WorkspaceRoot == "" {
+		return "", fmt.Errorf("%w: CLAUDE_WORKSPACE_ROOT is not configured", ErrInvalidDir)
+	}
+
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
 	}
-	abs = filepath.Clean(abs)
-	if m.WorkspaceRoot != "" {
-		root := filepath.Clean(m.WorkspaceRoot)
-		rel, err := filepath.Rel(root, abs)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("%w: %q is outside the workspace root", ErrInvalidDir, dir)
-		}
+
+	// EvalSymlinks resolves every symlink in the path and also fails if the
+	// path does not exist — so this both canonicalizes and confirms existence.
+	realDir, err := filepath.EvalSymlinks(filepath.Clean(abs))
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
 	}
-	info, err := os.Stat(abs)
+	realRoot, err := filepath.EvalSymlinks(filepath.Clean(m.WorkspaceRoot))
+	if err != nil {
+		return "", fmt.Errorf("%w: workspace root %q: %v", ErrInvalidDir, m.WorkspaceRoot, err)
+	}
+
+	rel, err := filepath.Rel(realRoot, realDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %q is outside the workspace root", ErrInvalidDir, dir)
+	}
+
+	info, err := os.Stat(realDir)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("%w: %q is not a directory", ErrInvalidDir, dir)
 	}
-	return abs, nil
+	return realDir, nil
 }
 
 // Create assigns a UUID, launches a detached claude bound to it, and returns
