@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ import (
 // screen manager or the remote HTTP API.
 type backend interface {
 	list() ([]session.Session, error)
-	create() (session.Session, error)
+	create(dir string) (session.Session, error)
 	remove(id string) error
 }
 
@@ -98,8 +99,8 @@ func pickBackend() (backend, error) {
 
 type localBackend struct{ mgr *session.Manager }
 
-func (b *localBackend) list() ([]session.Session, error) { return b.mgr.List() }
-func (b *localBackend) create() (session.Session, error) { return b.mgr.Create() }
+func (b *localBackend) list() ([]session.Session, error)           { return b.mgr.List() }
+func (b *localBackend) create(dir string) (session.Session, error) { return b.mgr.Create(dir) }
 func (b *localBackend) remove(id string) error {
 	if !b.mgr.ValidID(id) {
 		return fmt.Errorf("invalid session id")
@@ -122,26 +123,41 @@ func (b *httpBackend) list() ([]session.Session, error) {
 	var resp struct {
 		Sessions []session.Session `json:"sessions"`
 	}
-	if err := b.do(http.MethodGet, "/sessions", &resp); err != nil {
+	if err := b.do(http.MethodGet, "/sessions", nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Sessions, nil
 }
 
-func (b *httpBackend) create() (session.Session, error) {
+func (b *httpBackend) create(dir string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions", &s)
+	var in any
+	if dir != "" {
+		in = map[string]string{"dir": dir}
+	}
+	err := b.do(http.MethodPost, "/sessions", in, &s)
 	return s, err
 }
 
 func (b *httpBackend) remove(id string) error {
-	return b.do(http.MethodDelete, "/sessions/"+id, nil)
+	return b.do(http.MethodDelete, "/sessions/"+id, nil, nil)
 }
 
-func (b *httpBackend) do(method, path string, out any) error {
-	req, err := http.NewRequest(method, b.base+path, nil)
+func (b *httpBackend) do(method, path string, in, out any) error {
+	var reqBody io.Reader
+	if in != nil {
+		data, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		reqBody = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, b.base+path, reqBody)
 	if err != nil {
 		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+b.token)
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
@@ -190,7 +206,19 @@ func list(be backend) error {
 }
 
 func create(be backend) error {
-	s, err := be.create()
+	dir := ""
+	for i, args := 0, os.Args[2:]; i < len(args); i++ {
+		switch {
+		case args[i] == "--dir" || args[i] == "-d":
+			if i+1 < len(args) {
+				dir = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(args[i], "--dir="):
+			dir = strings.TrimPrefix(args[i], "--dir=")
+		}
+	}
+	s, err := be.create(dir)
 	if err != nil {
 		return err
 	}
@@ -234,7 +262,7 @@ func usage() {
 
 Usage:
   crctl ls            list running sessions (default)
-  crctl new           start a new detached claude session
+  crctl new [--dir D] start a new detached claude session (optional working dir)
   crctl rm <id>       stop a session
 
 Runs LOCALLY by default (drives screen/claude directly; no API or token).

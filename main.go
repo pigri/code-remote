@@ -53,7 +53,8 @@ func main() {
 		}
 	}
 
-	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome}
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome,
+		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT")}
 
 	logger := auditLogger()
 
@@ -242,13 +243,27 @@ type server struct {
 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
-	sess, err := s.mgr.Create()
+	// Optional JSON body: {"dir": "<path under CLAUDE_WORKSPACE_ROOT>"}.
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	sess, err := s.mgr.Create(body.Dir)
 	if err != nil {
-		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error())
+		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error(), "dir", body.Dir)
+		if errors.Is(err, session.ErrInvalidDir) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
+	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", body.Dir)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
