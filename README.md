@@ -1,5 +1,16 @@
 # code-remote
 
+> **DevelopNet fork** of [`pigri/code-remote`](https://github.com/pigri/code-remote).
+> Adds one feature: an optional **per-session working directory**.
+>
+> - `POST /sessions` accepts an optional body `{"dir": "/abs/path"}`; the session's
+>   `claude` process starts in that directory. `crctl new --dir <path>` does the same.
+> - When `CLAUDE_WORKSPACE_ROOT` is set, `dir` **must** resolve under it (no `..`
+>   escapes; missing/non-dir paths are rejected with `400`). Omitting `dir` keeps
+>   the original behaviour.
+> - We deliberately do **not** add any "send input/prompt to a session" endpoint
+>   — sessions are driven by a human via the Claude app, to avoid prompt injection.
+
 A small REST API (Go) that launches detached [Claude Code](https://claude.com/claude-code)
 sessions inside GNU `screen` and lets you drive them remotely — plus `crctl`, a
 local CLI to list/start/stop them. The API and `crctl` are dependency-free

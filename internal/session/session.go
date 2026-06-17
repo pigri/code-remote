@@ -6,6 +6,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,11 +32,17 @@ type Session struct {
 // Manager wraps screen + claude. It only ever touches screen sessions named
 // "<Prefix>-<uuid>", so it can't see or kill unrelated screens on the host.
 type Manager struct {
-	Prefix     string // e.g. "pigri-dev-remote"
-	ClaudeBin  string // path to the claude binary
-	ScreenBin  string // path to the screen binary
-	ClaudeHome string // ~/.claude (for reading session titles)
+	Prefix        string // e.g. "pigri-dev-remote"
+	ClaudeBin     string // path to the claude binary
+	ScreenBin     string // path to the screen binary
+	ClaudeHome    string // ~/.claude (for reading session titles)
+	WorkspaceRoot string // optional; when set, Create's dir must resolve under it
 }
+
+// ErrInvalidDir is returned (wrapped) when a requested session working
+// directory is missing, not a directory, or escapes WorkspaceRoot. Callers can
+// errors.Is(err, ErrInvalidDir) to surface it as a 400 rather than a 500.
+var ErrInvalidDir = errors.New("invalid working directory")
 
 var (
 	uuidRe       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -48,9 +55,37 @@ func (m *Manager) ValidID(id string) bool { return uuidRe.MatchString(id) }
 
 func (m *Manager) screenName(id string) string { return m.Prefix + "-" + id }
 
+// resolveDir validates that dir exists, is a directory, and (when
+// WorkspaceRoot is set) lives inside that root — no traversal escapes. Returns
+// the cleaned absolute path. Errors wrap ErrInvalidDir.
+func (m *Manager) resolveDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
+	}
+	abs = filepath.Clean(abs)
+	if m.WorkspaceRoot != "" {
+		root := filepath.Clean(m.WorkspaceRoot)
+		rel, err := filepath.Rel(root, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("%w: %q is outside the workspace root", ErrInvalidDir, dir)
+		}
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%w: %q is not a directory", ErrInvalidDir, dir)
+	}
+	return abs, nil
+}
+
 // Create assigns a UUID, launches a detached claude bound to it, and returns
 // the session (best-effort enriched with PID/status/title once it registers).
-func (m *Manager) Create() (Session, error) {
+// If dir is non-empty the claude process is started with that working
+// directory (validated against WorkspaceRoot); empty dir = process default.
+func (m *Manager) Create(dir string) (Session, error) {
 	id, err := genUUID()
 	if err != nil {
 		return Session{}, err
@@ -62,6 +97,13 @@ func (m *Manager) Create() (Session, error) {
 	// the on-disk session id (~/.claude/.../<id>.jsonl) all the same value.
 	cmd := exec.Command(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--session-id", id, "--remote-control", id)
+	if dir != "" {
+		resolved, err := m.resolveDir(dir)
+		if err != nil {
+			return Session{}, err
+		}
+		cmd.Dir = resolved
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("start screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
