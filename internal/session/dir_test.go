@@ -31,6 +31,18 @@ func TestResolveDir(t *testing.T) {
 		}
 	})
 
+	t.Run("relative dir is anchored to the workspace root", func(t *testing.T) {
+		m := &Manager{WorkspaceRoot: root}
+		got, err := m.resolveDir("chapek-platform") // relative input
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want, _ := filepath.EvalSymlinks(proj)
+		if got != want {
+			t.Errorf("relative dir should resolve under root: got %q want %q", got, want)
+		}
+	})
+
 	t.Run("dir outside root rejected", func(t *testing.T) {
 		m := &Manager{WorkspaceRoot: root}
 		if _, err := m.resolveDir(outside); !errors.Is(err, ErrInvalidDir) {
@@ -38,9 +50,14 @@ func TestResolveDir(t *testing.T) {
 		}
 	})
 
-	t.Run("traversal escape rejected", func(t *testing.T) {
+	t.Run("traversal to an existing dir outside root rejected", func(t *testing.T) {
+		// A `..` path that resolves to a REAL directory outside the root, so this
+		// exercises the containment (Rel) rejection — not the "doesn't exist"
+		// branch. root and outside are siblings under the test's temp dir, so
+		// root/../<outside-name> == outside.
+		via := filepath.Join(root, "..", filepath.Base(outside))
 		m := &Manager{WorkspaceRoot: root}
-		if _, err := m.resolveDir(filepath.Join(proj, "..", "..", "etc")); !errors.Is(err, ErrInvalidDir) {
+		if _, err := m.resolveDir(via); !errors.Is(err, ErrInvalidDir) {
 			t.Errorf("want ErrInvalidDir, got %v", err)
 		}
 	})

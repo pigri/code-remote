@@ -63,19 +63,30 @@ func (m *Manager) screenName(id string) string { return m.Prefix + "-" + id }
 // a root there is no containment boundary, so we refuse rather than allow an
 // arbitrary working directory. Symlinks are resolved on BOTH sides so a symlink
 // *inside* the workspace can't point outside it (a lexical check would miss that).
+//
+// Note: there is a small TOCTOU window between this check and cmd.Dir taking
+// effect at process spawn — a path component could be swapped for a symlink in
+// between. The returned path is fully canonical (EvalSymlinks'd) so the window
+// is narrow, and exploiting it requires local write access to a component
+// already inside WorkspaceRoot (i.e. inside the trust boundary). For a
+// single-tenant workspace that's acceptable; a multi-tenant deployment would
+// want openat2(RESOLVE_BENEATH)-style enforcement instead.
 func (m *Manager) resolveDir(dir string) (string, error) {
 	if m.WorkspaceRoot == "" {
 		return "", fmt.Errorf("%w: CLAUDE_WORKSPACE_ROOT is not configured", ErrInvalidDir)
 	}
 
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
+	// Anchor relative inputs to the workspace root (not the daemon's CWD) so the
+	// API contract — "dir is under the workspace root" — matches behaviour.
+	abs := dir
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(m.WorkspaceRoot, abs)
 	}
+	abs = filepath.Clean(abs)
 
 	// EvalSymlinks resolves every symlink in the path and also fails if the
 	// path does not exist — so this both canonicalizes and confirms existence.
-	realDir, err := filepath.EvalSymlinks(filepath.Clean(abs))
+	realDir, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidDir, err)
 	}
