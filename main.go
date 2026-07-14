@@ -24,9 +24,20 @@ import (
 )
 
 func main() {
+	// ctx is cancelled on SIGINT/SIGTERM to drive a graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	os.Exit(run(ctx))
+}
+
+// run wires up and serves the API, returning a process exit code. It blocks
+// until ctx is cancelled (signal) or the server fails, then shuts down
+// gracefully. Split out from main so it's testable without spawning a process.
+func run(ctx context.Context) int {
 	token := os.Getenv("CLAUDE_REMOTE_API_TOKEN")
 	if token == "" {
-		log.Fatal("CLAUDE_REMOTE_API_TOKEN is required (this endpoint launches processes; refusing to run unauthenticated)")
+		log.Print("CLAUDE_REMOTE_API_TOKEN is required (this endpoint launches processes; refusing to run unauthenticated)")
+		return 1
 	}
 
 	addr := envOr("CLAUDE_REMOTE_API_ADDR", ":8080")
@@ -37,11 +48,13 @@ func main() {
 	// fails fast here if either is missing.
 	screenBin, err := exec.LookPath(envOr("SCREEN_BIN", "screen"))
 	if err != nil {
-		log.Fatalf("screen binary not found: %v", err)
+		log.Printf("screen binary not found: %v", err)
+		return 1
 	}
 	claudeBin, err := exec.LookPath(envOr("CLAUDE_BIN", "claude"))
 	if err != nil {
-		log.Fatalf("claude binary not found: %v", err)
+		log.Printf("claude binary not found: %v", err)
+		return 1
 	}
 
 	// ~/.claude holds the per-session logs we read titles from. CLAUDE_HOME
@@ -57,10 +70,6 @@ func main() {
 		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT")}
 
 	logger := auditLogger()
-
-	// ctx is cancelled on SIGINT/SIGTERM to drive a graceful shutdown.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	sync := startSessionSync(ctx, logger, mgr, claudeHome)
 
@@ -99,8 +108,9 @@ func main() {
 	}
 
 	if exitErr != nil {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // auditLogger builds the structured logger used for the audit trail.
@@ -219,9 +229,19 @@ func defaultDBPath() string {
 	return filepath.Join(dir, "code-remote", "code-remote.db")
 }
 
+// sessionManager is the slice of *session.Manager the HTTP handlers depend on.
+// Narrowing to an interface lets tests inject failures to exercise error paths.
+type sessionManager interface {
+	Create(dir string) (session.Session, error)
+	List() ([]session.Session, error)
+	Get(id string) (session.Session, bool, error)
+	Kill(id string) (bool, error)
+	ValidID(id string) bool
+}
+
 // newHandler builds the fully-wired HTTP handler (audit log + routes + bearer
 // auth) for the given session manager. Shared by main() and the e2e tests.
-func newHandler(token string, mgr *session.Manager, logger *slog.Logger) http.Handler {
+func newHandler(token string, mgr sessionManager, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -238,7 +258,7 @@ func newHandler(token string, mgr *session.Manager, logger *slog.Logger) http.Ha
 }
 
 type server struct {
-	mgr *session.Manager
+	mgr sessionManager
 	log *slog.Logger
 }
 

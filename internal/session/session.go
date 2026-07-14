@@ -44,6 +44,9 @@ type Manager struct {
 // errors.Is(err, ErrInvalidDir) to surface it as a 400 rather than a 500.
 var ErrInvalidDir = errors.New("invalid working directory")
 
+// execCommand is the seam for shelling out to screen; overridden in tests.
+var execCommand = exec.Command
+
 var (
 	uuidRe       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	screenLineRe = regexp.MustCompile(`^(\d+)\.(\S+)`)                // "12345.name" in `screen -ls`
@@ -124,7 +127,7 @@ func (m *Manager) Create(dir string) (Session, error) {
 	// screen -dmS <prefix>-<id> claude --session-id <id> --remote-control <id>
 	// Pinning --session-id makes the screen name, the Remote Control name, and
 	// the on-disk session id (~/.claude/.../<id>.jsonl) all the same value.
-	cmd := exec.Command(m.ScreenBin, "-dmS", name,
+	cmd := execCommand(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--session-id", id, "--remote-control", id)
 	if dir != "" {
 		resolved, err := m.resolveDir(dir)
@@ -149,7 +152,7 @@ func (m *Manager) Create(dir string) (Session, error) {
 // List returns all running sessions owned by this manager.
 func (m *Manager) List() ([]Session, error) {
 	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
-	out, _ := exec.Command(m.ScreenBin, "-ls").CombinedOutput()
+	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
 	return m.parseSessions(string(out)), nil
 }
 
@@ -203,7 +206,7 @@ func (m *Manager) Kill(id string) (bool, error) {
 	if _, ok, err := m.Get(id); err != nil || !ok {
 		return false, err
 	}
-	if out, err := exec.Command(m.ScreenBin, "-S", m.screenName(id), "-X", "quit").CombinedOutput(); err != nil {
+	if out, err := execCommand(m.ScreenBin, "-S", m.screenName(id), "-X", "quit").CombinedOutput(); err != nil {
 		return true, fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return true, nil
