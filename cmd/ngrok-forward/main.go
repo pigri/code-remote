@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -22,21 +23,36 @@ import (
 	"golang.ngrok.com/ngrok/v2"
 )
 
-func main() {
+// config is the resolved runtime configuration read from the environment.
+type config struct {
+	token, domain, upstream string
+}
+
+// loadConfig reads and validates the NGROK_* environment, applying the default
+// upstream. Split from main so the validation is testable without the SDK.
+func loadConfig() (config, error) {
 	token := os.Getenv("NGROK_AUTHTOKEN")
 	if token == "" {
-		log.Fatal("NGROK_AUTHTOKEN is required")
+		return config{}, errors.New("NGROK_AUTHTOKEN is required")
 	}
 	domain := os.Getenv("NGROK_DOMAIN")
 	if domain == "" {
-		log.Fatal("NGROK_DOMAIN is required (your reserved ngrok domain)")
+		return config{}, errors.New("NGROK_DOMAIN is required (your reserved ngrok domain)")
 	}
 	upstream := os.Getenv("NGROK_UPSTREAM")
 	if upstream == "" {
 		upstream = "http://localhost:8080" // Synapse WAF
 	}
+	return config{token: token, domain: domain, upstream: upstream}, nil
+}
 
-	agent, err := ngrok.NewAgent(ngrok.WithAuthtoken(token))
+func main() {
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	agent, err := ngrok.NewAgent(ngrok.WithAuthtoken(cfg.token))
 	if err != nil {
 		log.Fatalf("ngrok agent: %v", err)
 	}
@@ -46,13 +62,13 @@ func main() {
 	defer stop()
 
 	fwd, err := agent.Forward(ctx,
-		ngrok.WithUpstream(upstream),
-		ngrok.WithURL(domain),
+		ngrok.WithUpstream(cfg.upstream),
+		ngrok.WithURL(cfg.domain),
 	)
 	if err != nil {
 		log.Fatalf("ngrok forward: %v", err)
 	}
 
-	log.Printf("ngrok forwarding %s -> %s", fwd.URL(), upstream)
+	log.Printf("ngrok forwarding %s -> %s", fwd.URL(), cfg.upstream)
 	<-fwd.Done()
 }

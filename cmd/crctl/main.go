@@ -41,39 +41,44 @@ type backend interface {
 }
 
 func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fail(err)
+	}
+}
+
+// run dispatches a crctl invocation (args after the program name). Split from
+// main so the command routing is testable without spawning a process.
+func run(args []string) error {
 	cmd := "ls"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
+	if len(args) > 0 {
+		cmd = args[0]
 	}
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
 		usage()
-		return
+		return nil
 	}
 
 	be, err := pickBackend()
 	if err != nil {
-		fail(err)
+		return err
 	}
 
 	switch cmd {
 	case "ls", "list":
-		err = list(be)
+		return list(be)
 	case "new", "create":
-		err = create(be)
+		return create(be, args[1:])
 	case "rm", "stop", "delete":
-		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: crctl rm <id>")
-		} else {
-			err = be.remove(os.Args[2])
-			if err == nil {
-				fmt.Printf("%s stopped\n", os.Args[2])
-			}
+		if len(args) < 2 {
+			return fmt.Errorf("usage: crctl rm <id>")
 		}
+		if err := be.remove(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("%s stopped\n", args[1])
+		return nil
 	default:
-		err = fmt.Errorf("unknown command %q (try: ls, new, rm)", cmd)
-	}
-	if err != nil {
-		fail(err)
+		return fmt.Errorf("unknown command %q (try: ls, new, rm)", cmd)
 	}
 }
 
@@ -205,9 +210,9 @@ func list(be backend) error {
 	return w.Flush()
 }
 
-func create(be backend) error {
+func create(be backend, args []string) error {
 	dir := ""
-	for i, args := 0, os.Args[2:]; i < len(args); i++ {
+	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--dir" || args[i] == "-d":
 			if i+1 < len(args) {
