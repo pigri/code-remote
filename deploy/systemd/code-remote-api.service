@@ -9,7 +9,7 @@ EnvironmentFile=%h/work/private/claude-code-remote/.env
 ExecStart=%h/.local/share/code-remote/claude-remote-api
 # Don't kill running claude sessions on restart; they're rediscovered.
 KillMode=process
-Restart=on-failure
+Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true

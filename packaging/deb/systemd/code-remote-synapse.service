@@ -11,7 +11,7 @@ ExecStartPre=/usr/share/code-remote/render-config.sh
 ExecStart=/usr/bin/synapse --mode proxy \
   -c %h/.local/share/code-remote/config.yaml \
   --security-rules-config %h/.local/share/code-remote/security_rules.yaml
-Restart=on-failure
+Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
