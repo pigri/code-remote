@@ -13,7 +13,20 @@ import (
 	_ "modernc.org/sqlite"
 
 	"claude-remote-api/internal/cloud"
+	"claude-remote-api/internal/session"
 )
+
+// DefaultPath is where the SQLite mirror lives when CLAUDE_REMOTE_DB is unset:
+// $XDG_DATA_HOME/code-remote/code-remote.db (or ~/.local/share/... as a
+// fallback). Shared by the API server and crctl so both read the same mirror.
+func DefaultPath() string {
+	dir := os.Getenv("XDG_DATA_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dir, "code-remote", "code-remote.db")
+}
 
 // DB is a SQLite session store. It implements cloud.Store.
 type DB struct{ db *sql.DB }
@@ -93,6 +106,67 @@ ON CONFLICT(uuid) DO UPDATE SET
 	_, err := d.db.Exec(q, r.UUID, r.Screen, r.Title, r.Cwd, r.LocalStatus, r.CloudStatus,
 		r.ConnectionStatus, r.BridgeSessionID, r.CreatedAt, time.Now().Unix())
 	return err
+}
+
+// Record marks a session as live — created or resumed. It upserts the mirror
+// row and clears the archive markers, stamping resumed_at when the session had
+// previously been archived. This is what makes a session discoverable as
+// resumable after its screen is gone, independent of the cloud reconciler.
+func (d *DB) Record(uuid, screen, title, cwd, status, createdAt string) error {
+	// cloud_status/connection_status/bridge_session_id are seeded to '' so a
+	// fresh row scans cleanly (AllSessions reads them as non-null strings); the
+	// ON CONFLICT clause omits them, preserving any values the reconciler set.
+	const q = `
+INSERT INTO sessions
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?)
+ON CONFLICT(uuid) DO UPDATE SET
+	screen=excluded.screen,
+	title=CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
+	cwd=CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
+	local_status=excluded.local_status,
+	created_at=CASE WHEN excluded.created_at != '' THEN excluded.created_at ELSE sessions.created_at END,
+	resumed_at=CASE WHEN sessions.archived_at IS NOT NULL THEN excluded.updated_at ELSE sessions.resumed_at END,
+	archived_at=NULL,
+	first_seen_archived=NULL,
+	updated_at=excluded.updated_at;`
+	now := time.Now().Unix()
+	if _, err := d.db.Exec(q, uuid, screen, title, cwd, status, createdAt, now); err != nil {
+		return err
+	}
+	return d.logEvent(uuid, "record", status)
+}
+
+// StoppedSessions returns mirror rows that are not currently running — the
+// resumable set. `running` is the live screen listing (their ids are excluded);
+// `keep` filters candidates (e.g. "has an on-disk claude log"), skipped when nil.
+// Rows come back as session.Session marked Status "Stopped".
+func (d *DB) StoppedSessions(running []session.Session, keep func(id string) bool) ([]session.Session, error) {
+	all, err := d.AllSessions()
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[string]bool, len(running))
+	for _, r := range running {
+		live[r.ID] = true
+	}
+	var out []session.Session
+	for _, s := range all {
+		if live[s.UUID] {
+			continue
+		}
+		if keep != nil && !keep(s.UUID) {
+			continue
+		}
+		out = append(out, session.Session{
+			ID:        s.UUID,
+			Screen:    s.Screen,
+			Title:     s.Title,
+			Status:    "Stopped",
+			CreatedAt: s.CreatedAt,
+		})
+	}
+	return out, nil
 }
 
 func (d *DB) FirstSeenArchived(id string) (time.Time, bool, error) {

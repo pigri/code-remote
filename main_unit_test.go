@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"claude-remote-api/internal/session"
+	"claude-remote-api/internal/store"
 )
 
 func TestEnvOr(t *testing.T) {
@@ -164,7 +165,7 @@ func TestCreateInvalidDir(t *testing.T) {
 
 func TestStartSessionSyncDisabled(t *testing.T) {
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
-	h := startSessionSync(context.Background(), discardLogger(), nil, "")
+	h := startSessionSync(context.Background(), discardLogger(), &session.Manager{}, nil)
 	if h != nil {
 		t.Fatalf("startSessionSync disabled = %v, want nil", h)
 	}
@@ -177,7 +178,7 @@ func TestStartSessionSyncDisabled(t *testing.T) {
 func TestStartSessionSyncNoCredentials(t *testing.T) {
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "on")
 	t.Setenv("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(t.TempDir(), "does-not-exist.json"))
-	if h := startSessionSync(context.Background(), discardLogger(), nil, ""); h != nil {
+	if h := startSessionSync(context.Background(), discardLogger(), &session.Manager{}, nil); h != nil {
 		t.Fatalf("startSessionSync without creds = %v, want nil", h)
 	}
 }
@@ -190,24 +191,28 @@ func TestStartSessionSyncEnabled(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "on")
 	t.Setenv("CLAUDE_REMOTE_CREDENTIALS", creds)
-	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(dir, "mirror.db"))
 	t.Setenv("CLAUDE_REMOTE_SYNC_INTERVAL", "50ms")
 	t.Setenv("CLAUDE_REMOTE_ARCHIVE_GRACE", "1m")
+
+	// The store is owned by run() now; here we pass one in and confirm the
+	// reconciler accepts it.
+	db, err := store.Open(filepath.Join(dir, "mirror.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
 
 	// A pre-cancelled context: the reconciler runs one ctx-bound reconcile that
 	// fails fast (no network) and returns immediately, so this stays hermetic.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	h := startSessionSync(ctx, discardLogger(), &session.Manager{Prefix: "test-sync"}, "")
+	h := startSessionSync(ctx, discardLogger(), &session.Manager{Prefix: "test-sync"}, db)
 	if h == nil {
 		t.Fatal("startSessionSync enabled = nil, want handle")
 	}
 	if err := h.Close(); err != nil {
 		t.Errorf("Close = %v, want nil", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "mirror.db")); err != nil {
-		t.Errorf("store db not created: %v", err)
 	}
 }
 
@@ -219,13 +224,12 @@ func TestStartSessionSyncBadDurations(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "on")
 	t.Setenv("CLAUDE_REMOTE_CREDENTIALS", creds)
-	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(dir, "mirror.db"))
 	t.Setenv("CLAUDE_REMOTE_SYNC_INTERVAL", "garbage") // -> warn + default
 	t.Setenv("CLAUDE_REMOTE_ARCHIVE_GRACE", "garbage") // -> warn + default
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	h := startSessionSync(ctx, discardLogger(), &session.Manager{Prefix: "test-sync"}, "")
+	h := startSessionSync(ctx, discardLogger(), &session.Manager{Prefix: "test-sync"}, nil)
 	if h == nil {
 		t.Fatal("startSessionSync = nil, want handle")
 	}

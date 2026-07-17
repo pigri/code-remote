@@ -17,7 +17,7 @@ func testHandler() http.Handler {
 	// ScreenBin/ClaudeHome empty: List shells out to a missing binary, the
 	// error is ignored, and it returns an empty list — enough to exercise
 	// routing/auth/validation without needing screen installed.
-	return newHandler(testToken, &session.Manager{Prefix: "test-rc"}, nil)
+	return newHandler(testToken, &session.Manager{Prefix: "test-rc"}, nil, nil)
 }
 
 func do(t *testing.T, h http.Handler, method, path, token string) *httptest.ResponseRecorder {
@@ -143,7 +143,7 @@ func TestAuthCannotBeBypassed(t *testing.T) {
 func TestAuditLog(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	h := newHandler(testToken, &session.Manager{Prefix: "test-rc"}, logger)
+	h := newHandler(testToken, &session.Manager{Prefix: "test-rc"}, logger, nil)
 
 	// A denied attempt and an accepted one.
 	do(t, h, http.MethodGet, "/sessions", "wrong")
