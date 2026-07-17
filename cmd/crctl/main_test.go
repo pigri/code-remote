@@ -8,9 +8,32 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"claude-remote-api/internal/session"
 )
+
+func TestHumanizeAge(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name, ts, want string
+	}{
+		{"empty", "", "-"},
+		{"unparseable", "not-a-time", "-"},
+		{"seconds -> just now", now.Add(-30 * time.Second).Format(time.RFC3339), "just now"},
+		{"minutes", now.Add(-5 * time.Minute).Format(time.RFC3339), "5m ago"},
+		{"hours", now.Add(-3 * time.Hour).Format(time.RFC3339), "3h ago"},
+		{"days", now.Add(-49 * time.Hour).Format(time.RFC3339), "2d ago"},
+		{"future clock skew", now.Add(2 * time.Hour).Format(time.RFC3339), "just now"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := humanizeAge(c.ts); got != c.want {
+				t.Errorf("humanizeAge(%q) = %q, want %q", c.ts, got, c.want)
+			}
+		})
+	}
+}
 
 // captureStdout returns whatever fn writes to os.Stdout.
 func captureStdout(t *testing.T, fn func()) string {
@@ -33,9 +56,12 @@ type fakeBackend struct {
 	sessions   []session.Session
 	created    session.Session
 	createdDir string
+	resumed    session.Session
+	resumedID  string
 	removed    string
 	listErr    error
 	createErr  error
+	resumeErr  error
 	removeErr  error
 }
 
@@ -43,6 +69,10 @@ func (f *fakeBackend) list() ([]session.Session, error) { return f.sessions, f.l
 func (f *fakeBackend) create(dir string) (session.Session, error) {
 	f.createdDir = dir
 	return f.created, f.createErr
+}
+func (f *fakeBackend) resume(id string) (session.Session, error) {
+	f.resumedID = id
+	return f.resumed, f.resumeErr
 }
 func (f *fakeBackend) remove(id string) error { f.removed = id; return f.removeErr }
 
@@ -69,6 +99,41 @@ func TestListCommand(t *testing.T) {
 		})
 		if !contains(out, "id1") || !contains(out, "(untitled)") {
 			t.Errorf("listing missing expected content:\n%s", out)
+		}
+	})
+	t.Run("stopped session shows resume action", func(t *testing.T) {
+		be := &fakeBackend{sessions: []session.Session{
+			{ID: "run1", Status: "Detached", Screen: "p-run1"},
+			{ID: "stop1", Status: "Stopped", Screen: "p-stop1"},
+		}}
+		out := captureStdout(t, func() {
+			if err := list(be); err != nil {
+				t.Errorf("list: %v", err)
+			}
+		})
+		if !contains(out, "crctl resume stop1") {
+			t.Errorf("stopped session should show resume action:\n%s", out)
+		}
+		if !contains(out, "screen -r p-run1") {
+			t.Errorf("running session should show attach action:\n%s", out)
+		}
+	})
+	t.Run("last active column", func(t *testing.T) {
+		be := &fakeBackend{sessions: []session.Session{
+			{ID: "run1", Status: "Detached", Screen: "p-run1",
+				LastActive: time.Now().Add(-2 * time.Hour).Format(time.RFC3339)},
+			{ID: "run2", Status: "Detached", Screen: "p-run2"}, // no timestamp -> "-"
+		}}
+		out := captureStdout(t, func() {
+			if err := list(be); err != nil {
+				t.Errorf("list: %v", err)
+			}
+		})
+		if !contains(out, "LAST ACTIVE") {
+			t.Errorf("header should include LAST ACTIVE column:\n%s", out)
+		}
+		if !contains(out, "2h ago") {
+			t.Errorf("expected humanized age '2h ago':\n%s", out)
 		}
 	})
 	t.Run("error", func(t *testing.T) {
@@ -152,6 +217,21 @@ func TestRunDispatch(t *testing.T) {
 		})
 		if !contains(out, "s1 stopped") {
 			t.Errorf("rm output = %q, want 's1 stopped'", out)
+		}
+	})
+	t.Run("resume success prints", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			if err := run([]string{"resume", "s2"}); err != nil {
+				t.Errorf("run resume: %v", err)
+			}
+		})
+		if !contains(out, "resumed s2") {
+			t.Errorf("resume output = %q, want 'resumed s2'", out)
+		}
+	})
+	t.Run("resume missing id", func(t *testing.T) {
+		if err := run([]string{"resume"}); err == nil {
+			t.Error("run resume without id should error")
 		}
 	})
 	t.Run("rm missing id", func(t *testing.T) {

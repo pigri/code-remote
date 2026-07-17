@@ -101,9 +101,15 @@ All routes except `/healthz` require `Authorization: Bearer <token>`.
 | --- | --- | --- |
 | `GET` | `/healthz` | Liveness (no auth) |
 | `POST` | `/sessions` | Start a session → `201` |
-| `GET` | `/sessions` | List running sessions |
+| `POST` | `/sessions/{id}/resume` | Resume a stopped session by id → `201` |
+| `GET` | `/sessions` | List running + resumable (stopped) sessions |
 | `GET` | `/sessions/{id}` | One session (`404` if gone) |
 | `DELETE` | `/sessions/{id}` | Stop a session (`screen -X quit`) |
+
+`POST /sessions/{id}/resume` relaunches an existing session whose `screen` was
+stopped but whose on-disk Claude log still exists — it runs `claude --resume
+<id>` in the session's original working directory (read from the log). Returns
+`404` if there's no log to resume, `409` if the session is already running.
 
 `{id}` is the Claude session UUID. Session shape:
 
@@ -212,6 +218,7 @@ clock (no mirror).
 ```sh
 crctl ls            # list running sessions (default)
 crctl new           # start a new session
+crctl resume <id>   # relaunch a stopped session by id
 crctl rm <id>       # stop a session
 ```
 
@@ -225,11 +232,27 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | `CLAUDE_REMOTE_API_URL` | remote | API base URL (e.g. `http://127.0.0.1:9000`) |
 | `CLAUDE_REMOTE_API_TOKEN` | remote | bearer token (required when the URL is set) |
 | `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides |
+| `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
+
+`crctl ls` lists **running** sessions plus **resumable** ones — sessions
+code-remote previously started whose `screen` is gone (killed, host reboot,
+auto-archived) but whose on-disk Claude log survives. Resumable rows show
+`Stopped` and a `crctl resume <id>` hint instead of a `screen -r` attach command.
+
+Resumable tracking is backed by the shared SQLite mirror (`CLAUDE_REMOTE_DB`):
+sessions are recorded there on `new`/`resume`, so both the API server and a local
+`crctl` see the same set. Without a writable store, `ls` falls back to
+running-only.
+
+The `LAST ACTIVE` column is the age of the session's on-disk Claude log (which
+claude appends to as the conversation runs), so it reflects real activity — not
+just when the screen was started.
 
 ```
 $ crctl ls
-ID                                    TITLE                     STATUS    ATTACH
-6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  screen -r pigri-dev-remote-6fd0b321-...
+ID                                    TITLE                     STATUS    LAST ACTIVE  ACTION
+6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  4m ago       screen -r pigri-dev-remote-6fd0b321-...
+a9c1cf1e-ce20-4833-9eeb-7acf5c327506  old refactor              Stopped   2d ago       crctl resume a9c1cf1e-ce20-4833-9eeb-...
 ```
 
 ## Deploy (systemd)

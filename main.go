@@ -66,16 +66,34 @@ func run(ctx context.Context) int {
 		}
 	}
 
-	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome,
-		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT")}
-
 	logger := auditLogger()
 
-	sync := startSessionSync(ctx, logger, mgr, claudeHome)
+	// Durable session mirror: records sessions on create/resume so they stay
+	// discoverable (resumable) after their screen is gone, and backs the
+	// resumable listing in GET /sessions. Best-effort — a nil store degrades to
+	// running-only, and the reconciler falls back to its in-memory grace clock.
+	var db *store.DB
+	dbPath := envOr("CLAUDE_REMOTE_DB", defaultDBPath())
+	if d, err := store.Open(dbPath); err != nil {
+		logger.Warn("session_store_disabled", "reason", "open failed", "path", dbPath, "error", err.Error())
+	} else {
+		db = d
+		logger.Info("session_store_enabled", "path", dbPath)
+	}
+
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome,
+		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT")}
+	var stopped session.StoppedLister
+	if db != nil {
+		mgr.Store = db
+		stopped = db
+	}
+
+	sync := startSessionSync(ctx, logger, mgr, db)
 
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(token, mgr, logger),
+		Handler:           newHandler(token, mgr, logger, stopped),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -104,7 +122,12 @@ func run(ctx context.Context) int {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	if err := sync.Close(); err != nil {
-		logger.Warn("store_close", "error", err.Error())
+		logger.Warn("sync_close", "error", err.Error())
+	}
+	if db != nil {
+		if err := db.Close(); err != nil {
+			logger.Warn("store_close", "error", err.Error())
+		}
 	}
 
 	if exitErr != nil {
@@ -125,11 +148,10 @@ func auditLogger() *slog.Logger {
 	return slog.New(h)
 }
 
-// syncHandle owns the background reconciler's lifecycle and its store. Close
-// waits for the reconciler goroutine to stop, then closes the store (which
-// checkpoints the SQLite WAL). Safe to call on a nil handle.
+// syncHandle owns the background reconciler's lifecycle. Close waits for the
+// reconciler goroutine to stop; the store it writes to is owned (and closed) by
+// run(). Safe to call on a nil handle.
 type syncHandle struct {
-	db   io.Closer
 	done <-chan struct{}
 }
 
@@ -138,10 +160,7 @@ func (h *syncHandle) Close() error {
 		return nil
 	}
 	if h.done != nil {
-		<-h.done // let the in-flight reconcile finish before closing the DB
-	}
-	if h.db != nil {
-		return h.db.Close()
+		<-h.done // let the in-flight reconcile finish before the store is closed
 	}
 	return nil
 }
@@ -149,17 +168,17 @@ func (h *syncHandle) Close() error {
 // startSessionSync launches the background reconciler that polls the Anthropic
 // Sessions API and quits the screen of any session archived (or deleted)
 // server-side. The reconciler stops when ctx is cancelled; the returned handle's
-// Close waits for it and closes the store.
+// Close waits for it. The store (db) is owned by the caller.
 //
 // It's enabled by default but degrades gracefully: if the OAuth credentials
 // file is absent (e.g. a headless host with no logged-in claude), it logs once
 // and does nothing. Disable explicitly with CLAUDE_REMOTE_SESSION_SYNC=off.
-func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Manager, claudeHome string) *syncHandle {
+func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Manager, db *store.DB) *syncHandle {
 	if !envBool("CLAUDE_REMOTE_SESSION_SYNC", true) {
 		return nil
 	}
 
-	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(claudeHome, ".credentials.json"))
+	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(mgr.ClaudeHome, ".credentials.json"))
 	if _, err := os.Stat(credsPath); err != nil {
 		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
 		return nil
@@ -196,16 +215,11 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 		MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
 	}
 
-	// Durable session mirror + ledger. Best-effort: on failure the reconciler
-	// falls back to its in-memory grace clock (mirror is dropped).
+	// Durable session mirror + ledger (owned by run()). Best-effort: when it's
+	// absent the reconciler falls back to its in-memory grace clock.
 	h := &syncHandle{}
-	dbPath := envOr("CLAUDE_REMOTE_DB", defaultDBPath())
-	if db, err := store.Open(dbPath); err != nil {
-		logger.Warn("session_store_disabled", "reason", "open failed", "path", dbPath, "error", err.Error())
-	} else {
+	if db != nil {
 		rec.Store = db
-		h.db = db
-		logger.Info("session_store_enabled", "path", dbPath)
 	}
 
 	logger.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
@@ -219,21 +233,16 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 }
 
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
-// /code-remote.db.
-func defaultDBPath() string {
-	dir := os.Getenv("XDG_DATA_HOME")
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dir, "code-remote", "code-remote.db")
-}
+// /code-remote.db. Shared with crctl via store.DefaultPath.
+func defaultDBPath() string { return store.DefaultPath() }
 
 // sessionManager is the slice of *session.Manager the HTTP handlers depend on.
 // Narrowing to an interface lets tests inject failures to exercise error paths.
 type sessionManager interface {
 	Create(dir string) (session.Session, error)
+	Resume(id string) (session.Session, error)
 	List() ([]session.Session, error)
+	ListAll(store session.StoppedLister) ([]session.Session, error)
 	Get(id string) (session.Session, bool, error)
 	Kill(id string) (bool, error)
 	ValidID(id string) bool
@@ -241,16 +250,17 @@ type sessionManager interface {
 
 // newHandler builds the fully-wired HTTP handler (audit log + routes + bearer
 // auth) for the given session manager. Shared by main() and the e2e tests.
-func newHandler(token string, mgr sessionManager, logger *slog.Logger) http.Handler {
+func newHandler(token string, mgr sessionManager, logger *slog.Logger, stopped session.StoppedLister) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	srv := &server{mgr: mgr, log: logger}
+	srv := &server{mgr: mgr, log: logger, stopped: stopped}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /sessions", srv.create)
+	mux.HandleFunc("POST /sessions/{id}/resume", srv.resume)
 	mux.HandleFunc("GET /sessions", srv.list)
 	mux.HandleFunc("GET /sessions/{id}", srv.get)
 	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
@@ -258,8 +268,9 @@ func newHandler(token string, mgr sessionManager, logger *slog.Logger) http.Hand
 }
 
 type server struct {
-	mgr sessionManager
-	log *slog.Logger
+	mgr     sessionManager
+	log     *slog.Logger
+	stopped session.StoppedLister // optional; enables resumable sessions in list
 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
@@ -287,8 +298,33 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sess)
 }
 
+// resume relaunches a stopped session by its id (POST /sessions/{id}/resume).
+func (s *server) resume(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.mgr.ValidID(id) {
+		writeErr(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	sess, err := s.mgr.Resume(id)
+	if err != nil {
+		switch {
+		case errors.Is(err, session.ErrAlreadyRunning):
+			s.log.Info("session_resume", "remote", clientIP(r), "id", id, "existed", true)
+			writeErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, session.ErrNotResumable):
+			writeErr(w, http.StatusNotFound, err.Error())
+		default:
+			s.log.Error("session_resume", "remote", clientIP(r), "id", id, "error", err.Error())
+			writeErr(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
+	writeJSON(w, http.StatusCreated, sess)
+}
+
 func (s *server) list(w http.ResponseWriter, _ *http.Request) {
-	sessions, err := s.mgr.List()
+	sessions, err := s.mgr.ListAll(s.stopped)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

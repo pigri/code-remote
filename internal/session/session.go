@@ -21,28 +21,54 @@ import (
 // screen name suffix and the Remote Control name, so the listing can join the
 // three. Title is the live display name the user sets inside Claude.
 type Session struct {
-	ID        string `json:"id"`              // claude session id == --session-id (uuid)
-	Screen    string `json:"screen"`          // screen session name (<prefix>-<id>)
-	Title     string `json:"title,omitempty"` // claude custom-title, read live
-	PID       string `json:"pid,omitempty"`
-	Status    string `json:"status,omitempty"` // Detached | Attached
-	CreatedAt string `json:"created_at,omitempty"`
+	ID         string `json:"id"`              // claude session id == --session-id (uuid)
+	Screen     string `json:"screen"`          // screen session name (<prefix>-<id>)
+	Title      string `json:"title,omitempty"` // claude custom-title, read live
+	PID        string `json:"pid,omitempty"`
+	Status     string `json:"status,omitempty"` // Detached | Attached | Stopped
+	CreatedAt  string `json:"created_at,omitempty"`
+	LastActive string `json:"last_active,omitempty"` // RFC3339; mtime of the session log
+}
+
+// Recorder durably notes sessions the manager starts, so a session stays
+// discoverable (resumable) after its screen is gone. Optional; a nil Store
+// simply means no resumable tracking. Satisfied by *store.DB.
+type Recorder interface {
+	Record(uuid, screen, title, cwd, status, createdAt string) error
+}
+
+// StoppedLister reads back the resumable set: sessions the recorder knows about
+// that are not in the live `running` listing and pass `keep`. Satisfied by
+// *store.DB. Kept as an interface here to avoid a session→store import cycle.
+type StoppedLister interface {
+	StoppedSessions(running []Session, keep func(id string) bool) ([]Session, error)
 }
 
 // Manager wraps screen + claude. It only ever touches screen sessions named
 // "<Prefix>-<uuid>", so it can't see or kill unrelated screens on the host.
 type Manager struct {
-	Prefix        string // e.g. "pigri-dev-remote"
-	ClaudeBin     string // path to the claude binary
-	ScreenBin     string // path to the screen binary
-	ClaudeHome    string // ~/.claude (for reading session titles)
-	WorkspaceRoot string // optional; when set, Create's dir must resolve under it
+	Prefix        string   // e.g. "pigri-dev-remote"
+	ClaudeBin     string   // path to the claude binary
+	ScreenBin     string   // path to the screen binary
+	ClaudeHome    string   // ~/.claude (for reading session titles)
+	WorkspaceRoot string   // optional; when set, Create's dir must resolve under it
+	Store         Recorder // optional; records sessions for resumable tracking
 }
 
 // ErrInvalidDir is returned (wrapped) when a requested session working
 // directory is missing, not a directory, or escapes WorkspaceRoot. Callers can
 // errors.Is(err, ErrInvalidDir) to surface it as a 400 rather than a 500.
 var ErrInvalidDir = errors.New("invalid working directory")
+
+// ErrAlreadyRunning is returned by Resume when the session's screen is already
+// live — resuming would double-launch claude against the same session. Callers
+// can errors.Is to surface it as a 409.
+var ErrAlreadyRunning = errors.New("session already running")
+
+// ErrNotResumable is returned by Resume when no claude session log exists on
+// disk for the id, so there is nothing to resume. Callers can errors.Is to
+// surface it as a 404.
+var ErrNotResumable = errors.New("session not resumable")
 
 // execCommand is the seam for shelling out to screen; overridden in tests.
 var execCommand = exec.Command
@@ -129,12 +155,13 @@ func (m *Manager) Create(dir string) (Session, error) {
 	// the on-disk session id (~/.claude/.../<id>.jsonl) all the same value.
 	cmd := execCommand(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--session-id", id, "--remote-control", id)
+	cwd := ""
 	if dir != "" {
 		resolved, err := m.resolveDir(dir)
 		if err != nil {
 			return Session{}, err
 		}
-		cmd.Dir = resolved
+		cmd.Dir, cwd = resolved, resolved
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("start screen session: %v: %s", err, strings.TrimSpace(string(out)))
@@ -142,11 +169,181 @@ func (m *Manager) Create(dir string) (Session, error) {
 
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
+			m.record(s, cwd)
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return Session{ID: id, Screen: name, Status: "Detached"}, nil
+	s := Session{ID: id, Screen: name, Status: "Detached"}
+	m.record(s, cwd)
+	return s, nil
+}
+
+// record best-effort notes a live session in the Store so it stays resumable
+// after its screen is gone. No-op when no Store is wired; when cwd is unknown
+// it's recovered from the session's on-disk log. Errors are swallowed — the
+// mirror is a convenience, not a correctness dependency.
+func (m *Manager) record(s Session, cwd string) {
+	if m.Store == nil {
+		return
+	}
+	if cwd == "" {
+		if _, c := m.sessionLog(s.ID); c != "" {
+			cwd = c
+		}
+	}
+	status := s.Status
+	if status == "" {
+		status = "Detached"
+	}
+	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt)
+}
+
+// HasSessionLog reports whether an on-disk claude log exists for id (i.e. the
+// session can actually be resumed). Always false when ClaudeHome is unset.
+func (m *Manager) HasSessionLog(id string) bool {
+	return m.sessionLogPath(id) != ""
+}
+
+// lastActive returns the session log's modification time — a proxy for when the
+// conversation was last active (claude appends to the log as it runs). Formatted
+// RFC3339; empty when there's no log or ClaudeHome is unset.
+func (m *Manager) lastActive(id string) string {
+	p := m.sessionLogPath(id)
+	if p == "" {
+		return ""
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return ""
+	}
+	return fi.ModTime().UTC().Format(time.RFC3339)
+}
+
+// ListAll returns the live sessions plus, when a store is provided, the
+// resumable (stopped) ones — those the store recorded whose screen is no longer
+// running and whose on-disk log still exists. Stopped entries carry live titles
+// and Status "Stopped". A nil store yields just the running sessions.
+func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
+	running, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+	if store == nil {
+		return running, nil
+	}
+	stopped, err := store.StoppedSessions(running, m.HasSessionLog)
+	if err != nil {
+		return running, nil // best-effort: still surface the running set
+	}
+	for i := range stopped {
+		stopped[i].Status = "Stopped"
+		stopped[i].LastActive = m.lastActive(stopped[i].ID)
+		if t := m.title(stopped[i].ID); t != "" {
+			stopped[i].Title = t
+		}
+	}
+	return append(running, stopped...), nil
+}
+
+// Resume relaunches a detached claude bound to an EXISTING session id whose
+// screen is no longer running — the inverse of a kill. It reads the session's
+// recorded working directory from claude's on-disk log so the resumed process
+// starts in the same project (claude scopes --resume to the project dir).
+//
+// Errors: ErrAlreadyRunning if the screen is still live (nothing to do);
+// ErrNotResumable if no session log exists on disk (when ClaudeHome is set —
+// without it we can't check, so we attempt the resume and let claude decide).
+func (m *Manager) Resume(id string) (Session, error) {
+	if !m.ValidID(id) {
+		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
+	}
+
+	// Already running? Resuming would launch a second claude against the same
+	// session id — refuse and hand back the live session so the caller can 409.
+	if s, ok, err := m.Get(id); err != nil {
+		return Session{}, err
+	} else if ok {
+		return s, ErrAlreadyRunning
+	}
+
+	// The session must exist on disk to resume. When ClaudeHome is unset we
+	// can't look, so cwd stays empty and we let claude report a missing session.
+	logPath, cwd := m.sessionLog(id)
+	if m.ClaudeHome != "" && logPath == "" {
+		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, id)
+	}
+
+	name := m.screenName(id)
+	// screen -dmS <prefix>-<id> claude --resume <id> --remote-control <id>
+	cmd := execCommand(m.ScreenBin, "-dmS", name,
+		m.ClaudeBin, "--resume", id, "--remote-control", id)
+	// Restore the original project dir if it still exists; otherwise fall back
+	// to claude's default rather than failing the spawn on a stale path.
+	if cwd != "" {
+		if info, err := os.Stat(cwd); err == nil && info.IsDir() {
+			cmd.Dir = cwd
+		}
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return Session{}, fmt.Errorf("resume screen session: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	for i := 0; i < 10; i++ {
+		if s, ok, _ := m.Get(id); ok {
+			m.record(s, cwd)
+			return s, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	s := Session{ID: id, Screen: name, Status: "Detached"}
+	m.record(s, cwd)
+	return s, nil
+}
+
+// sessionLogPath returns the path to claude's on-disk log for id, or "" when no
+// log exists or ClaudeHome is unset. Cheap: a glob with no file read.
+func (m *Manager) sessionLogPath(id string) string {
+	if m.ClaudeHome == "" {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(m.ClaudeHome, "projects", "*", id+".jsonl"))
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
+}
+
+// sessionLog returns the path to claude's on-disk log for id and the working
+// directory recorded inside it. Both are "" when no log exists or ClaudeHome is
+// unset. The cwd is read from the first record that carries one.
+func (m *Manager) sessionLog(id string) (path, cwd string) {
+	path = m.sessionLogPath(id)
+	if path == "" {
+		return "", ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return path, ""
+	}
+	return path, parseCwd(data)
+}
+
+// parseCwd returns the first cwd recorded in a claude session .jsonl. Records
+// vary in shape, so we scan for any line carrying a non-empty "cwd".
+func parseCwd(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, `"cwd"`) {
+			continue // cheap filter before the JSON parse
+		}
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Cwd != "" {
+			return rec.Cwd
+		}
+	}
+	return ""
 }
 
 // List returns all running sessions owned by this manager.
@@ -172,7 +369,7 @@ func (m *Manager) parseSessions(out string) []Session {
 		if !ok || !m.ValidID(id) {
 			continue
 		}
-		s := Session{ID: id, Screen: name, PID: pid, Title: m.title(id)}
+		s := Session{ID: id, Screen: name, PID: pid, Title: m.title(id), LastActive: m.lastActive(id)}
 		switch {
 		case strings.Contains(line, "(Detached)"):
 			s.Status = "Detached"

@@ -65,19 +65,27 @@ type stubMgr struct {
 	getErr      error
 	killExisted bool
 	killErr     error
+	resumeSess  session.Session
+	resumeErr   error
 }
 
 func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the manager
 func (s *stubMgr) Create(string) (session.Session, error) {
 	return s.createSess, s.createErr
 }
+func (s *stubMgr) Resume(string) (session.Session, error) {
+	return s.resumeSess, s.resumeErr
+}
 func (s *stubMgr) List() ([]session.Session, error) { return s.listSess, s.listErr }
+func (s *stubMgr) ListAll(session.StoppedLister) ([]session.Session, error) {
+	return s.listSess, s.listErr
+}
 func (s *stubMgr) Get(string) (session.Session, bool, error) {
 	return s.getSess, s.getOK, s.getErr
 }
 func (s *stubMgr) Kill(string) (bool, error) { return s.killExisted, s.killErr }
 
-func stubHandler(m sessionManager) http.Handler { return newHandler(testToken, m, nil) }
+func stubHandler(m sessionManager) http.Handler { return newHandler(testToken, m, nil, nil) }
 
 func send(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -117,7 +125,48 @@ func TestHandlerSuccessPaths(t *testing.T) {
 			t.Errorf("delete = %d, want 200", rr.Code)
 		}
 	})
+	t.Run("resume 201", func(t *testing.T) {
+		m := &stubMgr{resumeSess: session.Session{ID: stubID, Screen: "p-" + stubID}}
+		rr := send(t, stubHandler(m), http.MethodPost, "/sessions/"+stubID+"/resume", "")
+		if rr.Code != http.StatusCreated {
+			t.Errorf("resume = %d, want 201 (%s)", rr.Code, rr.Body)
+		}
+	})
 }
+
+func TestResumeHandlerErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		mgr  *stubMgr
+		path string
+		want int
+	}{
+		{"already running -> 409", &stubMgr{resumeErr: session.ErrAlreadyRunning}, "/sessions/" + stubID + "/resume", http.StatusConflict},
+		{"not resumable -> 404", &stubMgr{resumeErr: session.ErrNotResumable}, "/sessions/" + stubID + "/resume", http.StatusNotFound},
+		{"backend error -> 500", &stubMgr{resumeErr: errors.New("boom")}, "/sessions/" + stubID + "/resume", http.StatusInternalServerError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rr := send(t, stubHandler(c.mgr), http.MethodPost, c.path, "")
+			if rr.Code != c.want {
+				t.Errorf("resume = %d, want %d (%s)", rr.Code, c.want, rr.Body)
+			}
+		})
+	}
+}
+
+func TestResumeHandlerInvalidID(t *testing.T) {
+	m := &badIDMgr{stubMgr: stubMgr{}}
+	rr := send(t, stubHandler(m), http.MethodPost, "/sessions/not-a-uuid/resume", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("resume(bad id) = %d, want 400 (%s)", rr.Code, rr.Body)
+	}
+}
+
+// badIDMgr rejects every id so the handler's ValidID guard can be exercised.
+type badIDMgr struct{ stubMgr }
+
+func (b *badIDMgr) ValidID(string) bool { return false }
 
 func TestHandlerInternalErrors(t *testing.T) {
 	boom := errors.New("backend exploded")
