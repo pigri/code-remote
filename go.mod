@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	golang.ngrok.com/ngrok/v2 v2.1.4
-	modernc.org/sqlite v1.53.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
