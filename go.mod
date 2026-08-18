@@ -3,7 +3,7 @@ module claude-remote-api
 go 1.26.0
 
 require (
-	golang.ngrok.com/ngrok/v2 v2.1.4
+	golang.ngrok.com/ngrok/v2 v2.2.0
 	modernc.org/sqlite v1.53.0
 )
 
