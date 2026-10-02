@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,6 +52,16 @@ func TestVersion(t *testing.T) {
 	fs.version = "" // --version fails
 	if got := m.Version(); got != "" {
 		t.Errorf("Version(failing) = %q, want empty", got)
+	}
+
+	// A claude that never answers is cut off rather than hanging the caller.
+	orig, origExec := versionTimeout, execCommand
+	versionTimeout = 50 * time.Millisecond
+	execCommand = func(string, ...string) *exec.Cmd { return exec.Command("sleep", "30") }
+	t.Cleanup(func() { versionTimeout, execCommand = orig, origExec })
+	start := time.Now()
+	if got := m.Version(); got != "" || time.Since(start) > 5*time.Second {
+		t.Errorf("Version(hanging) = %q after %v, want empty promptly", got, time.Since(start))
 	}
 }
 
