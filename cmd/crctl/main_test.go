@@ -63,6 +63,14 @@ type fakeBackend struct {
 	createErr  error
 	resumeErr  error
 	removeErr  error
+
+	restartedID string
+	restartErr  error
+	upgradeRes  session.UpgradeResult
+	upgradeErr  error
+	gotRestart  bool
+	gotForce    bool
+	gotIDs      []string
 }
 
 func (f *fakeBackend) list() ([]session.Session, error) { return f.sessions, f.listErr }
@@ -73,6 +81,14 @@ func (f *fakeBackend) create(dir string) (session.Session, error) {
 func (f *fakeBackend) resume(id string) (session.Session, error) {
 	f.resumedID = id
 	return f.resumed, f.resumeErr
+}
+func (f *fakeBackend) restart(id string) (session.Session, error) {
+	f.restartedID = id
+	return session.Session{ID: id, Screen: "p-" + id}, f.restartErr
+}
+func (f *fakeBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
+	f.gotRestart, f.gotForce, f.gotIDs = restart, force, ids
+	return f.upgradeRes, f.upgradeErr
 }
 func (f *fakeBackend) remove(id string) error { f.removed = id; return f.removeErr }
 
@@ -229,6 +245,28 @@ func TestRunDispatch(t *testing.T) {
 			t.Errorf("resume output = %q, want 'resumed s2'", out)
 		}
 	})
+	t.Run("restart success prints", func(t *testing.T) {
+		out := captureStdout(t, func() {
+			if err := run([]string{"restart", "s2"}); err != nil {
+				t.Errorf("run restart: %v", err)
+			}
+		})
+		if !contains(out, "restarted s2") {
+			t.Errorf("restart output = %q, want 'restarted s2'", out)
+		}
+	})
+	t.Run("restart missing id", func(t *testing.T) {
+		if err := run([]string{"restart"}); err == nil {
+			t.Error("run restart without id should error")
+		}
+	})
+	t.Run("upgrade", func(t *testing.T) {
+		_ = captureStdout(t, func() {
+			if err := run([]string{"upgrade"}); err != nil {
+				t.Errorf("run upgrade: %v", err)
+			}
+		})
+	})
 	t.Run("resume missing id", func(t *testing.T) {
 		if err := run([]string{"resume"}); err == nil {
 			t.Error("run resume without id should error")
@@ -333,6 +371,26 @@ func TestHTTPBackend(t *testing.T) {
 			t.Errorf("method=%q body=%q", gotMethod, gotBody)
 		}
 	})
+	t.Run("restart", func(t *testing.T) {
+		s, err := be.restart("s3")
+		if err != nil || s.ID != "s2" {
+			t.Fatalf("restart = %+v, %v", s, err)
+		}
+		if gotMethod != http.MethodPost || gotPath != "/sessions/s3/restart" {
+			t.Errorf("method=%q path=%q", gotMethod, gotPath)
+		}
+	})
+	t.Run("upgrade sends flags", func(t *testing.T) {
+		if _, err := be.upgrade(false, true); err != nil {
+			t.Fatal(err)
+		}
+		if gotPath != "/upgrade" || !contains(gotBody, `"restart":false`) || !contains(gotBody, `"force":true`) {
+			t.Errorf("path=%q body=%q", gotPath, gotBody)
+		}
+		if _, err := be.upgrade(true, false, "s9"); err != nil || !contains(gotBody, `"sessions":["s9"]`) {
+			t.Errorf("upgrade with ids: err=%v body=%q", err, gotBody)
+		}
+	})
 	t.Run("remove", func(t *testing.T) {
 		if err := be.remove("s3"); err != nil {
 			t.Fatal(err)
@@ -416,3 +474,98 @@ func TestHelpers(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestUpgradeCommand(t *testing.T) {
+	t.Run("prints versions and per-session outcomes", func(t *testing.T) {
+		be := &fakeBackend{upgradeRes: session.UpgradeResult{Before: "1.0.0", After: "1.0.1",
+			Sessions: []session.RestartOutcome{
+				{ID: "s1", Title: "work", Action: session.ActionRestarted},
+				{ID: "s2", Action: session.ActionSkipped, Reason: "busy"},
+			}}}
+		out := captureStdout(t, func() {
+			if err := upgrade(be, []string{"--all"}); err != nil {
+				t.Errorf("upgrade: %v", err)
+			}
+		})
+		for _, want := range []string{"1.0.0 -> 1.0.1", "restarted", "skipped", "busy", "(untitled)"} {
+			if !contains(out, want) {
+				t.Errorf("output %q missing %q", out, want)
+			}
+		}
+		if !be.gotRestart || be.gotForce {
+			t.Errorf("flags restart=%v force=%v, want true/false", be.gotRestart, be.gotForce)
+		}
+	})
+	t.Run("flags", func(t *testing.T) {
+		be := &fakeBackend{upgradeRes: session.UpgradeResult{Before: "1.0.1", After: "1.0.1"}}
+		out := captureStdout(t, func() {
+			if err := upgrade(be, []string{"--force"}); err != nil {
+				t.Errorf("upgrade: %v", err)
+			}
+		})
+		if be.gotRestart || !be.gotForce || !contains(out, "already up to date") || !contains(out, "crctl upgrade --all") {
+			t.Errorf("restart=%v force=%v out=%q", be.gotRestart, be.gotForce, out)
+		}
+	})
+	t.Run("session ids limit the restart", func(t *testing.T) {
+		be := &fakeBackend{}
+		_ = captureStdout(t, func() {
+			if err := upgrade(be, []string{"s1", "--force", "s2"}); err != nil {
+				t.Errorf("upgrade: %v", err)
+			}
+		})
+		if len(be.gotIDs) != 2 || be.gotIDs[0] != "s1" || be.gotIDs[1] != "s2" || !be.gotForce {
+			t.Errorf("ids=%v force=%v, want [s1 s2] with force", be.gotIDs, be.gotForce)
+		}
+		if !be.gotRestart {
+			t.Error("ids should imply restart")
+		}
+		if err := upgrade(&fakeBackend{}, []string{"--all", "s1"}); err == nil {
+			t.Error("--all with ids should error")
+		}
+	})
+	t.Run("no sessions", func(t *testing.T) {
+		out := captureStdout(t, func() { _ = upgrade(&fakeBackend{}, []string{"-a"}) })
+		if !contains(out, "claude updated") || !contains(out, "No sessions running.") {
+			t.Errorf("out = %q", out)
+		}
+	})
+	t.Run("failed restart is an error", func(t *testing.T) {
+		be := &fakeBackend{upgradeRes: session.UpgradeResult{
+			Sessions: []session.RestartOutcome{{ID: "s1", Action: session.ActionFailed, Reason: "boom"}}}}
+		_ = captureStdout(t, func() {
+			if err := upgrade(be, []string{"--all"}); err == nil {
+				t.Error("upgrade with a failed restart should error")
+			}
+		})
+	})
+	t.Run("update error and bad flag", func(t *testing.T) {
+		if err := upgrade(&fakeBackend{upgradeErr: io.ErrUnexpectedEOF}, nil); err == nil {
+			t.Error("upgrade should surface backend error")
+		}
+		if err := upgrade(&fakeBackend{}, []string{"--bogus"}); err == nil {
+			t.Error("unknown flag should error")
+		}
+	})
+}
+
+func TestListShowsOutdated(t *testing.T) {
+	be := &fakeBackend{sessions: []session.Session{
+		{ID: "s1", Screen: "p-s1", Status: "Detached", Version: "2.1.278", Outdated: true},
+		{ID: "s2", Screen: "p-s2", Status: "Detached", Version: "2.1.287"},
+		{ID: "s3", Screen: "p-s3", Status: "Stopped"},
+	}}
+	out := captureStdout(t, func() {
+		if err := list(be); err != nil {
+			t.Errorf("list: %v", err)
+		}
+	})
+	for _, want := range []string{"VERSION", "2.1.278 (outdated)", "2.1.287", "1 session(s) running an outdated claude", "crctl upgrade --all"} {
+		if !contains(out, want) {
+			t.Errorf("output %q missing %q", out, want)
+		}
+	}
+	if contains(out, "2.1.287 (outdated)") {
+		t.Errorf("current session flagged outdated: %q", out)
+	}
+}

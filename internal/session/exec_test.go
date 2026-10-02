@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,15 @@ type fakeScreen struct {
 	extra      string   // trailing `screen -ls` lines (foreign sessions, footer)
 	failCreate bool
 	failKill   bool
+
+	// claude stand-ins for the upgrade flow: `--version` prints version, and
+	// `update` moves it to updateTo (or fails).
+	version    string
+	updateTo   string
+	failUpdate bool
+	ps         string   // canned `ps -o pid=,ppid=` output ("<pid> <ppid>" lines)
+	killed     []string // screen names quit via -S <name> -X quit
+	launches   []string // full argv of each -dmS launch, space-joined
 }
 
 func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
@@ -37,10 +47,31 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 			out, exit = "cannot create session", 1
 		} else {
 			f.created = append(f.created, args[1]) // args[1] is <prefix>-<id>
+			f.launches = append(f.launches, strings.Join(args, " "))
 		}
 	case len(args) > 0 && args[0] == "-S": // kill: -S <name> -X quit
 		if f.failKill {
 			out, exit = "No screen session found", 1
+		} else {
+			f.killed = append(f.killed, args[1])
+			f.created = slices.DeleteFunc(f.created, func(n string) bool { return n == args[1] })
+		}
+	case name == "ps":
+		out = f.ps
+	case len(args) > 0 && args[0] == "--version":
+		if f.version == "" {
+			exit = 1
+		} else {
+			out = f.version + " (Claude Code)\n"
+		}
+	case len(args) > 0 && args[0] == "update":
+		if f.failUpdate {
+			out, exit = "update failed: network unreachable", 1
+		} else {
+			if f.updateTo != "" {
+				f.version = f.updateTo
+			}
+			out = "Successfully updated\n"
 		}
 	}
 	return helperCmd(out, exit)
@@ -50,7 +81,10 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 // which prints HELPER_OUT and exits with HELPER_EXIT (the classic os/exec seam).
 func helperCmd(out string, exit int) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
-	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "HELPER_OUT=" + out, "HELPER_EXIT=" + strconv.Itoa(exit)}
+	// GORACE: under -race a process sleeps 1s at exit by default, which would
+	// add a second to every fake screen/claude call.
+	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "HELPER_OUT=" + out, "HELPER_EXIT=" + strconv.Itoa(exit),
+		"GORACE=atexit_sleep_ms=0"}
 	return cmd
 }
 
@@ -254,7 +288,18 @@ type fakeStore struct {
 	recorded []string // uuids passed to Record
 	lastCwd  string
 	stopped  []Session
+	convs    map[string]string // uuid -> conversation id
 }
+
+func (f *fakeStore) SetConversation(uuid, conv string) error {
+	if f.convs == nil {
+		f.convs = map[string]string{}
+	}
+	f.convs[uuid] = conv
+	return nil
+}
+
+func (f *fakeStore) Conversation(uuid string) (string, error) { return f.convs[uuid], nil }
 
 func (f *fakeStore) Record(uuid, _, _, cwd, _, _ string) error {
 	f.recorded = append(f.recorded, uuid)

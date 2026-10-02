@@ -112,3 +112,68 @@ func TestQueriesForAbsentSession(t *testing.T) {
 		t.Errorf("AllSessions(empty) = %d rows, %v, want 0/nil", len(rows), err)
 	}
 }
+
+func TestConversation(t *testing.T) {
+	d := openTemp(t)
+	const id, conv = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+
+	if got, err := d.Conversation(id); err != nil || got != "" {
+		t.Fatalf("Conversation(unknown) = %q, %v, want empty", got, err)
+	}
+	// Unknown session: nothing to update, and no row is invented.
+	if err := d.SetConversation(id, conv); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.Conversation(id); got != "" {
+		t.Fatalf("SetConversation created a row: %q", got)
+	}
+
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetConversation(id, conv); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Conversation(id); err != nil || got != conv {
+		t.Fatalf("Conversation = %q, %v, want %q", got, err, conv)
+	}
+	// Re-recording the session (resume) must not forget the conversation.
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.Conversation(id); got != conv {
+		t.Errorf("Conversation after Record = %q, want %q", got, conv)
+	}
+}
+
+// A database created before conv_id existed gains the column on Open.
+func TestMigrateAddsConvID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE sessions DROP COLUMN conv_id`); err != nil {
+		t.Fatal(err)
+	}
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen old db: %v", err)
+	}
+	defer d.Close()
+	if err := d.SetConversation(id, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.Conversation(id); got != "c" {
+		t.Errorf("Conversation on migrated db = %q, want c", got)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 {
+		t.Errorf("AllSessions on migrated db = %v, %v", all, err)
+	}
+}

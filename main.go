@@ -91,6 +91,24 @@ func run(ctx context.Context) int {
 
 	sync := startSessionSync(ctx, logger, mgr, db)
 
+	// Keep the store's note of each session's current conversation fresh, so a
+	// session that dies without warning (crash, host reboot) still resumes where
+	// it left off rather than at the conversation it was launched with.
+	if db != nil {
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				mgr.SyncConversations()
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
+	}
+
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           newHandler(token, mgr, logger, stopped),
@@ -241,6 +259,8 @@ func defaultDBPath() string { return store.DefaultPath() }
 type sessionManager interface {
 	Create(dir string) (session.Session, error)
 	Resume(id string) (session.Session, error)
+	Restart(id string) (session.Session, error)
+	Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	List() ([]session.Session, error)
 	ListAll(store session.StoppedLister) ([]session.Session, error)
 	Get(id string) (session.Session, bool, error)
@@ -261,6 +281,8 @@ func newHandler(token string, mgr sessionManager, logger *slog.Logger, stopped s
 	})
 	mux.HandleFunc("POST /sessions", srv.create)
 	mux.HandleFunc("POST /sessions/{id}/resume", srv.resume)
+	mux.HandleFunc("POST /sessions/{id}/restart", srv.restart)
+	mux.HandleFunc("POST /upgrade", srv.upgrade)
 	mux.HandleFunc("GET /sessions", srv.list)
 	mux.HandleFunc("GET /sessions/{id}", srv.get)
 	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
@@ -322,6 +344,76 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
 	writeJSON(w, http.StatusCreated, sess)
 }
+
+// restart stops a session and resumes it under the same id
+// (POST /sessions/{id}/restart). A stopped session is simply resumed.
+func (s *server) restart(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.mgr.ValidID(id) {
+		writeErr(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	sess, err := s.mgr.Restart(id)
+	if err != nil {
+		if errors.Is(err, session.ErrNotResumable) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		s.log.Error("session_restart", "remote", clientIP(r), "id", id, "error", err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.log.Info("session_restart", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
+	writeJSON(w, http.StatusOK, sess)
+}
+
+// upgrade runs `claude update` and restarts the running sessions onto the new
+// version, resuming each under its original id (POST /upgrade).
+// Optional JSON body: {"restart": false} to only update, {"force": true} to
+// also restart sessions that aren't idle, {"sessions": ["<id>", ...]} to
+// restart only those sessions.
+func (s *server) upgrade(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Restart  *bool    `json:"restart"`
+		Force    bool     `json:"force"`
+		Sessions []string `json:"sessions"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	restart := body.Restart == nil || *body.Restart
+
+	// The updater downloads a new binary and can easily outlast the server's
+	// WriteTimeout; give this response its own deadline.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(upgradeWriteTimeout))
+
+	res, err := s.mgr.Upgrade(restart, body.Force, body.Sessions...)
+	if errors.Is(err, session.ErrInvalidID) {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		s.log.Error("upgrade", "remote", clientIP(r), "error", err.Error(), "output", res.Output)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error(), "output": res.Output})
+		return
+	}
+	restarted := 0
+	for _, o := range res.Sessions {
+		if o.Action == session.ActionRestarted {
+			restarted++
+		}
+	}
+	s.log.Info("upgrade", "remote", clientIP(r), "before", res.Before, "after", res.After,
+		"restart", restart, "force", body.Force, "restarted", restarted, "sessions", len(res.Sessions))
+	writeJSON(w, http.StatusOK, res)
+}
+
+// upgradeWriteTimeout bounds a POST /upgrade response: the updater's own cap
+// plus headroom for restarting the sessions afterwards.
+const upgradeWriteTimeout = 10 * time.Minute
 
 func (s *server) list(w http.ResponseWriter, _ *http.Request) {
 	sessions, err := s.mgr.ListAll(s.stopped)
@@ -433,6 +525,9 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status int
 }
+
+// Unwrap exposes the underlying writer to http.ResponseController.
+func (rec *statusRecorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
 func (rec *statusRecorder) WriteHeader(code int) {
 	rec.status = code

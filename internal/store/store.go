@@ -82,8 +82,46 @@ CREATE TABLE IF NOT EXISTS events (
 	at     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
-	_, err := d.db.Exec(schema)
+	if _, err := d.db.Exec(schema); err != nil {
+		return err
+	}
+	// conv_id was added after the first release; CREATE TABLE IF NOT EXISTS
+	// won't add it to an existing database.
+	var n int
+	if err := d.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='conv_id'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := d.db.Exec(`ALTER TABLE sessions ADD COLUMN conv_id TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetConversation notes the claude conversation id a session is currently in.
+// It starts out equal to the session's uuid but drifts when claude moves the
+// session onto a new conversation (e.g. /clear); resuming must follow it. A
+// no-op for sessions the mirror doesn't know.
+func (d *DB) SetConversation(uuid, conv string) error {
+	_, err := d.db.Exec(
+		`UPDATE sessions SET conv_id=? WHERE uuid=? AND COALESCE(conv_id,'') != ?`, conv, uuid, conv)
 	return err
+}
+
+// Conversation returns the last conversation id noted for a session, or ""
+// when none was recorded.
+func (d *DB) Conversation(uuid string) (string, error) {
+	var c sql.NullString
+	err := d.db.QueryRow(`SELECT conv_id FROM sessions WHERE uuid=?`, uuid).Scan(&c)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return c.String, nil
 }
 
 // UpsertSession records/updates the mirrored view, preserving the ledger columns

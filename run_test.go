@@ -67,6 +67,13 @@ type stubMgr struct {
 	killErr     error
 	resumeSess  session.Session
 	resumeErr   error
+	restartSess session.Session
+	restartErr  error
+	upgradeRes  session.UpgradeResult
+	upgradeErr  error
+	gotRestart  bool // restart flag passed to Upgrade
+	gotForce    bool // force flag passed to Upgrade
+	gotIDs      []string
 }
 
 func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the manager
@@ -75,6 +82,13 @@ func (s *stubMgr) Create(string) (session.Session, error) {
 }
 func (s *stubMgr) Resume(string) (session.Session, error) {
 	return s.resumeSess, s.resumeErr
+}
+func (s *stubMgr) Restart(string) (session.Session, error) {
+	return s.restartSess, s.restartErr
+}
+func (s *stubMgr) Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
+	s.gotRestart, s.gotForce, s.gotIDs = restart, force, ids
+	return s.upgradeRes, s.upgradeErr
 }
 func (s *stubMgr) List() ([]session.Session, error) { return s.listSess, s.listErr }
 func (s *stubMgr) ListAll(session.StoppedLister) ([]session.Session, error) {
@@ -187,4 +201,79 @@ func TestHandlerInternalErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRestartHandler(t *testing.T) {
+	path := "/sessions/" + stubID + "/restart"
+	cases := []struct {
+		name string
+		mgr  sessionManager
+		path string
+		want int
+	}{
+		{"restart 200", &stubMgr{restartSess: session.Session{ID: stubID}}, path, http.StatusOK},
+		{"not resumable -> 404", &stubMgr{restartErr: session.ErrNotResumable}, path, http.StatusNotFound},
+		{"backend error -> 500", &stubMgr{restartErr: errors.New("boom")}, path, http.StatusInternalServerError},
+		{"bad id -> 400", &badIDMgr{}, "/sessions/not-a-uuid/restart", http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rr := send(t, stubHandler(c.mgr), http.MethodPost, c.path, "")
+			if rr.Code != c.want {
+				t.Errorf("restart = %d, want %d (%s)", rr.Code, c.want, rr.Body)
+			}
+		})
+	}
+}
+
+func TestUpgradeHandler(t *testing.T) {
+	t.Run("defaults to restart without force", func(t *testing.T) {
+		m := &stubMgr{upgradeRes: session.UpgradeResult{Before: "1.0.0", After: "1.0.1",
+			Sessions: []session.RestartOutcome{{ID: stubID, Action: session.ActionRestarted}}}}
+		rr := send(t, stubHandler(m), http.MethodPost, "/upgrade", "")
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"after":"1.0.1"`) {
+			t.Fatalf("upgrade = %d %s, want 200 with versions", rr.Code, rr.Body)
+		}
+		if !m.gotRestart || m.gotForce {
+			t.Errorf("Upgrade(restart=%v, force=%v), want true/false", m.gotRestart, m.gotForce)
+		}
+	})
+	t.Run("body opts out of restart and sets force", func(t *testing.T) {
+		m := &stubMgr{}
+		rr := send(t, stubHandler(m), http.MethodPost, "/upgrade", `{"restart":false,"force":true}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("upgrade = %d, want 200 (%s)", rr.Code, rr.Body)
+		}
+		if m.gotRestart || !m.gotForce {
+			t.Errorf("Upgrade(restart=%v, force=%v), want false/true", m.gotRestart, m.gotForce)
+		}
+	})
+	t.Run("body limits restarts to named sessions", func(t *testing.T) {
+		m := &stubMgr{}
+		rr := send(t, stubHandler(m), http.MethodPost, "/upgrade", `{"sessions":["`+stubID+`"]}`)
+		if rr.Code != http.StatusOK || len(m.gotIDs) != 1 || m.gotIDs[0] != stubID {
+			t.Fatalf("upgrade = %d ids=%v, want 200 with the one id", rr.Code, m.gotIDs)
+		}
+	})
+	t.Run("invalid session id -> 400", func(t *testing.T) {
+		m := &stubMgr{upgradeErr: session.ErrInvalidID}
+		rr := send(t, stubHandler(m), http.MethodPost, "/upgrade", `{"sessions":["nope"]}`)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("upgrade(bad id) = %d, want 400", rr.Code)
+		}
+	})
+	t.Run("invalid JSON -> 400", func(t *testing.T) {
+		rr := send(t, stubHandler(&stubMgr{}), http.MethodPost, "/upgrade", "{nope")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("upgrade(bad json) = %d, want 400", rr.Code)
+		}
+	})
+	t.Run("update failure -> 500 with output", func(t *testing.T) {
+		m := &stubMgr{upgradeErr: errors.New("claude update: exit status 1"),
+			upgradeRes: session.UpgradeResult{Output: "network unreachable"}}
+		rr := send(t, stubHandler(m), http.MethodPost, "/upgrade", "")
+		if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), "network unreachable") {
+			t.Errorf("upgrade(fail) = %d %s, want 500 carrying updater output", rr.Code, rr.Body)
+		}
+	})
 }
