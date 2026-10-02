@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 // Tunables for the upgrade/restart flow; vars so tests can shorten them.
 var (
 	upgradeTimeout = 5 * time.Minute        // cap on `claude update`
+	versionTimeout = 5 * time.Second        // cap on `claude --version`
 	stopTimeout    = 5 * time.Second        // wait for a killed screen/claude to go away
 	stopPoll       = 100 * time.Millisecond // poll interval while waiting
 )
@@ -50,12 +52,14 @@ type UpgradeResult struct {
 // Version returns the installed claude version (e.g. "2.1.287"), or "" when it
 // can't be determined.
 func (m *Manager) Version() string {
-	out, err := execCommand(m.ClaudeBin, "--version").Output()
+	// Bounded: this runs on every listing, and a claude that doesn't answer
+	// promptly must not hang it.
+	out, err := runTimeout(execCommand(m.ClaudeBin, "--version"), versionTimeout)
 	if err != nil {
 		return ""
 	}
 	// "2.1.287 (Claude Code)" -> "2.1.287"
-	if f := strings.Fields(string(out)); len(f) > 0 {
+	if f := strings.Fields(out); len(f) > 0 {
 		return f[0]
 	}
 	return ""
@@ -89,16 +93,8 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 
 	res := UpgradeResult{Before: m.Version(), Sessions: []RestartOutcome{}}
 
-	var buf bytes.Buffer
-	cmd := execCommand(m.ClaudeBin, "update")
-	cmd.Stdout, cmd.Stderr = &buf, &buf
-	if err := cmd.Start(); err != nil {
-		return res, fmt.Errorf("claude update: %w", err)
-	}
-	timer := time.AfterFunc(upgradeTimeout, func() { _ = cmd.Process.Kill() })
-	err := cmd.Wait()
-	timer.Stop()
-	res.Output = strings.TrimSpace(buf.String())
+	out, err := runTimeout(execCommand(m.ClaudeBin, "update"), upgradeTimeout)
+	res.Output = strings.TrimSpace(out)
 	if err != nil {
 		return res, fmt.Errorf("claude update: %w", err)
 	}
@@ -146,6 +142,20 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 		res.Sessions = append(res.Sessions, o)
 	}
 	return res, nil
+}
+
+// runTimeout runs cmd to completion, killing it after timeout, and returns its
+// combined output.
+func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	timer := time.AfterFunc(timeout, func() { _ = cmd.Process.Kill() })
+	err := cmd.Wait()
+	timer.Stop()
+	return buf.String(), err
 }
 
 // Restart stops a running session and relaunches it under the same screen and

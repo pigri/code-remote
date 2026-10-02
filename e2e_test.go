@@ -23,6 +23,7 @@ const e2eToken = "e2e-token"
 // stub claude: derives the session id from its args, writes a custom-title
 // record where the API expects it, then sleeps so the screen session stays up.
 const stubClaude = `#!/bin/sh
+[ "$1" = "--version" ] && { echo "0.0.0 (stub)"; exit 0; }
 id="$2"   # invoked as: claude --session-id <id> --remote-control <id>
 mkdir -p "$CLAUDE_HOME/projects/e2e"
 printf '{"type":"custom-title","customTitle":"e2e title","sessionId":"%s"}\n' "$id" > "$CLAUDE_HOME/projects/e2e/$id.jsonl"
