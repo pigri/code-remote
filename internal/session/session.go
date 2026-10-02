@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,8 @@ type Session struct {
 	Status     string `json:"status,omitempty"` // Detached | Attached | Stopped
 	CreatedAt  string `json:"created_at,omitempty"`
 	LastActive string `json:"last_active,omitempty"` // RFC3339; mtime of the session log
+	Version    string `json:"version,omitempty"`     // claude version the session is running
+	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -35,6 +38,11 @@ type Session struct {
 // simply means no resumable tracking. Satisfied by *store.DB.
 type Recorder interface {
 	Record(uuid, screen, title, cwd, status, createdAt string) error
+	// SetConversation / Conversation persist the claude conversation id a
+	// session is currently in, which drifts from the session id when claude
+	// moves it onto a new conversation (see Manager.liveIndex).
+	SetConversation(uuid, conv string) error
+	Conversation(uuid string) (string, error)
 }
 
 // StoppedLister reads back the resumable set: sessions the recorder knows about
@@ -53,6 +61,11 @@ type Manager struct {
 	ClaudeHome    string   // ~/.claude (for reading session titles)
 	WorkspaceRoot string   // optional; when set, Create's dir must resolve under it
 	Store         Recorder // optional; records sessions for resumable tracking
+
+	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
+
+	convMu   sync.Mutex
+	convSeen map[string]string // session id -> conversation id last written to Store
 }
 
 // ErrInvalidDir is returned (wrapped) when a requested session working
@@ -155,6 +168,7 @@ func (m *Manager) Create(dir string) (Session, error) {
 	// the on-disk session id (~/.claude/.../<id>.jsonl) all the same value.
 	cmd := execCommand(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--session-id", id, "--remote-control", id)
+	scrubEnv(cmd)
 	cwd := ""
 	if dir != "" {
 		resolved, err := m.resolveDir(dir)
@@ -229,21 +243,117 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	m.annotateLive(running)
 	if store == nil {
 		return running, nil
 	}
-	stopped, err := store.StoppedSessions(running, m.HasSessionLog)
+	// A stopped session is resumable when the conversation it was last in
+	// (storedConv; the session id itself unless it drifted) still has a log.
+	resumable := func(id string) bool { return m.HasSessionLog(m.storedConv(id)) }
+	stopped, err := store.StoppedSessions(running, resumable)
 	if err != nil {
 		return running, nil // best-effort: still surface the running set
 	}
 	for i := range stopped {
+		id := stopped[i].ID
+		conv := m.storedConv(id)
 		stopped[i].Status = "Stopped"
-		stopped[i].LastActive = m.lastActive(stopped[i].ID)
-		if t := m.title(stopped[i].ID); t != "" {
+		stopped[i].LastActive = m.lastActive(conv)
+		if t := m.convTitle(id, conv); t != "" {
 			stopped[i].Title = t
 		}
 	}
 	return append(running, stopped...), nil
+}
+
+// annotateLive fills in what only the session's live claude process knows: the
+// version it is running (and whether that is behind the installed one, i.e. it
+// needs a restart to pick up an upgrade) and, when claude has moved the session
+// onto a new conversation id, that conversation's title and last-active time.
+// It also persists each session's current conversation (see noteConv).
+func (m *Manager) annotateLive(running []Session) {
+	if len(running) == 0 {
+		return
+	}
+	live := m.liveIndex()
+	installed := m.Version()
+	for i := range running {
+		s := &running[i]
+		info := live(*s)
+		m.noteConv(s.ID, info.Conv)
+		if info.Known {
+			s.Version = info.Reg.Version
+			s.Outdated = installed != "" && s.Version != "" && s.Version != installed
+		}
+		if info.Conv != s.ID {
+			if t := m.lastActive(info.Conv); t != "" {
+				s.LastActive = t
+			}
+			if t := m.convTitle(s.ID, info.Conv); t != "" {
+				s.Title = t
+			}
+		}
+	}
+}
+
+// SyncConversations persists the conversation each running session is
+// currently in, so one that later stops without warning (crash, host reboot)
+// still resumes where it left off. Cheap; meant to be called periodically.
+func (m *Manager) SyncConversations() {
+	if m.Store == nil {
+		return
+	}
+	running, _ := m.List()
+	if len(running) == 0 {
+		return
+	}
+	live := m.liveIndex()
+	for _, s := range running {
+		m.noteConv(s.ID, live(s).Conv)
+	}
+}
+
+// noteConv best-effort records in the Store that session id is in conversation
+// conv, skipping the write when this manager already recorded the same value.
+func (m *Manager) noteConv(id, conv string) {
+	if m.Store == nil || conv == "" {
+		return
+	}
+	m.convMu.Lock()
+	defer m.convMu.Unlock()
+	if m.convSeen[id] == conv {
+		return
+	}
+	if m.Store.SetConversation(id, conv) == nil {
+		if m.convSeen == nil {
+			m.convSeen = map[string]string{}
+		}
+		m.convSeen[id] = conv
+	}
+}
+
+// storedConv returns the conversation a session was last recorded in, or id
+// itself when none was recorded or that conversation's log is gone.
+func (m *Manager) storedConv(id string) string {
+	if m.Store == nil {
+		return id
+	}
+	if c, err := m.Store.Conversation(id); err == nil && c != id && m.ValidID(c) && m.HasSessionLog(c) {
+		return c
+	}
+	return id
+}
+
+// convTitle is the display title for session id while it is in conversation
+// conv: the conversation's own title, falling back to the one set under the
+// original session id (a fresh conversation has none until it is renamed).
+func (m *Manager) convTitle(id, conv string) string {
+	if conv != id {
+		if t := m.title(conv); t != "" {
+			return t
+		}
+	}
+	return m.title(id)
 }
 
 // Resume relaunches a detached claude bound to an EXISTING session id whose
@@ -251,11 +361,25 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 // recorded working directory from claude's on-disk log so the resumed process
 // starts in the same project (claude scopes --resume to the project dir).
 //
+// The conversation resumed is the one the session was last recorded in, which
+// is the session id itself unless claude moved it onto a new conversation while
+// it ran (see liveIndex).
+//
 // Errors: ErrAlreadyRunning if the screen is still live (nothing to do);
 // ErrNotResumable if no session log exists on disk (when ClaudeHome is set —
 // without it we can't check, so we attempt the resume and let claude decide).
 func (m *Manager) Resume(id string) (Session, error) {
 	if !m.ValidID(id) {
+		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
+	}
+	return m.resume(id, m.storedConv(id))
+}
+
+// resume relaunches session id's screen, resuming conversation conv. The two
+// differ only when claude moved the session onto a new conversation id while it
+// ran (see Restart); the screen and Remote Control names always stay on id.
+func (m *Manager) resume(id, conv string) (Session, error) {
+	if !m.ValidID(id) || !m.ValidID(conv) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
 
@@ -269,15 +393,16 @@ func (m *Manager) Resume(id string) (Session, error) {
 
 	// The session must exist on disk to resume. When ClaudeHome is unset we
 	// can't look, so cwd stays empty and we let claude report a missing session.
-	logPath, cwd := m.sessionLog(id)
+	logPath, cwd := m.sessionLog(conv)
 	if m.ClaudeHome != "" && logPath == "" {
-		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, id)
+		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, conv)
 	}
 
 	name := m.screenName(id)
-	// screen -dmS <prefix>-<id> claude --resume <id> --remote-control <id>
+	// screen -dmS <prefix>-<id> claude --resume <conv> --remote-control <id>
 	cmd := execCommand(m.ScreenBin, "-dmS", name,
-		m.ClaudeBin, "--resume", id, "--remote-control", id)
+		m.ClaudeBin, "--resume", conv, "--remote-control", id)
+	scrubEnv(cmd)
 	// Restore the original project dir if it still exists; otherwise fall back
 	// to claude's default rather than failing the spawn on a stale path.
 	if cwd != "" {
@@ -292,12 +417,14 @@ func (m *Manager) Resume(id string) (Session, error) {
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
 			m.record(s, cwd)
+			m.noteConv(id, conv)
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	s := Session{ID: id, Screen: name, Status: "Detached"}
 	m.record(s, cwd)
+	m.noteConv(id, conv)
 	return s, nil
 }
 
@@ -344,6 +471,49 @@ func parseCwd(data []byte) string {
 		}
 	}
 	return ""
+}
+
+// inheritedClaudeVars are the per-process markers a running claude exports to
+// its children. A session launched from inside another claude session (e.g.
+// crctl run from a claude shell) must not inherit them: with
+// CLAUDE_CODE_CHILD_SESSION set the new claude treats itself as a child — it
+// neither saves its transcript nor registers in the process registry.
+var inheritedClaudeVars = map[string]bool{
+	"CLAUDECODE":                    true,
+	"CLAUDE_PID":                    true,
+	"AI_AGENT":                      true,
+	"CLAUDE_CODE_CHILD_SESSION":     true,
+	"CLAUDE_CODE_SESSION_ID":        true,
+	"CLAUDE_CODE_BRIDGE_SESSION_ID": true,
+	"CLAUDE_CODE_SESSION_ATTENDED":  true,
+	"CLAUDE_CODE_ENTRYPOINT":        true,
+	"CLAUDE_CODE_EXECPATH":          true,
+	"CLAUDE_CODE_MESSAGING_SOCKET":  true,
+	"CLAUDE_CODE_MESSAGING_TOKEN":   true,
+}
+
+// sessionEnv returns env without the markers of an enclosing claude session, so
+// a launched session always starts as a top-level one. Everything else —
+// including deliberate CLAUDE_CODE_* configuration — is passed through.
+func sessionEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); inheritedClaudeVars[k] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// scrubEnv applies sessionEnv to a launch command's environment (the process
+// environment unless the command already carries its own).
+func scrubEnv(cmd *exec.Cmd) {
+	env := cmd.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	cmd.Env = sessionEnv(env)
 }
 
 // List returns all running sessions owned by this manager.
@@ -400,8 +570,14 @@ func (m *Manager) Get(id string) (Session, bool, error) {
 
 // Kill terminates the session. The bool reports whether it existed.
 func (m *Manager) Kill(id string) (bool, error) {
-	if _, ok, err := m.Get(id); err != nil || !ok {
+	s, ok, err := m.Get(id)
+	if err != nil || !ok {
 		return false, err
+	}
+	// Last chance to learn which conversation the session is in: once the
+	// process is gone only the Store remembers, and Resume depends on it.
+	if m.Store != nil {
+		m.noteConv(id, m.liveIndex()(s).Conv)
 	}
 	if out, err := execCommand(m.ScreenBin, "-S", m.screenName(id), "-X", "quit").CombinedOutput(); err != nil {
 		return true, fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
@@ -453,6 +629,8 @@ func parseTitle(data []byte) string {
 // working directory and, when present, the server-side bridge session id.
 type Registration struct {
 	SessionID       string // claude session UUID (== our screen suffix)
+	PID             int    // claude process id
+	Version         string // claude version the process is running
 	Cwd             string
 	BridgeSessionID string // server session id; "" when not bridged
 	Status          string // idle | busy | shell | waiting | ...
@@ -477,6 +655,8 @@ func (m *Manager) Registrations() ([]Registration, error) {
 		}
 		var rec struct {
 			SessionID       string  `json:"sessionId"`
+			PID             int     `json:"pid"`
+			Version         string  `json:"version"`
 			Cwd             string  `json:"cwd"`
 			BridgeSessionID *string `json:"bridgeSessionId"`
 			Status          string  `json:"status"`
@@ -484,7 +664,7 @@ func (m *Manager) Registrations() ([]Registration, error) {
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
 			continue
 		}
-		reg := Registration{SessionID: rec.SessionID, Cwd: rec.Cwd, Status: rec.Status}
+		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}

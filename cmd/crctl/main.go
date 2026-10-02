@@ -8,6 +8,9 @@
 //	crctl ls                 # list sessions (default)
 //	crctl new                # start a new session
 //	crctl rm <id>            # stop a session
+//	crctl restart <id>       # stop + resume a session under the same id
+//	crctl upgrade --all      # update claude, restart all sessions onto the new version
+//	crctl upgrade <id>...    # update claude, restart just these sessions
 //
 // Env:
 //
@@ -39,6 +42,8 @@ type backend interface {
 	list() ([]session.Session, error)
 	create(dir string) (session.Session, error)
 	resume(id string) (session.Session, error)
+	restart(id string) (session.Session, error)
+	upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	remove(id string) error
 }
 
@@ -80,6 +85,18 @@ func run(args []string) error {
 		}
 		fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
 		return nil
+	case "restart":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: crctl restart <id>")
+		}
+		s, err := be.restart(args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("restarted %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+		return nil
+	case "upgrade", "update":
+		return upgrade(be, args[1:])
 	case "rm", "stop", "delete":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: crctl rm <id>")
@@ -90,7 +107,7 @@ func run(args []string) error {
 		fmt.Printf("%s stopped\n", args[1])
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (try: ls, new, rm)", cmd)
+		return fmt.Errorf("unknown command %q (try: ls, new, resume, restart, upgrade, rm)", cmd)
 	}
 }
 
@@ -131,6 +148,10 @@ type localBackend struct {
 func (b *localBackend) list() ([]session.Session, error)           { return b.mgr.ListAll(b.stopped) }
 func (b *localBackend) create(dir string) (session.Session, error) { return b.mgr.Create(dir) }
 func (b *localBackend) resume(id string) (session.Session, error)  { return b.mgr.Resume(id) }
+func (b *localBackend) restart(id string) (session.Session, error) { return b.mgr.Restart(id) }
+func (b *localBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
+	return b.mgr.Upgrade(restart, force, ids...)
+}
 func (b *localBackend) remove(id string) error {
 	if !b.mgr.ValidID(id) {
 		return fmt.Errorf("invalid session id")
@@ -175,11 +196,35 @@ func (b *httpBackend) resume(id string) (session.Session, error) {
 	return s, err
 }
 
+func (b *httpBackend) restart(id string) (session.Session, error) {
+	var s session.Session
+	err := b.do(http.MethodPost, "/sessions/"+id+"/restart", nil, &s)
+	return s, err
+}
+
+func (b *httpBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
+	var res session.UpgradeResult
+	in := map[string]any{"restart": restart, "force": force}
+	if len(ids) > 0 {
+		in["sessions"] = ids
+	}
+	// The updater downloads a new binary; allow far longer than a normal call.
+	err := b.doTimeout(upgradeTimeout, http.MethodPost, "/upgrade", in, &res)
+	return res, err
+}
+
 func (b *httpBackend) remove(id string) error {
 	return b.do(http.MethodDelete, "/sessions/"+id, nil, nil)
 }
 
+// upgradeTimeout is the client-side cap on a remote `crctl upgrade`.
+const upgradeTimeout = 10 * time.Minute
+
 func (b *httpBackend) do(method, path string, in, out any) error {
+	return b.doTimeout(30*time.Second, method, path, in, out)
+}
+
+func (b *httpBackend) doTimeout(timeout time.Duration, method, path string, in, out any) error {
 	var reqBody io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -196,7 +241,7 @@ func (b *httpBackend) do(method, path string, in, out any) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+b.token)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return fmt.Errorf("request %s %s: %w", method, path, err)
 	}
@@ -230,7 +275,8 @@ func list(be backend) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tLAST ACTIVE\tACTION")
+	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tVERSION\tLAST ACTIVE\tACTION")
+	outdated := 0
 	for _, s := range ss {
 		title := s.Title
 		if title == "" {
@@ -242,9 +288,23 @@ func list(be backend) error {
 		if s.Status == "Stopped" {
 			action = "crctl resume " + s.ID
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, title, s.Status, humanizeAge(s.LastActive), action)
+		version := s.Version
+		if version == "" {
+			version = "-"
+		}
+		if s.Outdated {
+			version += " (outdated)"
+			outdated++
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, title, s.Status, version, humanizeAge(s.LastActive), action)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if outdated > 0 {
+		fmt.Printf("\n%d session(s) running an outdated claude; run `crctl upgrade --all` to restart them on the installed version.\n", outdated)
+	}
+	return nil
 }
 
 func create(be backend, args []string) error {
@@ -265,6 +325,74 @@ func create(be backend, args []string) error {
 		return err
 	}
 	fmt.Printf("started %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	return nil
+}
+
+// upgrade updates claude and then restarts running sessions onto the new
+// version, printing what happened to each: every session with --all, or just
+// the ones named by id. With neither it only updates claude.
+func upgrade(be backend, args []string) error {
+	const usage = "usage: crctl upgrade [--force] (--all | <id>...)"
+	all, force := false, false
+	var ids []string
+	for _, a := range args {
+		switch {
+		case a == "--all" || a == "-a":
+			all = true
+		case a == "--force" || a == "-f":
+			force = true
+		case strings.HasPrefix(a, "-"):
+			return fmt.Errorf("%s", usage)
+		default:
+			ids = append(ids, a)
+		}
+	}
+	if all && len(ids) > 0 {
+		return fmt.Errorf("--all can't be combined with session ids\n%s", usage)
+	}
+	restart := all || len(ids) > 0
+	res, err := be.upgrade(restart, force, ids...)
+	if err != nil {
+		if res.Output != "" {
+			fmt.Fprintln(os.Stderr, res.Output)
+		}
+		return err
+	}
+	switch {
+	case res.Before != "" && res.Before == res.After:
+		fmt.Printf("claude %s (already up to date)\n", res.After)
+	case res.Before != "" && res.After != "":
+		fmt.Printf("claude %s -> %s\n", res.Before, res.After)
+	default:
+		fmt.Println("claude updated")
+	}
+	if !restart {
+		fmt.Println("No sessions restarted; use `crctl upgrade --all` (or pass session ids) to move running sessions onto this version.")
+		return nil
+	}
+	if len(res.Sessions) == 0 {
+		fmt.Println("No sessions running.")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTITLE\tRESULT\tREASON")
+	failed := 0
+	for _, o := range res.Sessions {
+		title := o.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		if o.Action == session.ActionFailed {
+			failed++
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", o.ID, title, o.Action, o.Reason)
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d session(s) failed to restart", failed)
+	}
 	return nil
 }
 
@@ -331,6 +459,14 @@ Usage:
   crctl ls            list running sessions (default)
   crctl new [--dir D] start a new detached claude session (optional working dir)
   crctl resume <id>   relaunch a stopped session by id
+  crctl restart <id>  stop a session and resume it under the same id
+  crctl upgrade [--force] (--all | <id>...)
+                      update claude, then restart running sessions onto the new
+                      version (each resumes its original session): every
+                      session with --all, or just the named ones. Sessions
+                      already on the new version or not idle are skipped;
+                      --force restarts non-idle ones too. With neither --all
+                      nor ids, only claude is updated.
   crctl rm <id>       stop a session
 
 Runs LOCALLY by default (drives screen/claude directly; no API or token).

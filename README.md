@@ -102,6 +102,8 @@ All routes except `/healthz` require `Authorization: Bearer <token>`.
 | `GET` | `/healthz` | Liveness (no auth) |
 | `POST` | `/sessions` | Start a session → `201` |
 | `POST` | `/sessions/{id}/resume` | Resume a stopped session by id → `201` |
+| `POST` | `/sessions/{id}/restart` | Stop a session and resume it under the same id → `200` |
+| `POST` | `/upgrade` | Update `claude`, then restart running sessions onto the new version |
 | `GET` | `/sessions` | List running + resumable (stopped) sessions |
 | `GET` | `/sessions/{id}` | One session (`404` if gone) |
 | `DELETE` | `/sessions/{id}` | Stop a session (`screen -X quit`) |
@@ -110,6 +112,35 @@ All routes except `/healthz` require `Authorization: Bearer <token>`.
 stopped but whose on-disk Claude log still exists — it runs `claude --resume
 <id>` in the session's original working directory (read from the log). Returns
 `404` if there's no log to resume, `409` if the session is already running.
+
+`POST /sessions/{id}/restart` quits the session's `screen` and relaunches it with
+`claude --resume <id>` — same session id, screen name, Remote Control name, and
+working directory. If Claude moved the session onto a new conversation id while
+it ran (e.g. after `/clear`), the conversation it is in now is the one resumed,
+not the one it was launched with. It refuses with `404` (and leaves the session running) when
+there is no on-disk log to resume from; a session that is already stopped is
+simply resumed.
+
+`POST /upgrade` runs `claude update` and then restarts the running sessions so
+they pick up the new binary, each resuming its original session. Only sessions
+that need it are touched: one already running the installed version is skipped,
+and so is one that isn't idle (a restart would cut off its in-flight turn).
+Optional JSON body: `{"restart": false}` to update without restarting anything,
+`{"force": true}` to restart non-idle sessions too, `{"sessions": ["<id>"]}` to
+restart only those sessions. If the update fails, nothing
+is restarted and the response is `500` with the updater's output.
+
+```json
+{
+  "before": "2.1.285",
+  "after": "2.1.287",
+  "output": "Successfully updated ...",
+  "sessions": [
+    {"id": "6fd0b321-…", "title": "Synapse - platform - k8s", "action": "restarted"},
+    {"id": "a9c1cf1e-…", "action": "skipped", "reason": "busy (use force to restart anyway)"}
+  ]
+}
+```
 
 `{id}` is the Claude session UUID. Session shape:
 
@@ -219,8 +250,19 @@ clock (no mirror).
 crctl ls            # list running sessions (default)
 crctl new           # start a new session
 crctl resume <id>   # relaunch a stopped session by id
+crctl restart <id>  # stop a session and resume it under the same id
+crctl upgrade --all # update claude, restart running sessions onto the new version
+crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
 ```
+
+`crctl upgrade` runs `claude update`. To also move running sessions onto the new
+version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);
+each is restarted with `claude --resume` so its conversation carries over.
+Sessions already on the new version, or not idle, are skipped — add `--force` to
+restart non-idle ones as well. With neither `--all` nor ids, only claude is
+updated. Run it from
+outside the sessions it manages (a plain shell, or remote mode).
 
 By default `crctl` runs **locally** — it drives `screen`/`claude` directly, with
 no API process, token, or URL. Set `CLAUDE_REMOTE_API_URL` to talk to a remote
@@ -239,6 +281,14 @@ code-remote previously started whose `screen` is gone (killed, host reboot,
 auto-archived) but whose on-disk Claude log survives. Resumable rows show
 `Stopped` and a `crctl resume <id>` hint instead of a `screen -r` attach command.
 
+Claude can move a running session onto a new conversation id (e.g. after
+`/clear`). code-remote follows it: the session keeps its id, screen name and
+Remote Control name, while `ls` shows the title and activity of the conversation
+it is in now, and `resume`/`restart` reopen that conversation rather than the
+one the session was launched with. The current conversation is noted in the
+SQLite mirror whenever sessions are listed, stopped or restarted, and once a
+minute by the API server, so it survives a crash or reboot.
+
 Resumable tracking is backed by the shared SQLite mirror (`CLAUDE_REMOTE_DB`):
 sessions are recorded there on `new`/`resume`, so both the API server and a local
 `crctl` see the same set. Without a writable store, `ls` falls back to
@@ -250,10 +300,18 @@ just when the screen was started.
 
 ```
 $ crctl ls
-ID                                    TITLE                     STATUS    LAST ACTIVE  ACTION
-6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  4m ago       screen -r pigri-dev-remote-6fd0b321-...
-a9c1cf1e-ce20-4833-9eeb-7acf5c327506  old refactor              Stopped   2d ago       crctl resume a9c1cf1e-ce20-4833-9eeb-...
+ID                                    TITLE                     STATUS    VERSION             LAST ACTIVE  ACTION
+6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  2.1.278 (outdated)  4m ago       screen -r pigri-dev-remote-6fd0b321-...
+a9c1cf1e-ce20-4833-9eeb-7acf5c327506  old refactor              Stopped   -                   2d ago       crctl resume a9c1cf1e-ce20-4833-9eeb-...
+
+1 session(s) running an outdated claude; run `crctl upgrade --all` to restart them on the installed version.
 ```
+
+The `VERSION` column is the claude version each running session's process is on.
+A session is marked `(outdated)` when that is behind the installed `claude` — it
+keeps running the old binary until restarted (`crctl upgrade --all`, or `crctl restart
+<id>` for one). The API exposes the same as `version` / `outdated` on each
+session.
 
 ## Deploy (systemd)
 

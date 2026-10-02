@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGenUUID(t *testing.T) {
 	a, err := genUUID()
@@ -101,5 +104,13 @@ func TestParseTitle(t *testing.T) {
 
 	if got := parseTitle(nil); got != "" {
 		t.Errorf("parseTitle(nil) = %q, want empty", got)
+	}
+}
+
+func TestSessionEnv(t *testing.T) {
+	in := []string{"PATH=/bin", "CLAUDE_CODE_CHILD_SESSION=1", "CLAUDECODE=1", "CLAUDE_CODE_USE_BEDROCK=1", "HOME=/h"}
+	got := strings.Join(sessionEnv(in), " ")
+	if want := "PATH=/bin CLAUDE_CODE_USE_BEDROCK=1 HOME=/h"; got != want {
+		t.Errorf("sessionEnv = %q, want %q", got, want)
 	}
 }
