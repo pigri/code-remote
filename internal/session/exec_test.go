@@ -524,8 +524,13 @@ func TestResumeInMovesSession(t *testing.T) {
 		if fst.lastCwd != repo {
 			t.Errorf("recorded cwd = %q, want %q", fst.lastCwd, repo)
 		}
-		if want := "--resume " + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
+		// A move forks the conversation so claude registers it afresh from the
+		// new directory; which conversation that is isn't known yet.
+		if want := "--resume " + id + " --fork-session --remote-control " + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 			t.Errorf("launches = %v, want one with %q", fs.launches, want)
+		}
+		if c := fst.convs[id]; c != "" {
+			t.Errorf("stored conversation = %q after a fork, want none recorded yet", c)
 		}
 	})
 
@@ -541,6 +546,9 @@ func TestResumeInMovesSession(t *testing.T) {
 		}
 		if fst.lastCwd != moved {
 			t.Errorf("recorded cwd = %q, want stored %q", fst.lastCwd, moved)
+		}
+		if len(fs.launches) != 1 || strings.Contains(fs.launches[0], "--fork-session") || fst.convs[id] != id {
+			t.Errorf("plain resume: launches = %v, conv = %q; want no fork and the conversation recorded", fs.launches, fst.convs[id])
 		}
 	})
 
