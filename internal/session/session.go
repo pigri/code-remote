@@ -45,6 +45,14 @@ type Recorder interface {
 	Conversation(uuid string) (string, error)
 }
 
+// cwdStore is optionally implemented by the Store to read back the working
+// directory a session was last launched in. It is what makes a session moved
+// with ResumeIn/RestartIn stay in its new directory on later resumes: claude
+// keeps appending to the original log, whose first cwd is the old one.
+type cwdStore interface {
+	Cwd(uuid string) (string, error)
+}
+
 // StoppedLister reads back the resumable set: sessions the recorder knows about
 // that are not in the live `running` listing and pass `keep`. Satisfied by
 // *store.DB. Kept as an interface here to avoid a session→store import cycle.
@@ -296,6 +304,25 @@ func (m *Manager) annotateLive(running []Session) {
 	}
 }
 
+// LiveRegistrations maps each running session's id to its claude process's
+// registry entry. Unlike Registrations, it joins by process parentage, so a
+// session whose claude registered under a different id (a resumed session
+// registers under the conversation it resumed) is still found.
+func (m *Manager) LiveRegistrations() map[string]Registration {
+	running, _ := m.List()
+	if len(running) == 0 {
+		return nil
+	}
+	live := m.liveIndex()
+	out := make(map[string]Registration, len(running))
+	for _, s := range running {
+		if info := live(s); info.Known {
+			out[s.ID] = info.Reg
+		}
+	}
+	return out
+}
+
 // SyncConversations persists the conversation each running session is
 // currently in, so one that later stops without warning (crash, host reboot)
 // still resumes where it left off. Cheap; meant to be called periodically.
@@ -368,17 +395,36 @@ func (m *Manager) convTitle(id, conv string) string {
 // Errors: ErrAlreadyRunning if the screen is still live (nothing to do);
 // ErrNotResumable if no session log exists on disk (when ClaudeHome is set —
 // without it we can't check, so we attempt the resume and let claude decide).
-func (m *Manager) Resume(id string) (Session, error) {
+func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "") }
+
+// ResumeIn is Resume with the session moved to working directory dir
+// (validated against WorkspaceRoot, like Create's). The conversation carries
+// over; only where claude runs changes — which is what ties the session to a
+// git repository (branch, PR and diff tracking). Empty dir = where it last ran.
+// A bad dir is reported as ErrInvalidDir.
+func (m *Manager) ResumeIn(id, dir string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	return m.resume(id, m.storedConv(id))
+	return m.resume(id, m.storedConv(id), dir)
+}
+
+// storedCwd returns the working directory the Store last recorded for a
+// session, or "" when there is no Store or it doesn't track one.
+func (m *Manager) storedCwd(id string) string {
+	cs, ok := m.Store.(cwdStore)
+	if !ok {
+		return ""
+	}
+	c, _ := cs.Cwd(id)
+	return c
 }
 
 // resume relaunches session id's screen, resuming conversation conv. The two
 // differ only when claude moved the session onto a new conversation id while it
 // ran (see Restart); the screen and Remote Control names always stay on id.
-func (m *Manager) resume(id, conv string) (Session, error) {
+// A non-empty dir moves the session to that working directory.
+func (m *Manager) resume(id, conv, dir string) (Session, error) {
 	if !m.ValidID(id) || !m.ValidID(conv) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
@@ -397,13 +443,25 @@ func (m *Manager) resume(id, conv string) (Session, error) {
 	if m.ClaudeHome != "" && logPath == "" {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, conv)
 	}
+	// Where to run: an explicit dir wins, then the directory the session was
+	// last launched in (it may have been moved since the log was started), then
+	// the log's own.
+	if dir != "" {
+		resolved, err := m.resolveDir(dir)
+		if err != nil {
+			return Session{}, err
+		}
+		cwd = resolved
+	} else if c := m.storedCwd(id); c != "" {
+		cwd = c
+	}
 
 	name := m.screenName(id)
 	// screen -dmS <prefix>-<id> claude --resume <conv> --remote-control <id>
 	cmd := execCommand(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--resume", conv, "--remote-control", id)
 	scrubEnv(cmd)
-	// Restore the original project dir if it still exists; otherwise fall back
+	// Restore the project dir if it still exists; otherwise fall back
 	// to claude's default rather than failing the spawn on a stale path.
 	if cwd != "" {
 		if info, err := os.Stat(cwd); err == nil && info.IsDir() {
@@ -492,13 +550,34 @@ var inheritedClaudeVars = map[string]bool{
 	"CLAUDE_CODE_MESSAGING_TOKEN":   true,
 }
 
+// toolShellVars are what claude sets for the commands its tools run (git made
+// non-interactive, its own effort level, ...). They are dropped only when the
+// launch comes from inside a claude session: there they are that session's
+// plumbing, anywhere else they are the user's own configuration.
+var toolShellVars = map[string]bool{
+	"CLAUDE_EFFORT":                      true,
+	"GIT_EDITOR":                         true,
+	"GIT_TERMINAL_PROMPT":                true,
+	"GIT_SSH_COMMAND":                    true,
+	"GCM_INTERACTIVE":                    true,
+	"COREPACK_ENABLE_AUTO_PIN":           true,
+	"NoDefaultCurrentDirectoryInExePath": true,
+}
+
 // sessionEnv returns env without the markers of an enclosing claude session, so
 // a launched session always starts as a top-level one. Everything else —
 // including deliberate CLAUDE_CODE_* configuration — is passed through.
 func sessionEnv(env []string) []string {
+	nested := false
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k == "CLAUDECODE" {
+			nested = true
+			break
+		}
+	}
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
-		if k, _, _ := strings.Cut(kv, "="); inheritedClaudeVars[k] {
+		if k, _, _ := strings.Cut(kv, "="); inheritedClaudeVars[k] || (nested && toolShellVars[k]) {
 			continue
 		}
 		out = append(out, kv)

@@ -289,7 +289,10 @@ type fakeStore struct {
 	lastCwd  string
 	stopped  []Session
 	convs    map[string]string // uuid -> conversation id
+	cwds     map[string]string // uuid -> cwd served by Cwd
 }
+
+func (f *fakeStore) Cwd(uuid string) (string, error) { return f.cwds[uuid], nil }
 
 func (f *fakeStore) SetConversation(uuid, conv string) error {
 	if f.convs == nil {
@@ -488,5 +491,95 @@ func TestRegistrations(t *testing.T) {
 
 	if regs, err := (&Manager{}).Registrations(); err != nil || regs != nil { // no home -> nil
 		t.Errorf("Registrations(no home) = %v, %v, want nil/nil", regs, err)
+	}
+}
+
+// evalDir is a temp dir with symlinks resolved, as resolveDir reports it.
+func evalDir(t *testing.T) string {
+	t.Helper()
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestResumeInMovesSession(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+
+	t.Run("explicit dir wins over the log's cwd", func(t *testing.T) {
+		home, root := t.TempDir(), evalDir(t)
+		upgradeHome(t, home, id, "", "")
+		repo := filepath.Join(root, "repo")
+		if err := os.Mkdir(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fs, fst := &fakeScreen{}, &fakeStore{}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root, Store: fst}
+
+		if _, err := m.ResumeIn(id, "repo"); err != nil {
+			t.Fatalf("ResumeIn: %v", err)
+		}
+		if fst.lastCwd != repo {
+			t.Errorf("recorded cwd = %q, want %q", fst.lastCwd, repo)
+		}
+		if want := "--resume " + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
+			t.Errorf("launches = %v, want one with %q", fs.launches, want)
+		}
+	})
+
+	t.Run("later resumes stay in the stored dir", func(t *testing.T) {
+		home, moved := t.TempDir(), t.TempDir()
+		upgradeHome(t, home, id, "", "") // log's cwd is some other dir
+		fs, fst := &fakeScreen{}, &fakeStore{cwds: map[string]string{id: moved}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+		if _, err := m.Resume(id); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if fst.lastCwd != moved {
+			t.Errorf("recorded cwd = %q, want stored %q", fst.lastCwd, moved)
+		}
+	})
+
+	t.Run("bad dir launches nothing", func(t *testing.T) {
+		home := t.TempDir()
+		upgradeHome(t, home, id, "", "")
+		fs := &fakeScreen{}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: t.TempDir()}
+
+		if _, err := m.ResumeIn(id, "/etc"); !errors.Is(err, ErrInvalidDir) {
+			t.Fatalf("ResumeIn(outside root) err = %v, want ErrInvalidDir", err)
+		}
+		if len(fs.launches) != 0 {
+			t.Errorf("launches = %v, want none", fs.launches)
+		}
+	})
+}
+
+func TestRestartInValidatesDirBeforeStopping(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	fastStop(t)
+	home, root := t.TempDir(), evalDir(t)
+	upgradeHome(t, home, id, "", "")
+	fs, fst := &fakeScreen{created: []string{"test-rc-" + id}}, &fakeStore{}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root, Store: fst}
+
+	if _, err := m.RestartIn(id, "/etc"); !errors.Is(err, ErrInvalidDir) {
+		t.Fatalf("RestartIn(outside root) err = %v, want ErrInvalidDir", err)
+	}
+	if len(fs.killed) != 0 {
+		t.Fatalf("killed = %v, want the session left running", fs.killed)
+	}
+
+	if _, err := m.RestartIn(id, root); err != nil {
+		t.Fatalf("RestartIn: %v", err)
+	}
+	if len(fs.killed) != 1 || len(fs.launches) != 1 || fst.lastCwd != root {
+		t.Errorf("killed=%v launches=%v cwd=%q, want one of each in %q", fs.killed, fs.launches, fst.lastCwd, root)
 	}
 }

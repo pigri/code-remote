@@ -177,3 +177,24 @@ func TestMigrateAddsConvID(t *testing.T) {
 		t.Errorf("AllSessions on migrated db = %v, %v", all, err)
 	}
 }
+
+func TestCwd(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if got, err := d.Cwd(id); err != nil || got != "" {
+		t.Fatalf("Cwd(unknown) = %q, %v, want empty", got, err)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/home", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	// A relaunch in another directory moves it; one with no dir keeps it.
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Record(id, "p-"+id, "t", "", "Detached", "now"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Cwd(id); err != nil || got != "/repo" {
+		t.Fatalf("Cwd = %q, %v, want /repo", got, err)
+	}
+}

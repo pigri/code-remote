@@ -22,6 +22,12 @@ type screenManager interface {
 	Registrations() ([]session.Registration, error)
 }
 
+// liveRegistrar is optionally implemented by the manager to map running
+// sessions to their claude registry entries by process, not registry id.
+type liveRegistrar interface {
+	LiveRegistrations() map[string]session.Registration
+}
+
 // Reconciler periodically reconciles server-side session state with local
 // screens: any session the server reports as archived has its screen quit. It
 // only ever acts on sessions the manager already owns (prefix-scoped), so it
@@ -135,6 +141,15 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	for _, reg := range regs {
 		cwdByID[reg.SessionID] = reg.Cwd
 		bridgeByID[reg.SessionID] = reg.BridgeSessionID
+	}
+	// A resumed session's claude registers under the conversation it resumed,
+	// not our id, so the join above misses it and we'd confirm against a stale
+	// bridge id (404 -> "deleted" -> quit). Prefer the process-matched entry.
+	if lr, ok := r.Manager.(liveRegistrar); ok {
+		for id, reg := range lr.LiveRegistrations() {
+			cwdByID[id] = reg.Cwd
+			bridgeByID[id] = reg.BridgeSessionID
+		}
 	}
 
 	local, err := r.Manager.List()

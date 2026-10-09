@@ -133,7 +133,7 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 		case known && !force && reg.Status != "" && reg.Status != "idle":
 			o.Action, o.Reason = ActionSkipped, reg.Status+" (use force to restart anyway)"
 		default:
-			if _, rerr := m.restart(s, info); rerr != nil {
+			if _, rerr := m.restart(s, info, ""); rerr != nil {
 				o.Action, o.Reason = ActionFailed, rerr.Error()
 			} else {
 				o.Action = ActionRestarted
@@ -160,8 +160,8 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 
 // Restart stops a running session and relaunches it under the same screen and
 // Remote Control name, resuming its conversation (`claude --resume`) in the
-// original working directory. A session that is already stopped is simply
-// resumed.
+// working directory it was running in. A session that is already stopped is
+// simply resumed.
 //
 // The conversation resumed is the one the session is in NOW: claude can move a
 // running session onto a new conversation id (e.g. after /clear), in which case
@@ -170,7 +170,11 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 //
 // It refuses (ErrNotResumable) before killing anything when there is no on-disk
 // log to resume from, so a restart can't turn into a plain kill.
-func (m *Manager) Restart(id string) (Session, error) {
+func (m *Manager) Restart(id string) (Session, error) { return m.RestartIn(id, "") }
+
+// RestartIn is Restart with the session moved to working directory dir (see
+// ResumeIn). A bad dir is refused (ErrInvalidDir) before anything is stopped.
+func (m *Manager) RestartIn(id, dir string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
@@ -179,15 +183,20 @@ func (m *Manager) Restart(id string) (Session, error) {
 		return Session{}, err
 	}
 	if !running {
-		return m.Resume(id)
+		return m.ResumeIn(id, dir)
 	}
-	return m.restart(s, m.liveIndex()(s))
+	return m.restart(s, m.liveIndex()(s), dir)
 }
 
-// restart is Restart for a session known to be running; info is what liveIndex
-// found for it.
-func (m *Manager) restart(s Session, info liveInfo) (Session, error) {
+// restart is RestartIn for a session known to be running; info is what
+// liveIndex found for it.
+func (m *Manager) restart(s Session, info liveInfo, dir string) (Session, error) {
 	id, conv := s.ID, info.Conv
+	if dir != "" {
+		if _, err := m.resolveDir(dir); err != nil {
+			return Session{}, err
+		}
+	}
 	if m.ClaudeHome != "" && !m.HasSessionLog(conv) {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s (not restarting)", ErrNotResumable, conv)
 	}
@@ -213,7 +222,7 @@ func (m *Manager) restart(s Session, info liveInfo) (Session, error) {
 		}
 		time.Sleep(stopPoll)
 	}
-	return m.resume(id, conv)
+	return m.resume(id, conv, dir)
 }
 
 // liveInfo is what is known about a running session's claude process.

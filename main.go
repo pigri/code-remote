@@ -258,8 +258,8 @@ func defaultDBPath() string { return store.DefaultPath() }
 // Narrowing to an interface lets tests inject failures to exercise error paths.
 type sessionManager interface {
 	Create(dir string) (session.Session, error)
-	Resume(id string) (session.Session, error)
-	Restart(id string) (session.Session, error)
+	ResumeIn(id, dir string) (session.Session, error)
+	RestartIn(id, dir string) (session.Session, error)
 	Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	List() ([]session.Session, error)
 	ListAll(store session.StoppedLister) ([]session.Session, error)
@@ -296,19 +296,13 @@ type server struct {
 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
-	// Optional JSON body: {"dir": "<path under CLAUDE_WORKSPACE_ROOT>"}.
-	var body struct {
-		Dir string `json:"dir"`
+	dir, ok := dirBody(w, r)
+	if !ok {
+		return
 	}
-	if r.Body != nil {
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			writeErr(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
-	}
-	sess, err := s.mgr.Create(body.Dir)
+	sess, err := s.mgr.Create(dir)
 	if err != nil {
-		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error(), "dir", body.Dir)
+		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error(), "dir", dir)
 		if errors.Is(err, session.ErrInvalidDir) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -316,20 +310,43 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", body.Dir)
+	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
+// dirBody reads the optional JSON body {"dir": "<path under
+// CLAUDE_WORKSPACE_ROOT>"} shared by create, resume and restart. ok is false
+// (and a 400 already written) when the body isn't valid JSON.
+func dirBody(w http.ResponseWriter, r *http.Request) (dir string, ok bool) {
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid JSON body")
+			return "", false
+		}
+	}
+	return body.Dir, true
+}
+
 // resume relaunches a stopped session by its id (POST /sessions/{id}/resume).
+// Optional JSON body: {"dir": "..."} to move the session to that directory.
 func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
 		writeErr(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
-	sess, err := s.mgr.Resume(id)
+	dir, ok := dirBody(w, r)
+	if !ok {
+		return
+	}
+	sess, err := s.mgr.ResumeIn(id, dir)
 	if err != nil {
 		switch {
+		case errors.Is(err, session.ErrInvalidDir):
+			writeErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, session.ErrAlreadyRunning):
 			s.log.Info("session_resume", "remote", clientIP(r), "id", id, "existed", true)
 			writeErr(w, http.StatusConflict, err.Error())
@@ -341,20 +358,29 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
+	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
 // restart stops a session and resumes it under the same id
 // (POST /sessions/{id}/restart). A stopped session is simply resumed.
+// Optional JSON body: {"dir": "..."} to move the session to that directory.
 func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
 		writeErr(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
-	sess, err := s.mgr.Restart(id)
+	dir, ok := dirBody(w, r)
+	if !ok {
+		return
+	}
+	sess, err := s.mgr.RestartIn(id, dir)
 	if err != nil {
+		if errors.Is(err, session.ErrInvalidDir) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if errors.Is(err, session.ErrNotResumable) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
@@ -363,7 +389,7 @@ func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.log.Info("session_restart", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen)
+	s.log.Info("session_restart", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
 	writeJSON(w, http.StatusOK, sess)
 }
 
