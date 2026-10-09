@@ -471,10 +471,18 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 	name := m.screenName(id)
 	// screen -dmS <prefix>-<id> claude --resume <conv> [--fork-session] --remote-control <id>
 	args := []string{"-dmS", name, m.ClaudeBin, "--resume", conv}
+	rc := []string{"--remote-control", id}
 	if dir != "" {
 		args = append(args, "--fork-session") // a move: see ResumeIn
+		// The fork's new Remote Control session is titled after its name, and
+		// the title set on the old one doesn't follow. Name it after the
+		// session's title so it keeps showing under that. ("=" keeps a title
+		// that starts with "-" from being read as a flag.)
+		if t := m.convTitle(id, conv); t != "" {
+			rc = []string{"--remote-control=" + t}
+		}
 	}
-	cmd := execCommand(m.ScreenBin, append(args, "--remote-control", id)...)
+	cmd := execCommand(m.ScreenBin, append(args, rc...)...)
 	scrubEnv(cmd)
 	// Restore the project dir if it still exists; otherwise fall back
 	// to claude's default rather than failing the spawn on a stale path.
