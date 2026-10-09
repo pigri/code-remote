@@ -30,7 +30,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -68,9 +70,26 @@ func run(args []string) error {
 		return nil
 	}
 
+	// --trust (anywhere on the line): mark the session's directory as a trusted
+	// folder for claude before launching into it.
+	trust := false
+	args = slices.DeleteFunc(slices.Clone(args), func(a string) bool {
+		if a == "--trust" {
+			trust = true
+		}
+		return a == "--trust"
+	})
+
 	be, err := pickBackend()
 	if err != nil {
 		return err
+	}
+	if trust {
+		lb, ok := be.(*localBackend)
+		if !ok {
+			return fmt.Errorf("--trust is local-only; in remote mode set CLAUDE_REMOTE_TRUST_DIRS=1 on the API server")
+		}
+		lb.mgr.TrustDirs = true
 	}
 
 	switch cmd {
@@ -97,6 +116,7 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+		trustHint(s)
 		return nil
 	case "restart":
 		dir, rest, err := dirFlag(args[1:])
@@ -111,6 +131,7 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Printf("restarted %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+		trustHint(s)
 		return nil
 	case "upgrade", "update":
 		return upgrade(be, args[1:])
@@ -146,6 +167,7 @@ func pickBackend() (backend, error) {
 		// Local mode runs as the invoking user, who can already start claude
 		// anywhere; the workspace root only narrows --dir when it is set.
 		WorkspaceRoot: envOr("CLAUDE_WORKSPACE_ROOT", "/"),
+		TrustDirs:     isTrue(os.Getenv("CLAUDE_REMOTE_TRUST_DIRS")),
 	}
 	// Share the server's SQLite mirror so `new`/`resume` record sessions and
 	// `ls` can surface resumable (stopped) ones. Best-effort: a store that won't
@@ -383,7 +405,18 @@ func create(be backend, args []string) error {
 		return err
 	}
 	fmt.Printf("started %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	trustHint(s)
 	return nil
+}
+
+// trustHint tells the user when a session was launched into a folder claude
+// doesn't trust yet: it is sitting at the trust prompt until someone answers.
+func trustHint(s session.Session) {
+	if !s.NeedsTrust {
+		return
+	}
+	fmt.Printf("  note: claude doesn't trust this folder yet, so the session is waiting at the\n"+
+		"        trust prompt. Accept it with `screen -r %s`, or pass --trust next time.\n", s.Screen)
 }
 
 // resumeAll relaunches every stopped (resumable) session, printing what
@@ -537,6 +570,12 @@ func claudeHome() string {
 	return ""
 }
 
+// isTrue reports whether an env value spells "on" (1, true, yes, ...).
+func isTrue(v string) bool {
+	b, _ := strconv.ParseBool(v)
+	return b || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on")
+}
+
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -569,6 +608,9 @@ Usage:
                       --force restarts non-idle ones too. With neither --all
                       nor ids, only claude is updated.
   crctl rm <id>       stop a session
+  --trust             with new/resume/restart: mark the session's directory as a
+                      trusted folder for claude first, so a detached session
+                      doesn't wait at the trust prompt (or CLAUDE_REMOTE_TRUST_DIRS=1)
 
 Runs LOCALLY by default (drives screen/claude directly; no API or token).
 Set CLAUDE_REMOTE_API_URL to use a remote API instead:

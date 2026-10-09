@@ -31,6 +31,7 @@ type Session struct {
 	LastActive string `json:"last_active,omitempty"` // RFC3339; mtime of the session log
 	Version    string `json:"version,omitempty"`     // claude version the session is running
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
+	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -69,6 +70,8 @@ type Manager struct {
 	ClaudeHome    string   // ~/.claude (for reading session titles)
 	WorkspaceRoot string   // optional; when set, Create's dir must resolve under it
 	Store         Recorder // optional; records sessions for resumable tracking
+	ClaudeConfig  string   // optional; claude's config file (default: see configPath)
+	TrustDirs     bool     // mark a session's directory as trusted before launching into it
 
 	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
 
@@ -185,6 +188,7 @@ func (m *Manager) Create(dir string) (Session, error) {
 		}
 		cmd.Dir, cwd = resolved, resolved
 	}
+	needsTrust := m.prepareDir(cwd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("start screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -192,12 +196,14 @@ func (m *Manager) Create(dir string) (Session, error) {
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
 			m.record(s, cwd)
+			s.NeedsTrust = needsTrust
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	s := Session{ID: id, Screen: name, Status: "Detached"}
 	m.record(s, cwd)
+	s.NeedsTrust = needsTrust
 	return s, nil
 }
 
@@ -468,6 +474,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 			cmd.Dir = cwd
 		}
 	}
+	needsTrust := m.prepareDir(cmd.Dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("resume screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -476,6 +483,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 		if s, ok, _ := m.Get(id); ok {
 			m.record(s, cwd)
 			m.noteConv(id, conv)
+			s.NeedsTrust = needsTrust
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -483,6 +491,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 	s := Session{ID: id, Screen: name, Status: "Detached"}
 	m.record(s, cwd)
 	m.noteConv(id, conv)
+	s.NeedsTrust = needsTrust
 	return s, nil
 }
 

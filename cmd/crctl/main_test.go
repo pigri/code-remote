@@ -707,3 +707,20 @@ func TestListOrdersByLastActive(t *testing.T) {
 		t.Errorf("order new/old/never at %d/%d/%d, want ascending:\n%s", iNew, iOld, iNever, out)
 	}
 }
+
+func TestTrustFlag(t *testing.T) {
+	// Remote mode can't trust a folder on the server's behalf.
+	t.Setenv("CLAUDE_REMOTE_API_URL", "http://127.0.0.1:1")
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	if err := run([]string{"restart", "s1", "--trust"}); err == nil || !contains(err.Error(), "local-only") {
+		t.Errorf("run --trust (remote) = %v, want local-only error", err)
+	}
+
+	out := captureStdout(t, func() { trustHint(session.Session{Screen: "p-s1", NeedsTrust: true}) })
+	if !contains(out, "screen -r p-s1") || !contains(out, "--trust") {
+		t.Errorf("trustHint = %q", out)
+	}
+	if out := captureStdout(t, func() { trustHint(session.Session{Screen: "p-s1"}) }); out != "" {
+		t.Errorf("trustHint(trusted) = %q, want nothing", out)
+	}
+}

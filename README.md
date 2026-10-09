@@ -121,6 +121,15 @@ to put a session inside its git repository — a session started somewhere that
 isn't one (e.g. `$HOME`) registers with no repository, so the Claude apps can't
 show its branch, diff, or pull requests.
 
+Claude asks "do you trust this folder?" the first time it starts in a directory,
+and a detached session just waits there. A session launched into a folder Claude
+doesn't trust yet is returned with `"needs_trust": true`; attach to it
+(`screen -r`) to answer. To have the folder marked trusted before launch instead,
+set `CLAUDE_REMOTE_TRUST_DIRS=1` for the API (or pass `--trust` to a local
+`crctl new`/`resume`/`restart`). That is the same answer as accepting the prompt
+— Claude will read, edit and run files there — so only enable it where every
+directory under `CLAUDE_WORKSPACE_ROOT` is one you trust.
+
 `POST /sessions/{id}/restart` quits the session's `screen` and relaunches it with
 `claude --resume <id>` — same session id, screen name, Remote Control name, and
 working directory. If Claude moved the session onto a new conversation id while
@@ -261,6 +270,7 @@ crctl resume <id>   # relaunch a stopped session by id
 crctl resume all    # relaunch every stopped session
 crctl restart <id>  # stop a session and resume it under the same id
 crctl restart <id> --dir ~/work/repo  # ...and move it into that directory
+crctl restart <id> --dir ~/work/repo --trust  # ...marking it a trusted folder first
 crctl upgrade --all # update claude, restart running sessions onto the new version
 crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
@@ -284,6 +294,7 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | `CLAUDE_REMOTE_API_URL` | remote | API base URL (e.g. `http://127.0.0.1:9000`) |
 | `CLAUDE_REMOTE_API_TOKEN` | remote | bearer token (required when the URL is set) |
 | `CLAUDE_WORKSPACE_ROOT` | local | optional; limits `--dir` to paths under it (unset = any directory) |
+| `CLAUDE_REMOTE_TRUST_DIRS` | local | `1` = always behave as if `--trust` was passed |
 | `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides |
 | `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
 
