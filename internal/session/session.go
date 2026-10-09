@@ -404,10 +404,16 @@ func (m *Manager) convTitle(id, conv string) string {
 func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "") }
 
 // ResumeIn is Resume with the session moved to working directory dir
-// (validated against WorkspaceRoot, like Create's). The conversation carries
-// over; only where claude runs changes — which is what ties the session to a
-// git repository (branch, PR and diff tracking). Empty dir = where it last ran.
-// A bad dir is reported as ErrInvalidDir.
+// (validated against WorkspaceRoot, like Create's). Empty dir = where it last
+// ran. A bad dir is reported as ErrInvalidDir.
+//
+// A move forks the conversation (`--fork-session`): the history carries over,
+// under a new conversation id. That is what makes the move count server-side —
+// the Remote Control session a conversation is bound to keeps the repository it
+// was created with, so resuming the same conversation elsewhere would stay
+// attached to one that knows nothing of the new directory (no repository, hence
+// no PR or diff tracking). The fork registers a fresh one from dir; the session
+// id, screen and Remote Control name stay the same.
 func (m *Manager) ResumeIn(id, dir string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
@@ -463,9 +469,12 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 	}
 
 	name := m.screenName(id)
-	// screen -dmS <prefix>-<id> claude --resume <conv> --remote-control <id>
-	cmd := execCommand(m.ScreenBin, "-dmS", name,
-		m.ClaudeBin, "--resume", conv, "--remote-control", id)
+	// screen -dmS <prefix>-<id> claude --resume <conv> [--fork-session] --remote-control <id>
+	args := []string{"-dmS", name, m.ClaudeBin, "--resume", conv}
+	if dir != "" {
+		args = append(args, "--fork-session") // a move: see ResumeIn
+	}
+	cmd := execCommand(m.ScreenBin, append(args, "--remote-control", id)...)
 	scrubEnv(cmd)
 	// Restore the project dir if it still exists; otherwise fall back
 	// to claude's default rather than failing the spawn on a stale path.
@@ -479,10 +488,20 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 		return Session{}, fmt.Errorf("resume screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
+	// A fork leaves conv behind for an id claude picks once it is up, so there
+	// is nothing to record yet: the periodic sync (and Kill) note it from the
+	// process registry. Until then the Store keeps the pre-fork conversation,
+	// which is still a valid place to resume from.
+	noteConv := func() {
+		if dir == "" {
+			m.noteConv(id, conv)
+		}
+	}
+
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
 			m.record(s, cwd)
-			m.noteConv(id, conv)
+			noteConv()
 			s.NeedsTrust = needsTrust
 			return s, nil
 		}
@@ -490,7 +509,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 	}
 	s := Session{ID: id, Screen: name, Status: "Detached"}
 	m.record(s, cwd)
-	m.noteConv(id, conv)
+	noteConv()
 	s.NeedsTrust = needsTrust
 	return s, nil
 }

@@ -115,11 +115,20 @@ stopped but whose on-disk Claude log still exists — it runs `claude --resume
 
 Both `resume` and `restart` take an optional JSON body `{"dir": "<path>"}` (same
 rules as `POST /sessions`: it must resolve under `CLAUDE_WORKSPACE_ROOT`, else
-`400`) that **moves** the session: the conversation carries over, but Claude now
-runs in that directory, and later resumes/restarts/upgrades keep it there. Use it
-to put a session inside its git repository — a session started somewhere that
-isn't one (e.g. `$HOME`) registers with no repository, so the Claude apps can't
-show its branch, diff, or pull requests.
+`400`) that **moves** the session: Claude now runs in that directory, and later
+resumes/restarts/upgrades keep it there. Use it to put a session inside its git
+repository — a session started somewhere that isn't one (e.g. `$HOME`) registers
+with no repository, so the Claude apps can't show its branch, diff, or pull
+requests.
+
+A move forks the conversation (`claude --resume <id> --fork-session`): the
+history carries over, under a new conversation id. That is deliberate — a
+conversation stays bound to the Remote Control session it was created with, and
+that one keeps the repository (or lack of one) it started with, so only a fresh
+registration from the new directory picks the repository up. The session id,
+screen name and Remote Control name are unchanged, but the Claude apps list the
+moved session as a new entry and the previous one goes away (archived). Passing
+`dir` again — even the same directory — forks and re-registers again.
 
 Claude asks "do you trust this folder?" the first time it starts in a directory,
 and a detached session just waits there. A session launched into a folder Claude
