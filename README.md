@@ -335,6 +335,48 @@ keeps running the old binary until restarted (`crctl upgrade --all`, or `crctl r
 <id>` for one). The API exposes the same as `version` / `outdated` on each
 session.
 
+## Claude skill: `session-repo`
+
+A session registers its git repository once, at launch, from the directory it
+starts in — so one started outside its repo (e.g. in `$HOME`) shows no branch,
+diff or pull requests in the Claude apps. [`skills/session-repo`](skills/session-repo/)
+is a Claude Code skill
+that lets a session fix this itself: it works out its own session id, resolves
+the repo, and schedules `crctl restart <id> --dir <repo> --trust` for the moment
+it goes idle. The conversation carries over.
+
+Install it for the user the sessions run as (skills are per-user, read from
+`~/.claude/skills`):
+
+```sh
+# from a checkout
+make install-skill
+
+# or from the .deb / install.sh install
+mkdir -p ~/.claude/skills
+cp -r /usr/share/code-remote/skills/session-repo ~/.claude/skills/
+```
+
+It needs a `crctl` with `restart --dir --trust` on the session's `PATH`, running
+in local mode. Sessions that are already running pick the skill up after their
+next restart (`crctl restart <id>`).
+
+Then, inside a session, ask for it in plain words — "restart yourself in the
+api repo", or "PRs aren't showing up for this session" — or run
+`/session-repo`. The session confirms the target repo, wraps up what it is
+doing, and restarts; it is back in the same conversation a few seconds later.
+
+Notes:
+
+- The move marks the repo as a trusted folder for Claude (a detached session
+  can't answer the trust prompt), so the skill only moves into a repo you named
+  or the session has been working in.
+- Background shells started by the session don't survive the restart;
+  uncommitted changes in the working tree do.
+- If a session doesn't come back, the helper's output is in
+  `~/.local/state/crctl/self-restart-<id>.log`, and `crctl ls` shows whether it
+  is running or stopped.
+
 ## Deploy (systemd)
 
 A hardened system unit and env template are in [`deploy/`](deploy/):

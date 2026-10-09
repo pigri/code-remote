@@ -2,12 +2,14 @@
 #
 #   make            # build all binaries into ./bin
 #   sudo make install   # install crctl -> /usr/local/bin
+#   make install-skill  # install the session-repo Claude skill for this user
 #   make deploy     # install server + ngrok-forward into the systemd runtime dir
 
 GO       ?= go
 BINDIR   ?= bin
 PREFIX   ?= /usr/local
 RUNDIR   ?= $(HOME)/.local/share/code-remote
+SKILLDIR ?= $(HOME)/.claude/skills
 INSTALL  ?= install
 VERSION  ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
 DEB_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
@@ -17,7 +19,7 @@ DEB_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 # it avoids stale binaries when only internal packages change.
 GO_SRC := $(shell find . -name '*.go' -not -name '*_test.go') go.mod go.sum
 
-.PHONY: all build install uninstall deploy deb test vet fmt tidy clean \
+.PHONY: all build install install-skill uninstall deploy deb test vet fmt tidy clean \
         $(BINDIR)/claude-remote-api $(BINDIR)/crctl $(BINDIR)/ngrok-forward
 
 all: build
@@ -41,6 +43,13 @@ install: $(BINDIR)/crctl
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
 	$(INSTALL) -m 0755 $(BINDIR)/crctl $(DESTDIR)$(PREFIX)/bin/crctl
 	@echo "installed crctl -> $(DESTDIR)$(PREFIX)/bin/crctl"
+
+## install-skill: install the session-repo Claude skill into $(SKILLDIR) (no sudo)
+install-skill:
+	$(INSTALL) -d $(SKILLDIR)/session-repo
+	$(INSTALL) -m 0644 skills/session-repo/SKILL.md $(SKILLDIR)/session-repo/SKILL.md
+	$(INSTALL) -m 0755 skills/session-repo/restart-self.sh $(SKILLDIR)/session-repo/restart-self.sh
+	@echo "installed session-repo skill -> $(SKILLDIR)/session-repo"
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/crctl
