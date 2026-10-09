@@ -82,7 +82,8 @@ func run(ctx context.Context) int {
 	}
 
 	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome,
-		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT")}
+		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT"),
+		TrustDirs:     envBool("CLAUDE_REMOTE_TRUST_DIRS", false)}
 	var stopped session.StoppedLister
 	if db != nil {
 		mgr.Store = db
