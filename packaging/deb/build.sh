@@ -36,6 +36,10 @@ for f in config.yaml upstreams.yaml security_rules.yaml; do
 done
 install -D -m 0644 "$REPO/deploy/.env.example" "$PKG/usr/share/code-remote/env.example"
 
+# Claude skill (copied into ~/.claude/skills by the user; see README)
+install -D -m 0644 "$REPO/skills/session-repo/SKILL.md" "$PKG/usr/share/code-remote/skills/session-repo/SKILL.md"
+install -D -m 0755 "$REPO/skills/session-repo/restart-self.sh" "$PKG/usr/share/code-remote/skills/session-repo/restart-self.sh"
+
 # Control + maintainer scripts
 install -d "$PKG/DEBIAN"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__ARCH__/$ARCH/" "$HERE/control.in" > "$PKG/DEBIAN/control"
