@@ -534,6 +534,32 @@ func TestResumeInMovesSession(t *testing.T) {
 		}
 	})
 
+	t.Run("a moved session keeps its title", func(t *testing.T) {
+		home, root := t.TempDir(), evalDir(t)
+		upgradeHome(t, home, id, "", "")
+		log := filepath.Join(home, "projects", "repo", id+".jsonl")
+		title := `{"type":"custom-title","customTitle":"- My Title","sessionId":"` + id + `"}` + "\n"
+		f, err := os.OpenFile(log, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(title); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		fs := &fakeScreen{}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root}
+
+		if _, err := m.ResumeIn(id, root); err != nil {
+			t.Fatalf("ResumeIn: %v", err)
+		}
+		// The fork's Remote Control session is titled after its name.
+		if want := "--fork-session --remote-control=- My Title"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+			t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
+		}
+	})
+
 	t.Run("later resumes stay in the stored dir", func(t *testing.T) {
 		home, moved := t.TempDir(), t.TempDir()
 		upgradeHome(t, home, id, "", "") // log's cwd is some other dir

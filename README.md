@@ -125,9 +125,10 @@ A move forks the conversation (`claude --resume <id> --fork-session`): the
 history carries over, under a new conversation id. That is deliberate — a
 conversation stays bound to the Remote Control session it was created with, and
 that one keeps the repository (or lack of one) it started with, so only a fresh
-registration from the new directory picks the repository up. The session id,
-screen name and Remote Control name are unchanged, but the Claude apps list the
-moved session as a new entry and the previous one goes away (archived). Passing
+registration from the new directory picks the repository up. The session id
+and screen name are unchanged, but the Claude apps list the moved session as a
+new entry and the previous one goes away (archived). The new entry is named
+after the session's title (its id when it has none). Passing
 `dir` again — even the same directory — forks and re-registers again.
 
 Claude asks "do you trust this folder?" the first time it starts in a directory,
