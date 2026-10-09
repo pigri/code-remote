@@ -113,4 +113,14 @@ func TestSessionEnv(t *testing.T) {
 	if want := "PATH=/bin CLAUDE_CODE_USE_BEDROCK=1 HOME=/h"; got != want {
 		t.Errorf("sessionEnv = %q, want %q", got, want)
 	}
+
+	// The tool-shell settings go only with an enclosing claude session; set by
+	// the user in a plain shell they are configuration and stay.
+	tool := []string{"GIT_EDITOR=true", "CLAUDE_EFFORT=medium", "GIT_TERMINAL_PROMPT=0", "PATH=/bin"}
+	if got := strings.Join(sessionEnv(append([]string{"CLAUDECODE=1"}, tool...)), " "); got != "PATH=/bin" {
+		t.Errorf("sessionEnv(nested) = %q, want only PATH", got)
+	}
+	if got := strings.Join(sessionEnv(tool), " "); got != strings.Join(tool, " ") {
+		t.Errorf("sessionEnv(plain shell) = %q, want unchanged", got)
+	}
 }

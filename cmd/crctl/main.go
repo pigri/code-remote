@@ -8,7 +8,9 @@
 //	crctl ls                 # list sessions (default)
 //	crctl new                # start a new session
 //	crctl rm <id>            # stop a session
-//	crctl restart <id>       # stop + resume a session under the same id
+//	crctl resume <id>        # relaunch a stopped session (--dir D to move it)
+//	crctl resume all         # relaunch every stopped session
+//	crctl restart <id>       # stop + resume a session under the same id (--dir D to move it)
 //	crctl upgrade --all      # update claude, restart all sessions onto the new version
 //	crctl upgrade <id>...    # update claude, restart just these sessions
 //
@@ -28,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -41,8 +44,8 @@ import (
 type backend interface {
 	list() ([]session.Session, error)
 	create(dir string) (session.Session, error)
-	resume(id string) (session.Session, error)
-	restart(id string) (session.Session, error)
+	resume(id, dir string) (session.Session, error)
+	restart(id, dir string) (session.Session, error)
 	upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	remove(id string) error
 }
@@ -76,20 +79,34 @@ func run(args []string) error {
 	case "new", "create":
 		return create(be, args[1:])
 	case "resume":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: crctl resume <id>")
+		dir, rest, err := dirFlag(args[1:])
+		if err != nil {
+			return err
 		}
-		s, err := be.resume(args[1])
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: crctl resume (all | <id> [--dir D])")
+		}
+		if a := rest[0]; a == "all" || a == "--all" || a == "-a" {
+			if dir != "" {
+				return fmt.Errorf("--dir moves one session; it can't be combined with `resume all`")
+			}
+			return resumeAll(be)
+		}
+		s, err := be.resume(rest[0], dir)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
 		return nil
 	case "restart":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: crctl restart <id>")
+		dir, rest, err := dirFlag(args[1:])
+		if err != nil {
+			return err
 		}
-		s, err := be.restart(args[1])
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: crctl restart <id> [--dir D]")
+		}
+		s, err := be.restart(rest[0], dir)
 		if err != nil {
 			return err
 		}
@@ -126,6 +143,9 @@ func pickBackend() (backend, error) {
 		ScreenBin:  resolveBin(envOr("SCREEN_BIN", "screen")),
 		ClaudeBin:  resolveBin(envOr("CLAUDE_BIN", "claude")),
 		ClaudeHome: claudeHome(),
+		// Local mode runs as the invoking user, who can already start claude
+		// anywhere; the workspace root only narrows --dir when it is set.
+		WorkspaceRoot: envOr("CLAUDE_WORKSPACE_ROOT", "/"),
 	}
 	// Share the server's SQLite mirror so `new`/`resume` record sessions and
 	// `ls` can surface resumable (stopped) ones. Best-effort: a store that won't
@@ -145,10 +165,29 @@ type localBackend struct {
 	stopped session.StoppedLister // nil when the store didn't open
 }
 
-func (b *localBackend) list() ([]session.Session, error)           { return b.mgr.ListAll(b.stopped) }
-func (b *localBackend) create(dir string) (session.Session, error) { return b.mgr.Create(dir) }
-func (b *localBackend) resume(id string) (session.Session, error)  { return b.mgr.Resume(id) }
-func (b *localBackend) restart(id string) (session.Session, error) { return b.mgr.Restart(id) }
+func (b *localBackend) list() ([]session.Session, error) { return b.mgr.ListAll(b.stopped) }
+func (b *localBackend) create(dir string) (session.Session, error) {
+	return b.mgr.Create(localDir(dir))
+}
+func (b *localBackend) resume(id, dir string) (session.Session, error) {
+	return b.mgr.ResumeIn(id, localDir(dir))
+}
+func (b *localBackend) restart(id, dir string) (session.Session, error) {
+	return b.mgr.RestartIn(id, localDir(dir))
+}
+
+// localDir makes a --dir given on the command line absolute, so a relative one
+// means "relative to where crctl was run" (the manager would otherwise anchor
+// it to the workspace root). Remote mode leaves that to the server.
+func localDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
 func (b *localBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
 	return b.mgr.Upgrade(restart, force, ids...)
 }
@@ -182,24 +221,28 @@ func (b *httpBackend) list() ([]session.Session, error) {
 
 func (b *httpBackend) create(dir string) (session.Session, error) {
 	var s session.Session
-	var in any
-	if dir != "" {
-		in = map[string]string{"dir": dir}
+	err := b.do(http.MethodPost, "/sessions", dirBody(dir), &s)
+	return s, err
+}
+
+func (b *httpBackend) resume(id, dir string) (session.Session, error) {
+	var s session.Session
+	err := b.do(http.MethodPost, "/sessions/"+id+"/resume", dirBody(dir), &s)
+	return s, err
+}
+
+func (b *httpBackend) restart(id, dir string) (session.Session, error) {
+	var s session.Session
+	err := b.do(http.MethodPost, "/sessions/"+id+"/restart", dirBody(dir), &s)
+	return s, err
+}
+
+// dirBody is the optional {"dir": ...} request body; nil when no dir is given.
+func dirBody(dir string) any {
+	if dir == "" {
+		return nil
 	}
-	err := b.do(http.MethodPost, "/sessions", in, &s)
-	return s, err
-}
-
-func (b *httpBackend) resume(id string) (session.Session, error) {
-	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/resume", nil, &s)
-	return s, err
-}
-
-func (b *httpBackend) restart(id string) (session.Session, error) {
-	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/restart", nil, &s)
-	return s, err
+	return map[string]string{"dir": dir}
 }
 
 func (b *httpBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
@@ -274,6 +317,9 @@ func list(be backend) error {
 		fmt.Println("No sessions running.")
 		return nil
 	}
+	// Most recently active first; sessions with no known activity go last.
+	// LastActive is RFC3339 in UTC, so it orders as a string.
+	sort.SliceStable(ss, func(i, j int) bool { return ss[i].LastActive > ss[j].LastActive })
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tVERSION\tLAST ACTIVE\tACTION")
 	outdated := 0
@@ -307,24 +353,75 @@ func list(be backend) error {
 	return nil
 }
 
-func create(be backend, args []string) error {
-	dir := ""
+// dirFlag pulls --dir D / -d D / --dir=D out of args, returning the directory
+// ("" when not given) and the remaining arguments in order.
+func dirFlag(args []string) (dir string, rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--dir" || args[i] == "-d":
-			if i+1 < len(args) {
-				dir = args[i+1]
-				i++
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s needs a directory", args[i])
 			}
+			dir = args[i+1]
+			i++
 		case strings.HasPrefix(args[i], "--dir="):
 			dir = strings.TrimPrefix(args[i], "--dir=")
+		default:
+			rest = append(rest, args[i])
 		}
+	}
+	return dir, rest, nil
+}
+
+func create(be backend, args []string) error {
+	dir, _, err := dirFlag(args)
+	if err != nil {
+		return err
 	}
 	s, err := be.create(dir)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("started %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	return nil
+}
+
+// resumeAll relaunches every stopped (resumable) session, printing what
+// happened to each. One that fails doesn't stop the rest.
+func resumeAll(be backend) error {
+	ss, err := be.list()
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTITLE\tRESULT\tREASON")
+	stopped, failed := 0, 0
+	for _, s := range ss {
+		if s.Status != "Stopped" {
+			continue
+		}
+		stopped++
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		result, reason := "resumed", ""
+		if _, err := be.resume(s.ID, ""); err != nil {
+			result, reason = "failed", err.Error()
+			failed++
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.ID, title, result, reason)
+	}
+	if stopped == 0 {
+		fmt.Println("No stopped sessions to resume.")
+		return nil
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d session(s) failed to resume", failed)
+	}
 	return nil
 }
 
@@ -458,8 +555,12 @@ func usage() {
 Usage:
   crctl ls            list running sessions (default)
   crctl new [--dir D] start a new detached claude session (optional working dir)
-  crctl resume <id>   relaunch a stopped session by id
-  crctl restart <id>  stop a session and resume it under the same id
+  crctl resume <id> [--dir D]
+                      relaunch a stopped session by id (--dir moves it there)
+  crctl resume all    relaunch every stopped session
+  crctl restart <id> [--dir D]
+                      stop a session and resume it under the same id; --dir
+                      moves it into D (e.g. its git repo, for PR/branch tracking)
   crctl upgrade [--force] (--all | <id>...)
                       update claude, then restart running sessions onto the new
                       version (each resumes its original session): every

@@ -124,6 +124,20 @@ func (d *DB) Conversation(uuid string) (string, error) {
 	return c.String, nil
 }
 
+// Cwd returns the working directory last recorded for a session, or "" when
+// none is (or the session is unknown).
+func (d *DB) Cwd(uuid string) (string, error) {
+	var c sql.NullString
+	err := d.db.QueryRow(`SELECT cwd FROM sessions WHERE uuid=?`, uuid).Scan(&c)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return c.String, nil
+}
+
 // UpsertSession records/updates the mirrored view, preserving the ledger columns
 // (grace clock, archived_at, resumed_at).
 func (d *DB) UpsertSession(r cloud.SessionRecord) error {
@@ -153,7 +167,9 @@ ON CONFLICT(uuid) DO UPDATE SET
 func (d *DB) Record(uuid, screen, title, cwd, status, createdAt string) error {
 	// cloud_status/connection_status/bridge_session_id are seeded to '' so a
 	// fresh row scans cleanly (AllSessions reads them as non-null strings); the
-	// ON CONFLICT clause omits them, preserving any values the reconciler set.
+	// ON CONFLICT clause omits the statuses, preserving what the reconciler set,
+	// but clears bridge_session_id: a (re)launched claude gets a new bridge, and
+	// the old one, once gone server-side, would read as "deleted".
 	const q = `
 INSERT INTO sessions
 	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at)
@@ -163,6 +179,7 @@ ON CONFLICT(uuid) DO UPDATE SET
 	title=CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
 	cwd=CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
 	local_status=excluded.local_status,
+	bridge_session_id='',
 	created_at=CASE WHEN excluded.created_at != '' THEN excluded.created_at ELSE sessions.created_at END,
 	resumed_at=CASE WHEN sessions.archived_at IS NOT NULL THEN excluded.updated_at ELSE sessions.resumed_at END,
 	archived_at=NULL,

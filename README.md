@@ -113,6 +113,14 @@ stopped but whose on-disk Claude log still exists — it runs `claude --resume
 <id>` in the session's original working directory (read from the log). Returns
 `404` if there's no log to resume, `409` if the session is already running.
 
+Both `resume` and `restart` take an optional JSON body `{"dir": "<path>"}` (same
+rules as `POST /sessions`: it must resolve under `CLAUDE_WORKSPACE_ROOT`, else
+`400`) that **moves** the session: the conversation carries over, but Claude now
+runs in that directory, and later resumes/restarts/upgrades keep it there. Use it
+to put a session inside its git repository — a session started somewhere that
+isn't one (e.g. `$HOME`) registers with no repository, so the Claude apps can't
+show its branch, diff, or pull requests.
+
 `POST /sessions/{id}/restart` quits the session's `screen` and relaunches it with
 `claude --resume <id>` — same session id, screen name, Remote Control name, and
 working directory. If Claude moved the session onto a new conversation id while
@@ -247,10 +255,12 @@ clock (no mirror).
 ## crctl (local CLI)
 
 ```sh
-crctl ls            # list running sessions (default)
+crctl ls            # list sessions, most recently active first (default)
 crctl new           # start a new session
 crctl resume <id>   # relaunch a stopped session by id
+crctl resume all    # relaunch every stopped session
 crctl restart <id>  # stop a session and resume it under the same id
+crctl restart <id> --dir ~/work/repo  # ...and move it into that directory
 crctl upgrade --all # update claude, restart running sessions onto the new version
 crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
@@ -273,6 +283,7 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | _(none)_ | local (default) | drive `screen`/`claude` directly on this host |
 | `CLAUDE_REMOTE_API_URL` | remote | API base URL (e.g. `http://127.0.0.1:9000`) |
 | `CLAUDE_REMOTE_API_TOKEN` | remote | bearer token (required when the URL is set) |
+| `CLAUDE_WORKSPACE_ROOT` | local | optional; limits `--dir` to paths under it (unset = any directory) |
 | `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides |
 | `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
 

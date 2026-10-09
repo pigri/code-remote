@@ -69,6 +69,7 @@ type stubMgr struct {
 	resumeErr   error
 	restartSess session.Session
 	restartErr  error
+	gotDir      string // dir passed to ResumeIn / RestartIn
 	upgradeRes  session.UpgradeResult
 	upgradeErr  error
 	gotRestart  bool // restart flag passed to Upgrade
@@ -80,10 +81,12 @@ func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the
 func (s *stubMgr) Create(string) (session.Session, error) {
 	return s.createSess, s.createErr
 }
-func (s *stubMgr) Resume(string) (session.Session, error) {
+func (s *stubMgr) ResumeIn(_, dir string) (session.Session, error) {
+	s.gotDir = dir
 	return s.resumeSess, s.resumeErr
 }
-func (s *stubMgr) Restart(string) (session.Session, error) {
+func (s *stubMgr) RestartIn(_, dir string) (session.Session, error) {
+	s.gotDir = dir
 	return s.restartSess, s.restartErr
 }
 func (s *stubMgr) Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
@@ -158,6 +161,7 @@ func TestResumeHandlerErrors(t *testing.T) {
 		{"already running -> 409", &stubMgr{resumeErr: session.ErrAlreadyRunning}, "/sessions/" + stubID + "/resume", http.StatusConflict},
 		{"not resumable -> 404", &stubMgr{resumeErr: session.ErrNotResumable}, "/sessions/" + stubID + "/resume", http.StatusNotFound},
 		{"backend error -> 500", &stubMgr{resumeErr: errors.New("boom")}, "/sessions/" + stubID + "/resume", http.StatusInternalServerError},
+		{"bad dir -> 400", &stubMgr{resumeErr: session.ErrInvalidDir}, "/sessions/" + stubID + "/resume", http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -215,6 +219,7 @@ func TestRestartHandler(t *testing.T) {
 		{"not resumable -> 404", &stubMgr{restartErr: session.ErrNotResumable}, path, http.StatusNotFound},
 		{"backend error -> 500", &stubMgr{restartErr: errors.New("boom")}, path, http.StatusInternalServerError},
 		{"bad id -> 400", &badIDMgr{}, "/sessions/not-a-uuid/restart", http.StatusBadRequest},
+		{"bad dir -> 400", &stubMgr{restartErr: session.ErrInvalidDir}, path, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -276,4 +281,18 @@ func TestUpgradeHandler(t *testing.T) {
 			t.Errorf("upgrade(fail) = %d %s, want 500 carrying updater output", rr.Code, rr.Body)
 		}
 	})
+}
+
+func TestResumeRestartPassDir(t *testing.T) {
+	for _, verb := range []string{"resume", "restart"} {
+		m := &stubMgr{}
+		rr := send(t, stubHandler(m), http.MethodPost, "/sessions/"+stubID+"/"+verb, `{"dir":"work/repo"}`)
+		if rr.Code >= 300 || m.gotDir != "work/repo" {
+			t.Errorf("%s = %d, dir %q; want 2xx with dir work/repo (%s)", verb, rr.Code, m.gotDir, rr.Body)
+		}
+		rr = send(t, stubHandler(&stubMgr{}), http.MethodPost, "/sessions/"+stubID+"/"+verb, `{not json`)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s(bad body) = %d, want 400", verb, rr.Code)
+		}
+	}
 }

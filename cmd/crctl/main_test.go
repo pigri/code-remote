@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,9 @@ type fakeBackend struct {
 	createdDir string
 	resumed    session.Session
 	resumedID  string
+	resumedIDs []string
+	movedDir   string           // dir passed to resume / restart
+	resumeErrs map[string]error // per-id failures, checked before resumeErr
 	removed    string
 	listErr    error
 	createErr  error
@@ -78,11 +82,17 @@ func (f *fakeBackend) create(dir string) (session.Session, error) {
 	f.createdDir = dir
 	return f.created, f.createErr
 }
-func (f *fakeBackend) resume(id string) (session.Session, error) {
+func (f *fakeBackend) resume(id, dir string) (session.Session, error) {
+	f.movedDir = dir
 	f.resumedID = id
+	f.resumedIDs = append(f.resumedIDs, id)
+	if err := f.resumeErrs[id]; err != nil {
+		return session.Session{}, err
+	}
 	return f.resumed, f.resumeErr
 }
-func (f *fakeBackend) restart(id string) (session.Session, error) {
+func (f *fakeBackend) restart(id, dir string) (session.Session, error) {
+	f.movedDir = dir
 	f.restartedID = id
 	return session.Session{ID: id, Screen: "p-" + id}, f.restartErr
 }
@@ -372,7 +382,7 @@ func TestHTTPBackend(t *testing.T) {
 		}
 	})
 	t.Run("restart", func(t *testing.T) {
-		s, err := be.restart("s3")
+		s, err := be.restart("s3", "")
 		if err != nil || s.ID != "s2" {
 			t.Fatalf("restart = %+v, %v", s, err)
 		}
@@ -549,6 +559,60 @@ func TestUpgradeCommand(t *testing.T) {
 	})
 }
 
+func TestResumeAllCommand(t *testing.T) {
+	t.Run("resumes only stopped sessions", func(t *testing.T) {
+		be := &fakeBackend{sessions: []session.Session{
+			{ID: "s1", Title: "live", Status: "Detached"},
+			{ID: "s2", Title: "old", Status: "Stopped"},
+			{ID: "s3", Status: "Stopped"},
+		}}
+		out := captureStdout(t, func() {
+			if err := resumeAll(be); err != nil {
+				t.Errorf("resumeAll: %v", err)
+			}
+		})
+		if got := strings.Join(be.resumedIDs, ","); got != "s2,s3" {
+			t.Errorf("resumed ids = %q, want s2,s3", got)
+		}
+		if !contains(out, "s2") || !contains(out, "resumed") || !contains(out, "(untitled)") || contains(out, "s1") {
+			t.Errorf("output = %q", out)
+		}
+	})
+	t.Run("nothing stopped", func(t *testing.T) {
+		be := &fakeBackend{sessions: []session.Session{{ID: "s1", Status: "Detached"}}}
+		out := captureStdout(t, func() {
+			if err := resumeAll(be); err != nil {
+				t.Errorf("resumeAll: %v", err)
+			}
+		})
+		if len(be.resumedIDs) != 0 || !contains(out, "No stopped sessions") {
+			t.Errorf("resumed %v, output = %q", be.resumedIDs, out)
+		}
+	})
+	t.Run("a failure doesn't stop the rest", func(t *testing.T) {
+		be := &fakeBackend{
+			sessions: []session.Session{
+				{ID: "s1", Status: "Stopped"},
+				{ID: "s2", Status: "Stopped"},
+			},
+			resumeErrs: map[string]error{"s1": errors.New("boom")},
+		}
+		var err error
+		out := captureStdout(t, func() { err = resumeAll(be) })
+		if err == nil || !contains(err.Error(), "1 session(s) failed") {
+			t.Errorf("err = %v, want 1 failed", err)
+		}
+		if len(be.resumedIDs) != 2 || !contains(out, "boom") {
+			t.Errorf("resumed %v, output = %q", be.resumedIDs, out)
+		}
+	})
+	t.Run("list error", func(t *testing.T) {
+		if err := resumeAll(&fakeBackend{listErr: errors.New("boom")}); err == nil {
+			t.Error("resumeAll should surface the list error")
+		}
+	})
+}
+
 func TestListShowsOutdated(t *testing.T) {
 	be := &fakeBackend{sessions: []session.Session{
 		{ID: "s1", Screen: "p-s1", Status: "Detached", Version: "2.1.278", Outdated: true},
@@ -567,5 +631,79 @@ func TestListShowsOutdated(t *testing.T) {
 	}
 	if contains(out, "2.1.287 (outdated)") {
 		t.Errorf("current session flagged outdated: %q", out)
+	}
+}
+
+func TestResumeRestartDirFlag(t *testing.T) {
+	var gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		gotPath, gotBody = r.URL.Path, string(data)
+		_, _ = w.Write([]byte(`{"id":"s2","screen":"p-s2"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("CLAUDE_REMOTE_API_URL", srv.URL)
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+
+	for _, c := range []struct {
+		args     []string
+		wantPath string
+		wantBody string // substring; "" = empty body
+	}{
+		{[]string{"restart", "s2", "--dir", "/w/repo"}, "/sessions/s2/restart", `"dir":"/w/repo"`},
+		{[]string{"restart", "--dir=/w/repo", "s2"}, "/sessions/s2/restart", `"dir":"/w/repo"`},
+		{[]string{"resume", "s2", "-d", "/w/repo"}, "/sessions/s2/resume", `"dir":"/w/repo"`},
+		{[]string{"restart", "s2"}, "/sessions/s2/restart", ""},
+	} {
+		gotPath, gotBody = "", ""
+		_ = captureStdout(t, func() {
+			if err := run(c.args); err != nil {
+				t.Errorf("run %v: %v", c.args, err)
+			}
+		})
+		if gotPath != c.wantPath || !contains(gotBody, c.wantBody) || (c.wantBody == "" && gotBody != "") {
+			t.Errorf("run %v: path=%q body=%q, want %q with %q", c.args, gotPath, gotBody, c.wantPath, c.wantBody)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"restart"},
+		{"restart", "s2", "--dir"},
+		{"resume", "all", "--dir", "/w"},
+		{"resume", "s1", "s2"},
+	} {
+		if err := run(args); err == nil {
+			t.Errorf("run %v = nil error, want usage error", args)
+		}
+	}
+}
+
+func TestLocalDir(t *testing.T) {
+	if got := localDir(""); got != "" {
+		t.Errorf("localDir(\"\") = %q, want empty", got)
+	}
+	if got := localDir("/abs/x"); got != "/abs/x" {
+		t.Errorf("localDir(abs) = %q", got)
+	}
+	wd, _ := os.Getwd()
+	if got := localDir("sub"); got != filepath.Join(wd, "sub") {
+		t.Errorf("localDir(rel) = %q, want under %q", got, wd)
+	}
+}
+
+func TestListOrdersByLastActive(t *testing.T) {
+	be := &fakeBackend{sessions: []session.Session{
+		{ID: "old", Screen: "p-old", Status: "Detached", LastActive: "2026-01-01T10:00:00Z"},
+		{ID: "never", Screen: "p-never", Status: "Detached"},
+		{ID: "new", Screen: "p-new", Status: "Stopped", LastActive: "2026-01-02T09:00:00Z"},
+	}}
+	out := captureStdout(t, func() {
+		if err := list(be); err != nil {
+			t.Errorf("list: %v", err)
+		}
+	})
+	iNew, iOld, iNever := strings.Index(out, "\nnew "), strings.Index(out, "\nold "), strings.Index(out, "\nnever ")
+	if iNew < 0 || !(iNew < iOld && iOld < iNever) {
+		t.Errorf("order new/old/never at %d/%d/%d, want ascending:\n%s", iNew, iOld, iNever, out)
 	}
 }

@@ -159,3 +159,54 @@ func TestReconcileDeletedViaStoredBridge(t *testing.T) {
 		t.Fatalf("killed = %v, want [u1] (deleted via stored bridge)", mgr.killed)
 	}
 }
+
+// liveManager adds LiveRegistrations: the resumed session's claude registered
+// under its conversation id, so only the process-matched join finds it.
+type liveManager struct {
+	fakeManager
+	live map[string]session.Registration
+}
+
+func (l *liveManager) LiveRegistrations() map[string]session.Registration { return l.live }
+
+// A resumed session must be checked against its NEW bridge id, not the stale
+// pre-resume one (which 404s and would read as "deleted").
+func TestReconcileResumedSessionUsesLiveBridge(t *testing.T) {
+	d := openTemp(t)
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: "u1", Screen: "p-u1", BridgeSessionID: "session_old"}); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeCloud{sessions: []cloud.Session{{ID: "session_new", SessionStatus: "idle"}}} // session_old: 404
+	mgr := &liveManager{
+		fakeManager: fakeManager{
+			sessions: []session.Session{{ID: "u1", Screen: "p-u1"}},
+			regs:     []session.Registration{{SessionID: "conv-1", BridgeSessionID: "session_new"}},
+		},
+		live: map[string]session.Registration{"u1": {SessionID: "conv-1", BridgeSessionID: "session_new"}},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r := &cloud.Reconciler{Cloud: cl, Manager: mgr, Log: logger, Store: d} // Grace 0
+
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none (resumed session is live)", mgr.killed)
+	}
+	if b, _ := d.LastBridge("u1"); b != "session_new" {
+		t.Errorf("LastBridge = %q, want session_new", b)
+	}
+}
+
+// Relaunching (create/resume) drops the stale bridge id: the new claude gets
+// its own, and the old one must not be used to confirm a deletion.
+func TestRecordClearsStaleBridge(t *testing.T) {
+	d := openTemp(t)
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: "u1", Screen: "p-u1", BridgeSessionID: "session_old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Record("u1", "p-u1", "", "", "Detached", ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge("u1"); b != "" {
+		t.Errorf("LastBridge after Record = %q, want empty", b)
+	}
+}

@@ -535,3 +535,29 @@ func TestSyncConversations(t *testing.T) {
 	}
 	(&Manager{}).SyncConversations() // no store: no-op
 }
+
+// A resumed session's claude registers under the conversation it resumed, not
+// our id; LiveRegistrations still finds it through the screen's child process.
+func TestLiveRegistrationsJoinsResumedSessionByProcess(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	const conv = "c0ffee00-1111-4222-8333-444455556666"
+	home := t.TempDir()
+	upgradeHome(t, home, conv, "", "")
+	reg := `{"sessionId":"` + conv + `","pid":4242,"cwd":"/repo","bridgeSessionId":"session_new","status":"idle"}`
+	if err := os.WriteFile(filepath.Join(home, "sessions", "4242.json"), []byte(reg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 claude --resume " + conv + " --remote-control " + id + "\n"}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home}
+
+	got := m.LiveRegistrations()
+	if r, ok := got[id]; !ok || r.BridgeSessionID != "session_new" || r.Cwd != "/repo" {
+		t.Fatalf("LiveRegistrations()[%s] = %+v, %v; want bridge session_new", id, r, ok)
+	}
+
+	fs.created = nil
+	if got := m.LiveRegistrations(); got != nil {
+		t.Errorf("no running sessions: got %v, want nil", got)
+	}
+}
