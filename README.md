@@ -352,7 +352,8 @@ diff or pull requests in the Claude apps. [`skills/session-repo`](skills/session
 is a Claude Code skill
 that lets a session fix this itself: it works out its own session id, resolves
 the repo, and schedules `crctl restart <id> --dir <repo> --trust` for the moment
-it goes idle. The conversation carries over.
+it goes idle. The conversation's history carries over; the Claude apps list
+the moved session as a new entry (see the note on moving under [API](#api)).
 
 Install it for the user the sessions run as (skills are per-user, read from
 `~/.claude/skills`):
@@ -373,7 +374,7 @@ next restart (`crctl restart <id>`).
 Then, inside a session, ask for it in plain words — "restart yourself in the
 api repo", or "PRs aren't showing up for this session" — or run
 `/session-repo`. The session confirms the target repo, wraps up what it is
-doing, and restarts; it is back in the same conversation a few seconds later.
+doing, and restarts; it is back with the same history a few seconds later.
 
 Notes:
 

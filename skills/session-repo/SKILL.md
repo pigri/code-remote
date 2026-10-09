@@ -36,7 +36,8 @@ file) lets the session do it to itself.
    builds you still need. Background shells and their state do not survive;
    uncommitted changes in the working tree do. Tell the user in one or two
    lines that the session is about to restart into `<repo>` and will come back
-   with the same conversation.
+   with the same history - and that the Claude apps will list it as a new
+   session entry (same name), with the old entry archived.
 
 5. **Run `restart-self.sh <dir>` as the last action of the turn**, then end the
    turn. The script returns immediately; a detached helper waits until the
@@ -47,7 +48,8 @@ file) lets the session do it to itself.
 
 ## Afterwards
 
-The session resumes in the repo and stays there across later restarts and
-upgrades. If the user says it did not come back, the helper's output is in
+The session comes back in the repo, as a fork of the conversation (same
+history, registered afresh so the repository is attached), and stays there
+across later restarts and upgrades. If the user says it did not come back, the helper's output is in
 `~/.local/state/crctl/self-restart-<id>.log`, and `crctl ls` shows whether the
 session is running or stopped (`crctl resume <id>` brings a stopped one back).
