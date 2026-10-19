@@ -45,9 +45,8 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	t.Setenv("CLAUDE_BIN", os.Args[0])
 	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0") // ephemeral port
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")     // no reconciler
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg) // where the default DB would land
-	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+	db := filepath.Join(t.TempDir(), "test.db")
+	t.Setenv("CLAUDE_REMOTE_DB", db)
 
 	// Pre-cancelled context: run binds the listener then immediately shuts down.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,8 +54,8 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	if code := run(ctx); code != 0 {
 		t.Errorf("run graceful shutdown = %d, want 0", code)
 	}
-	if _, err := os.Stat(filepath.Join(xdg, "code-remote")); !os.IsNotExist(err) {
-		t.Errorf("run opened the default session DB: stat err = %v", err)
+	if _, err := os.Stat(db); err != nil {
+		t.Errorf("run did not open the session DB at CLAUDE_REMOTE_DB: %v", err)
 	}
 }
 
