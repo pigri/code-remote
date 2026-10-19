@@ -37,6 +37,7 @@ type Session struct {
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
 
 	unrecorded bool // parseSessions found no profile for it in the Store
+	guessed    bool // its profile is only a guess (see resolveProfile)
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -762,9 +763,9 @@ func find(sessions []Session, id string) (Session, bool) {
 	return Session{}, false
 }
 
-// registeredProfiles puts each running session whose claude has a
-// registration (see regIndex) in the profile it registered in, so every
-// caller sees one profile for it. With one profile there is nothing to move.
+// registeredProfiles puts each running session whose claude has an owned
+// registration (see lookup) in the profile it registered in, so every caller
+// sees one profile for it. With one profile there is nothing to move.
 func (m *Manager) registeredProfiles(sessions []Session, c *regCache) {
 	if !m.Profiles.Multi() || len(sessions) == 0 {
 		return
@@ -773,7 +774,7 @@ func (m *Manager) registeredProfiles(sessions []Session, c *regCache) {
 	for i := range sessions {
 		s := &sessions[i]
 		r, ok, _, _ := ix.lookup(*s)
-		if !ok || r.Profile == "" || r.Profile == s.Profile {
+		if !ok || !r.owned || r.Profile == "" || r.Profile == s.Profile {
 			continue
 		}
 		p, err := m.lookupProfile(r.Profile)
@@ -789,7 +790,7 @@ func moveTo(s *Session, p profile.Profile) {
 	if s.Profile == p.Name {
 		return
 	}
-	s.Profile = p.Name
+	s.Profile, s.guessed = p.Name, false
 	s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 }
 
@@ -800,8 +801,8 @@ func (m *Manager) parseSessions(out string) []Session {
 	sessions := m.parseScreens(out)
 	for i := range sessions {
 		s := &sessions[i]
-		p, unrecorded := m.resolveProfile(s.ID)
-		s.Profile, s.unrecorded = p.Name, unrecorded
+		p, unrecorded, guessed := m.resolveProfile(s.ID)
+		s.Profile, s.unrecorded, s.guessed = p.Name, unrecorded, guessed
 		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 	}
 	return sessions
