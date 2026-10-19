@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -313,30 +314,73 @@ func TestRunWaitsForConversationSync(t *testing.T) {
 	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0")
 	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
 	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
-	t.Setenv("CLAUDE_HOME", t.TempDir())
 
 	entered, release := make(chan struct{}), make(chan struct{})
+	storeErr := make(chan error, 1)
 	orig := syncConversations
 	t.Cleanup(func() { syncConversations = orig })
 	var once sync.Once
-	syncConversations = func(*session.Manager) {
-		once.Do(func() { close(entered) })
-		<-release
+	syncConversations = func(m *session.Manager) {
+		once.Do(func() {
+			close(entered)
+			<-release
+			// The pass's own write, made after shutdown has begun.
+			w := m.Store.(interface{ SetConversation(id, conv string) error })
+			storeErr <- w.SetConversation("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002")
+		})
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	done := make(chan int, 1)
 	go func() { done <- run(ctx) }()
-
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no conversation sync pass started")
+	}
+	cancel()
 	select {
 	case <-done:
 		t.Fatal("run returned while a conversation sync was still running")
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(release)
-	if code := <-done; code != 0 {
-		t.Errorf("run = %d, want 0", code)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("run = %d, want 0", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after the sync pass finished")
+	}
+	if err := <-storeErr; err != nil {
+		t.Errorf("the in-flight pass could not write to the store: %v", err)
+	}
+}
+
+// A server that cannot listen makes run exit 1, with the store open and the
+// background workers running.
+func TestRunExitsWhenServerFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	t.Setenv("SCREEN_BIN", os.Args[0])
+	t.Setenv("CLAUDE_BIN", os.Args[0])
+	t.Setenv("CLAUDE_REMOTE_API_ADDR", ln.Addr().String()) // already taken
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+
+	done := make(chan int, 1)
+	go func() { done <- run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Errorf("run with the port taken = %d, want 1", code)
+		}
+	case <-time.After(3 * time.Second): // under run's 5s shutdown deadline
+		t.Fatal("run did not return promptly after the server failed")
 	}
 }
