@@ -487,9 +487,10 @@ func launchFlags(args []string) (dir, prof string, rest []string, err error) {
 			dir = strings.TrimPrefix(args[i], "--dir=")
 		case args[i] == "--profile" || strings.HasPrefix(args[i], "--profile="):
 			if args[i] == "--profile" {
-				if i+1 < len(args) {
-					prof = args[i+1]
+				if i+1 >= len(args) {
+					return "", "", nil, fmt.Errorf("--profile needs a profile name")
 				}
+				prof = args[i+1]
 				i++
 			} else {
 				prof = strings.TrimPrefix(args[i], "--profile=")

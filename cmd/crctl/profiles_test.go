@@ -30,6 +30,7 @@ func TestProfilesCommand(t *testing.T) {
 }
 
 func TestProfilesCommandLocal(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_URL", "") // local mode, whatever the caller's shell has
 	t.Setenv("HOME", t.TempDir())
 	t.Run("several", func(t *testing.T) {
 		t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")

@@ -851,6 +851,9 @@ func TestProfileFlag(t *testing.T) {
 		{"resume", "s1", "--profile"},
 		{"restart", "s1", "--profile="},
 		{"resume", "all", "--profile", "work"},
+		{"new", "--profile=private", "--profile"},
+		{"new", "--profile", "private", "--profile"},
+		{"restart", "s1", "--profile=private", "--profile"},
 	} {
 		be := &fakeBackend{}
 		var err error
