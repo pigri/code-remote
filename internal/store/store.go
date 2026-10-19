@@ -85,16 +85,22 @@ CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
 	if _, err := d.db.Exec(schema); err != nil {
 		return err
 	}
-	// conv_id was added after the first release; CREATE TABLE IF NOT EXISTS
-	// won't add it to an existing database.
-	var n int
-	if err := d.db.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='conv_id'`).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		if _, err := d.db.Exec(`ALTER TABLE sessions ADD COLUMN conv_id TEXT`); err != nil {
+	// These columns were added after the first release; CREATE TABLE IF NOT
+	// EXISTS won't add them to an existing database. A profile of '' is the
+	// default one, which every session recorded before profiles ran under.
+	for _, col := range []struct{ name, def string }{
+		{"conv_id", "TEXT"},
+		{"profile", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var n int
+		if err := d.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name=?`, col.name).Scan(&n); err != nil {
 			return err
+		}
+		if n == 0 {
+			if _, err := d.db.Exec(`ALTER TABLE sessions ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -164,7 +170,8 @@ ON CONFLICT(uuid) DO UPDATE SET
 // row and clears the archive markers, stamping resumed_at when the session had
 // previously been archived. This is what makes a session discoverable as
 // resumable after its screen is gone, independent of the cloud reconciler.
-func (d *DB) Record(uuid, screen, title, cwd, status, createdAt string) error {
+// profile is the profile the session runs under; "" is the default one.
+func (d *DB) Record(uuid, screen, title, cwd, status, createdAt, profile string) error {
 	// cloud_status/connection_status/bridge_session_id are seeded to '' so a
 	// fresh row scans cleanly (AllSessions reads them as non-null strings); the
 	// ON CONFLICT clause omits the statuses, preserving what the reconciler set,
@@ -172,10 +179,11 @@ func (d *DB) Record(uuid, screen, title, cwd, status, createdAt string) error {
 	// the old one, once gone server-side, would read as "deleted".
 	const q = `
 INSERT INTO sessions
-	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?)
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, profile)
+VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?)
 ON CONFLICT(uuid) DO UPDATE SET
 	screen=excluded.screen,
+	profile=excluded.profile,
 	title=CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
 	cwd=CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
 	local_status=excluded.local_status,
@@ -186,7 +194,7 @@ ON CONFLICT(uuid) DO UPDATE SET
 	first_seen_archived=NULL,
 	updated_at=excluded.updated_at;`
 	now := time.Now().Unix()
-	if _, err := d.db.Exec(q, uuid, screen, title, cwd, status, createdAt, now); err != nil {
+	if _, err := d.db.Exec(q, uuid, screen, title, cwd, status, createdAt, now, profile); err != nil {
 		return err
 	}
 	return d.logEvent(uuid, "record", status)
@@ -219,6 +227,7 @@ func (d *DB) StoppedSessions(running []session.Session, keep func(id string) boo
 			Title:     s.Title,
 			Status:    "Stopped",
 			CreatedAt: s.CreatedAt,
+			Profile:   s.Profile,
 		})
 	}
 	return out, nil
@@ -278,7 +287,7 @@ func (d *DB) logEvent(uuid, kind, detail string) error {
 type Session struct {
 	UUID, Screen, Title, Cwd                            string
 	LocalStatus, CloudStatus, ConnectionStatus, Bridge  string
-	CreatedAt                                           string
+	CreatedAt, Profile                                  string
 	FirstSeenArchived, ArchivedAt, ResumedAt, UpdatedAt sql.NullInt64
 }
 
@@ -286,7 +295,7 @@ type Session struct {
 func (d *DB) AllSessions() ([]Session, error) {
 	rows, err := d.db.Query(`
 SELECT uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id,
-       created_at, first_seen_archived, archived_at, resumed_at, updated_at
+       created_at, first_seen_archived, archived_at, resumed_at, updated_at, profile
 FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -297,7 +306,7 @@ FROM sessions ORDER BY updated_at DESC`)
 		var s Session
 		if err := rows.Scan(&s.UUID, &s.Screen, &s.Title, &s.Cwd, &s.LocalStatus, &s.CloudStatus,
 			&s.ConnectionStatus, &s.Bridge, &s.CreatedAt, &s.FirstSeenArchived, &s.ArchivedAt,
-			&s.ResumedAt, &s.UpdatedAt); err != nil {
+			&s.ResumedAt, &s.UpdatedAt, &s.Profile); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

@@ -304,7 +304,7 @@ func (f *fakeStore) SetConversation(uuid, conv string) error {
 
 func (f *fakeStore) Conversation(uuid string) (string, error) { return f.convs[uuid], nil }
 
-func (f *fakeStore) Record(uuid, _, _, cwd, _, _ string) error {
+func (f *fakeStore) Record(uuid, _, _, cwd, _, _, _ string) error {
 	f.recorded = append(f.recorded, uuid)
 	f.lastCwd = cwd
 	return nil

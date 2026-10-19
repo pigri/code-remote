@@ -203,7 +203,7 @@ func TestRecordClearsStaleBridge(t *testing.T) {
 	if err := d.UpsertSession(cloud.SessionRecord{UUID: "u1", Screen: "p-u1", BridgeSessionID: "session_old"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Record("u1", "p-u1", "", "", "Detached", ""); err != nil {
+	if err := d.Record("u1", "p-u1", "", "", "Detached", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := d.LastBridge("u1"); b != "" {
