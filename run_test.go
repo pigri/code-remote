@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"claude-remote-api/internal/session"
 )
@@ -300,5 +302,41 @@ func TestResumeRestartPassDir(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("%s(bad body) = %d, want 400", verb, rr.Code)
 		}
+	}
+}
+
+// run must not close the store under a conversation sync still in flight.
+func TestRunWaitsForConversationSync(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	t.Setenv("SCREEN_BIN", os.Args[0])
+	t.Setenv("CLAUDE_BIN", os.Args[0])
+	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0")
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("CLAUDE_HOME", t.TempDir())
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	orig := syncConversations
+	t.Cleanup(func() { syncConversations = orig })
+	var once sync.Once
+	syncConversations = func(*session.Manager) {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan int, 1)
+	go func() { done <- run(ctx) }()
+
+	<-entered
+	select {
+	case <-done:
+		t.Fatal("run returned while a conversation sync was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if code := <-done; code != 0 {
+		t.Errorf("run = %d, want 0", code)
 	}
 }

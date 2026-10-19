@@ -88,12 +88,16 @@ func run(ctx context.Context) int {
 	// Keep the store's note of each session's current conversation fresh, so a
 	// session that dies without warning (crash, host reboot) still resumes where
 	// it left off rather than at the conversation it was launched with.
-	if db != nil {
+	convSyncDone := make(chan struct{})
+	if db == nil {
+		close(convSyncDone)
+	} else {
 		go func() {
+			defer close(convSyncDone)
 			t := time.NewTicker(time.Minute)
 			defer t.Stop()
 			for {
-				mgr.SyncConversations()
+				syncConversations(mgr)
 				select {
 				case <-ctx.Done():
 					return
@@ -128,14 +132,15 @@ func run(ctx context.Context) int {
 		logger.Error("server_error", "error", exitErr.Error())
 	}
 
-	// Drain in-flight requests, then stop the reconciler and checkpoint+close
-	// the SQLite store.
+	// Drain in-flight requests, then stop the reconciler and the conversation
+	// sync, and checkpoint+close the SQLite store.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	if err := sync.Close(); err != nil {
 		logger.Warn("sync_close", "error", err.Error())
 	}
+	<-convSyncDone // it writes to the store
 	if db != nil {
 		if err := db.Close(); err != nil {
 			logger.Warn("store_close", "error", err.Error())
@@ -147,6 +152,10 @@ func run(ctx context.Context) int {
 	}
 	return 0
 }
+
+// syncConversations is one conversation sync pass; a variable so tests can
+// hold it open.
+var syncConversations = (*session.Manager).SyncConversations
 
 // auditLogger builds the structured logger used for the audit trail.
 // CLAUDE_REMOTE_LOG_FORMAT=json emits JSON (one object per line) for log
