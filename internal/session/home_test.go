@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestDefaultClaudeHomeUnknown(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_HOME", "")
+	t.Setenv("HOME", "")
+	if got := DefaultClaudeHome(); got != "" {
+		t.Errorf("DefaultClaudeHome() with no home = %q, want \"\"", got)
+	}
+}
+
 func TestDefaultClaudeHome(t *testing.T) {
 	userHome, err := os.UserHomeDir()
 	if err != nil {

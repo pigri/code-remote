@@ -752,7 +752,7 @@ type Registration struct {
 }
 
 // Registrations reads claude's process registry under
-// $CLAUDE_HOME/sessions/*.json. Best-effort: unreadable/!malformed files are
+// <ClaudeHome>/sessions/*.json. Best-effort: unreadable/!malformed files are
 // skipped. Used to join local sessions to server-side state (cwd + bridge id).
 func (m *Manager) Registrations() ([]Registration, error) {
 	if m.ClaudeHome == "" {
