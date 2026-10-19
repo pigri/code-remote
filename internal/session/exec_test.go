@@ -350,6 +350,7 @@ func TestResumeViaScreen(t *testing.T) {
 // fakeStore captures Record calls and serves canned StoppedSessions.
 type fakeStore struct {
 	recorded []string          // uuids passed to Record
+	titles   []string          // title passed to each Record
 	profiles []string          // profile passed to each Record
 	stored   map[string]string // uuid -> profile, served by Profile
 	lookups  map[string]int    // uuid -> calls to Profile
@@ -373,8 +374,9 @@ func (f *fakeStore) SetConversation(uuid, conv string) error {
 
 func (f *fakeStore) Conversation(uuid string) (string, error) { return f.convs[uuid], nil }
 
-func (f *fakeStore) Record(uuid, _, _, cwd, _, _, profile string) error {
+func (f *fakeStore) Record(uuid, _, title, cwd, _, _, profile string) error {
 	f.recorded = append(f.recorded, uuid)
+	f.titles = append(f.titles, title)
 	f.profiles = append(f.profiles, profile)
 	f.lastCwd = cwd
 	if profile != "" { // like the DB, "" keeps the stored profile
@@ -621,7 +623,7 @@ func TestResumeInMovesSession(t *testing.T) {
 		}
 		// A move forks the conversation so claude registers it afresh from the
 		// new directory; which conversation that is isn't known yet.
-		if want := "--resume " + id + " --fork-session --remote-control " + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
+		if want := "--resume " + id + " --fork-session --remote-control=" + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 			t.Errorf("launches = %v, want one with %q", fs.launches, want)
 		}
 		if c := fst.convs[id]; c != "" {
@@ -710,5 +712,138 @@ func TestRestartInValidatesDirBeforeStopping(t *testing.T) {
 	}
 	if len(fs.killed) != 1 || len(fs.launches) != 1 || fst.lastCwd != root {
 		t.Errorf("killed=%v launches=%v cwd=%q, want one of each in %q", fs.killed, fs.launches, fst.lastCwd, root)
+	}
+}
+
+func appendTitle(t *testing.T, home, id, title string) {
+	t.Helper()
+	logs, _ := filepath.Glob(filepath.Join(home, "projects", "*", id+".jsonl"))
+	if len(logs) != 1 {
+		t.Fatalf("logs for %s = %v, want one", id, logs)
+	}
+	f, err := os.OpenFile(logs[0], os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(`{"type":"custom-title","customTitle":"` + title + `","sessionId":"` + id + `"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeKeepsTitle(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	const conv = "0b1f4c2e-7a55-4d0e-8c11-2f6d8e9a3b70"
+
+	t.Run("a plain relaunch names the Remote Control session after the title", func(t *testing.T) {
+		home := t.TempDir()
+		upgradeHome(t, home, id, "", "")
+		appendTitle(t, home, id, "- My Title")
+		fs := &fakeScreen{}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
+
+		if _, err := m.Resume(id); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if want := "--resume " + id + " --remote-control=- My Title"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+			t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
+		}
+	})
+
+	t.Run("a conversation's title names it, and is recorded at launch", func(t *testing.T) {
+		home := t.TempDir()
+		upgradeHome(t, home, id, "", "")
+		upgradeHome(t, home, conv, "", "")
+		appendTitle(t, home, conv, "Conv Title")
+		fs, fst := &fakeScreen{}, &fakeStore{convs: map[string]string{id: conv}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+		if _, err := m.Resume(id); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if want := "--resume " + conv + " --remote-control=Conv Title"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+			t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
+		}
+		if len(fst.titles) != 1 || fst.titles[0] != "Conv Title" {
+			t.Errorf("recorded titles = %q, want [Conv Title]", fst.titles)
+		}
+	})
+
+	t.Run("a launch not yet listed records the title too", func(t *testing.T) {
+		home := t.TempDir()
+		upgradeHome(t, home, id, "", "")
+		upgradeHome(t, home, conv, "", "")
+		appendTitle(t, home, conv, "Conv Title")
+		fs, fst := &fakeScreen{unlisted: true}, &fakeStore{convs: map[string]string{id: conv}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+		s, err := m.Resume(id)
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if s.Status != "Detached" || len(fst.titles) != 1 || fst.titles[0] != "Conv Title" {
+			t.Errorf("status %q, recorded titles %q; want Detached and [Conv Title]", s.Status, fst.titles)
+		}
+	})
+
+	t.Run("an untitled session keeps its id as the name", func(t *testing.T) {
+		home := t.TempDir()
+		upgradeHome(t, home, id, "", "")
+		fs := &fakeScreen{}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
+
+		if _, err := m.Resume(id); err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+		if want := "--resume " + id + " --remote-control=" + id; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+			t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
+		}
+	})
+}
+
+func TestRCName(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	for _, tc := range []struct{ name, title, want string }{
+		{"plain", "My Title", "My Title"},
+		{"empty falls back to the id", "", id},
+		{"whitespace only", " \t ", id},
+		{"controls only", "\x00\n\r", id},
+		{"NUL dropped", "a\x00b", "ab"},
+		{"newline and tab dropped", "line1\nline2\tx\r", "line1line2x"},
+		{"C1 dropped", "a\u0085b", "ab"},
+		{"trimmed", "  My Title \n", "My Title"},
+		{"leading dash kept", "- My Title", "- My Title"},
+		{"multibyte kept", "Ünï ✓", "Ünï ✓"},
+		{"capped in runes", strings.Repeat("é", rcNameMax+50), strings.Repeat("é", rcNameMax)},
+		{"capped then trimmed", strings.Repeat("a", rcNameMax-1) + " b", strings.Repeat("a", rcNameMax-1)},
+		{"huge", strings.Repeat("x", 1<<20), strings.Repeat("x", rcNameMax)},
+	} {
+		if got := rcName(tc.title, id); got != tc.want {
+			t.Errorf("%s: rcName(%q) = %q, want %q", tc.name, tc.title, got, tc.want)
+		}
+	}
+}
+
+func TestResumeLaunchesWithHostileTitle(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	home := t.TempDir()
+	upgradeHome(t, home, id, "", "")
+	appendTitle(t, home, id, "ok\\u0000bad")
+	fs, fst := &fakeScreen{}, &fakeStore{}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+	if _, err := m.Resume(id); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if want := "--remote-control=okbad"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+		t.Errorf("launches = %q, want one ending in %q", fs.launches, want)
+	}
+	if len(fst.titles) != 1 || fst.titles[0] != "ok\x00bad" {
+		t.Errorf("recorded titles = %q, want the raw title", fst.titles)
 	}
 }

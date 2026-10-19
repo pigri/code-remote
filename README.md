@@ -227,8 +227,9 @@ set `CLAUDE_REMOTE_TRUST_DIRS=1` for the API (or pass `--trust` to a local
 directory under `CLAUDE_WORKSPACE_ROOT` is one you trust.
 
 `POST /sessions/{id}/restart` quits the session's `screen` and relaunches it with
-`claude --resume <id>` — same session id, screen name, Remote Control name, and
-working directory. If Claude moved the session onto a new conversation id while
+`claude --resume <id>` — same session id, screen name, and working directory.
+The Remote Control session is named after the session's title (its id when it
+has none), so a relaunch that has to register a new one keeps the title. If Claude moved the session onto a new conversation id while
 it ran (e.g. after `/clear`), the conversation it is in now is the one resumed,
 not the one it was launched with. It refuses with `404` (and leaves the session running) when
 there is no on-disk log to resume from; a session that is already stopped is
@@ -446,8 +447,8 @@ auto-archived) but whose on-disk Claude log survives. Resumable rows show
 `Stopped` and a `crctl resume <id>` hint instead of a `screen -r` attach command.
 
 Claude can move a running session onto a new conversation id (e.g. after
-`/clear`). code-remote follows it: the session keeps its id, screen name and
-Remote Control name, while `ls` shows the title and activity of the conversation
+`/clear`). code-remote follows it: the session keeps its id and screen
+name, while `ls` shows the title and activity of the conversation
 it is in now, and `resume`/`restart` reopen that conversation rather than the
 one the session was launched with. The current conversation is noted in the
 SQLite mirror whenever sessions are listed, stopped or restarted, and once a

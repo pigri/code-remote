@@ -83,7 +83,7 @@ func TestRestart(t *testing.T) {
 		if len(fs.killed) != 1 || len(fs.launches) != 1 {
 			t.Fatalf("killed=%v launches=%v, want one of each", fs.killed, fs.launches)
 		}
-		if want := "--resume " + id + " --remote-control " + id; !strings.Contains(fs.launches[0], want) {
+		if want := "--resume " + id + " --remote-control=" + id; !strings.Contains(fs.launches[0], want) {
 			t.Errorf("relaunch argv %q missing %q", fs.launches[0], want)
 		}
 	})
@@ -108,7 +108,7 @@ func TestRestart(t *testing.T) {
 			t.Fatalf("Restart = %+v, %v", s, err)
 		}
 		// Same screen + Remote Control name, but the live conversation.
-		want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control " + id
+		want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control=" + id
 		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 			t.Errorf("relaunch argv %v, want it to contain %q", fs.launches, want)
 		}
@@ -475,11 +475,12 @@ func TestDriftedSessionLifecycle(t *testing.T) {
 		t.Errorf("stopped LastActive = %q, want the live conversation's (recent) time", all[0].LastActive)
 	}
 
-	// Resume reopens the conversation it was in, under the original names.
+	// Resume reopens the conversation it was in, under the original screen
+	// name, with the Remote Control session named after the conversation's title.
 	if _, err := m.Resume(id); err != nil {
 		t.Fatal(err)
 	}
-	want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control " + id
+	want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control=renamed since"
 	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 		t.Errorf("resume argv %v, want it to contain %q", fs.launches, want)
 	}
@@ -510,7 +511,7 @@ func TestRestartWithoutRegistry(t *testing.T) {
 		if _, err := m.Restart(id); err != nil {
 			t.Fatal(err)
 		}
-		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+argvID+" --remote-control "+id) {
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+argvID+" --remote-control="+id) {
 			t.Errorf("relaunch argv %v, want --resume %s", fs.launches, argvID)
 		}
 	})
@@ -520,7 +521,7 @@ func TestRestartWithoutRegistry(t *testing.T) {
 		if _, err := m.Restart(id); err != nil {
 			t.Fatal(err)
 		}
-		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+storID+" --remote-control "+id) {
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+storID+" --remote-control="+id) {
 			t.Errorf("relaunch argv %v, want --resume %s", fs.launches, storID)
 		}
 	})
@@ -571,5 +572,23 @@ func TestLiveRegistrationsJoinsResumedSessionByProcess(t *testing.T) {
 	fs.created = nil
 	if got := m.LiveRegistrations(); got != nil {
 		t.Errorf("no running sessions: got %v, want nil", got)
+	}
+}
+
+func TestRestartTitledSessionCarriesTitle(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	home := t.TempDir()
+	upgradeHome(t, home, id, "2.1.100", "idle")
+	appendTitle(t, home, id, "My Title")
+	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 claude --resume " + id + " --remote-control " + id + "\n"}
+	withFakeScreen(t, fs)
+	fastStop(t)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
+
+	if _, err := m.Restart(id); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if want := "--resume " + id + " --remote-control=My Title"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+		t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
 	}
 }

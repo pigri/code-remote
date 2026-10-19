@@ -15,14 +15,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"claude-remote-api/internal/profile"
 )
 
 // Session is one detached claude run inside GNU screen. The Claude session id
 // (a UUID we assign with --session-id) is the stable handle: it's also the
-// screen name suffix and the Remote Control name, so the listing can join the
-// three. Title is the live display name the user sets inside Claude.
+// screen name suffix, and what the Remote Control session is named until the
+// session has a title, so the listing can join the three. Title is the live
+// display name the user sets inside Claude.
 type Session struct {
 	ID         string `json:"id"`              // claude session id == --session-id (uuid)
 	Screen     string `json:"screen"`          // screen session name (<prefix>-<id>)
@@ -520,6 +522,29 @@ func (m *Manager) storedConv(home, id string) string {
 	return id
 }
 
+// rcNameMax caps the Remote Control name, in runes.
+const rcNameMax = 200
+
+// rcName is the Remote Control name to launch session id with: its title
+// without control characters or surrounding space, capped at rcNameMax runes,
+// or the id when nothing is left. The title is claude's own text and goes into
+// argv, where a NUL or an oversized value would make every launch fail.
+func rcName(title, id string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, title)
+	if r := []rune(clean); len(r) > rcNameMax {
+		clean = string(r[:rcNameMax])
+	}
+	if clean = strings.TrimSpace(clean); clean == "" {
+		return id
+	}
+	return clean
+}
+
 // convTitle is the display title for session id while it is in conversation
 // conv, both logged under home: the conversation's own title, falling back to
 // the one set under the original session id (a fresh conversation has none
@@ -562,7 +587,8 @@ func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "",
 // was created with, so resuming the same conversation elsewhere would stay
 // attached to one that knows nothing of the new directory (no repository, hence
 // no PR or diff tracking). The fork registers a fresh one from dir; the session
-// id, screen and Remote Control name stay the same.
+// id and screen name stay the same, and the Remote Control session is named
+// after the session's title.
 func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
@@ -594,7 +620,10 @@ func (m *Manager) storedCwd(id string) string {
 
 // resume relaunches session id's screen, resuming conversation conv. The two
 // differ only when claude moved the session onto a new conversation id while it
-// ran (see Restart); the screen and Remote Control names always stay on id.
+// ran (see Restart); the screen name always stays on id. The Remote Control
+// session is named after the session's title, or id when it has none: a new
+// one (a fork, or a bridge that cannot be reattached) is titled after its
+// name, and the title set on a previous one does not follow.
 // A non-empty dir moves the session to that working directory. from is the
 // session's profile and p the one it launches under; when they differ, the
 // conversation is copied from one into the other first, and the Store
@@ -641,19 +670,14 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	}
 
 	name := m.launchName(p, id)
-	// screen -dmS <screen> claude --resume <conv> [--fork-session] --remote-control <id>
+	// screen -dmS <screen> claude --resume <conv> [--fork-session] --remote-control=<title or id>
 	args := []string{"-dmS", name, m.ClaudeBin, "--resume", conv}
-	rc := []string{"--remote-control", id}
+	// "=" keeps a name that starts with "-" from being read as a flag.
+	title := convTitle(from.Dir, id, conv)
+	rc := []string{"--remote-control=" + rcName(title, id)}
 	fork := dir != "" || move
 	if fork {
 		args = append(args, "--fork-session") // a move: see ResumeIn
-		// The fork's new Remote Control session is titled after its name, and
-		// the title set on the old one doesn't follow. Name it after the
-		// session's title so it keeps showing under that. ("=" keeps a title
-		// that starts with "-" from being read as a flag.)
-		if t := convTitle(from.Dir, id, conv); t != "" {
-			rc = []string{"--remote-control=" + t}
-		}
 	}
 	undo := func() {}
 	if move {
@@ -693,6 +717,9 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	for i := 0; i < 10; i++ {
 		if s, ok := m.running(id); ok {
 			moveTo(&s, p)
+			if title != "" {
+				s.Title = title // moveTo and the screen list read the session id's own log
+			}
 			m.record(&s, cwd, p)
 			noteConv()
 			s.NeedsTrust = needsTrust
@@ -700,7 +727,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	s := Session{ID: id, Screen: name, Status: "Detached"}
+	s := Session{ID: id, Screen: name, Status: "Detached", Title: title}
 	m.record(&s, cwd, p)
 	noteConv()
 	s.NeedsTrust = needsTrust
