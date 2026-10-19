@@ -15,9 +15,10 @@ import (
 type Profile struct {
 	Name, Dir string
 
-	// inherit marks the single default used when CLAUDE_REMOTE_PROFILES is
-	// unset: claude then runs with the server's environment as it is.
-	inherit bool
+	// explicit marks a profile listed in CLAUDE_REMOTE_PROFILES. Any other one
+	// (the single default, or the zero Profile) leaves claude's environment as
+	// the server's is.
+	explicit bool
 }
 
 // Set is the configured profiles, in the order they were listed, and which of
@@ -70,7 +71,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 			}
 		}
 		names[name] = true
-		out = append(out, Profile{Name: name, Dir: dir})
+		out = append(out, Profile{Name: name, Dir: dir, explicit: true})
 	}
 	return out, nil
 }
@@ -82,7 +83,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 func FromEnv(fallbackDir, userHome string) (Set, error) {
 	spec := os.Getenv("CLAUDE_REMOTE_PROFILES")
 	if spec == "" {
-		return Set{list: []Profile{{Name: "default", Dir: fallbackDir, inherit: true}}}, nil
+		return Set{list: []Profile{{Name: "default", Dir: fallbackDir}}}, nil
 	}
 	list, err := Parse(spec, userHome)
 	if err != nil {
@@ -138,15 +139,31 @@ func (s Set) Names() []string {
 func (s Set) Multi() bool { return s.multi }
 
 // sameDir reports whether a and b name the same dir: equal once cleaned, or
-// both resolving to the same path through symlinks.
+// resolving to the same path through symlinks.
 func sameDir(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
-	if a == b {
-		return true
+	return a == b || resolve(a) == resolve(b)
+}
+
+// resolve follows the symlinks in the deepest existing ancestor of the clean
+// path p and joins the rest back on, so a dir claude has not created yet
+// resolves to where it will be.
+func resolve(p string) string {
+	var rest []string
+	for dir := p; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				r = filepath.Join(r, rest[i])
+			}
+			return r
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = append(rest, filepath.Base(dir))
+		dir = parent
 	}
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
-	return errA == nil && errB == nil && ra == rb
 }
 
 // isUserClaude reports whether p is userHome/.claude, the dir claude uses when
@@ -157,11 +174,12 @@ func (p Profile) isUserClaude(userHome string) bool {
 
 // ConfigFile is claude's global config file for p: ~/.claude.json for
 // ~/.claude, since claude only looks there with CLAUDE_CONFIG_DIR unset, and
-// <dir>/.claude.json for any other dir. It is "" for the single default
-// profile, meaning the caller keeps its own rule (Manager.ClaudeConfig, else
-// the file beside Manager.ClaudeHome).
+// <dir>/.claude.json for any other dir. It is "" for a profile not listed in
+// CLAUDE_REMOTE_PROFILES (the single default, or the zero Profile), meaning the
+// caller keeps its own rule (Manager.ClaudeConfig, else the file beside
+// Manager.ClaudeHome).
 func (p Profile) ConfigFile(userHome string) string {
-	if p.inherit {
+	if !p.explicit {
 		return ""
 	}
 	if p.isUserClaude(userHome) {
@@ -172,11 +190,12 @@ func (p Profile) ConfigFile(userHome string) string {
 
 // Env returns a copy of env that makes claude use p: CLAUDE_CONFIG_DIR is
 // removed, then set to p.Dir unless p is ~/.claude. Setting it to ~/.claude
-// would move claude's config file off ~/.claude.json (see ConfigFile). For the
-// single default profile it is an unchanged copy of env, so claude sees the
-// server's CLAUDE_CONFIG_DIR, or its absence, as before profiles existed.
+// would move claude's config file off ~/.claude.json (see ConfigFile). For a
+// profile not listed in CLAUDE_REMOTE_PROFILES it is an unchanged copy of env,
+// so claude sees the server's CLAUDE_CONFIG_DIR, or its absence, as before
+// profiles existed.
 func (p Profile) Env(env []string, userHome string) []string {
-	if p.inherit {
+	if !p.explicit {
 		return append([]string(nil), env...)
 	}
 	out := make([]string, 0, len(env)+1)

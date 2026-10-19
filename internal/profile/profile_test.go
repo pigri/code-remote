@@ -10,7 +10,8 @@ import (
 
 const home = "/home/u"
 
-func pr(name, dir string) Profile { return Profile{Name: name, Dir: dir} }
+// pr is a profile as Parse makes it, from CLAUDE_REMOTE_PROFILES.
+func pr(name, dir string) Profile { return Profile{Name: name, Dir: dir, explicit: true} }
 
 func TestParse(t *testing.T) {
 	tests := []struct {
@@ -147,6 +148,14 @@ func TestZeroSet(t *testing.T) {
 	if s.Multi() || len(s.Names()) != 0 {
 		t.Errorf("zero Set: Multi=%v Names=%v", s.Multi(), s.Names())
 	}
+	// A Manager built without Profiles MUST keep today's env and trust rule.
+	env := []string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/c"}
+	if got := s.Default().Env(env, home); !reflect.DeepEqual(got, env) {
+		t.Errorf("zero Set Default().Env = %v, want %v unchanged", got, env)
+	}
+	if got := s.Default().ConfigFile(home); got != "" {
+		t.Errorf("zero Set Default().ConfigFile = %q, want \"\"", got)
+	}
 }
 
 func TestConfigFile(t *testing.T) {
@@ -165,7 +174,7 @@ func TestConfigFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := (Profile{Name: "x", Dir: tt.dir}).ConfigFile(tt.home); got != tt.want {
+			if got := pr("x", tt.dir).ConfigFile(tt.home); got != tt.want {
 				t.Errorf("ConfigFile(%q) = %q, want %q", tt.dir, got, tt.want)
 			}
 		})
@@ -191,7 +200,7 @@ func TestEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := append([]string(nil), tt.env...)
-			got := (Profile{Name: "x", Dir: tt.dir}).Env(tt.env, home)
+			got := pr("x", tt.dir).Env(tt.env, home)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Env() = %v, want %v", got, tt.want)
 			}
@@ -205,10 +214,17 @@ func TestEnv(t *testing.T) {
 // symlinkedHome returns a real home dir holding .claude, and a symlink to it.
 func symlinkedHome(t *testing.T) (real, link string) {
 	t.Helper()
-	real = t.TempDir()
+	real, link = symlinkedEmptyHome(t)
 	if err := os.Mkdir(filepath.Join(real, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return real, link
+}
+
+// symlinkedEmptyHome returns an empty real home dir and a symlink to it.
+func symlinkedEmptyHome(t *testing.T) (real, link string) {
+	t.Helper()
+	real = t.TempDir()
 	link = filepath.Join(t.TempDir(), "home")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
@@ -301,5 +317,45 @@ func TestListedProfilesDoNotInherit(t *testing.T) {
 	}
 	if got := s.Default().Env(nil, home); !reflect.DeepEqual(got, []string{"CLAUDE_CONFIG_DIR=/w"}) {
 		t.Errorf("Env = %v", got)
+	}
+}
+
+// A profile dir claude has not created yet MUST match ~/.claude the same way
+// it will once it exists, or the match flips when claude creates it.
+func TestUserClaudeNotYetCreated(t *testing.T) {
+	real, link := symlinkedEmptyHome(t)
+	for _, tc := range []struct{ name, dir, home string }{
+		{"home is a symlink", real + "/.claude", link},
+		{"dir is under a symlink", link + "/.claude", real},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pr("x", tc.dir)
+			if got, want := p.ConfigFile(tc.home), filepath.Join(tc.home, ".claude.json"); got != want {
+				t.Errorf("ConfigFile = %q, want %q", got, want)
+			}
+			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}, tc.home); len(got) != 0 {
+				t.Errorf("Env = %v, want CLAUDE_CONFIG_DIR removed and not set", got)
+			}
+		})
+	}
+	t.Run("other missing dir under the same home", func(t *testing.T) {
+		if got, want := pr("x", real+"/.claude-dev").ConfigFile(link), real+"/.claude-dev/.claude.json"; got != want {
+			t.Errorf("ConfigFile = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestParseDuplicateDirNotYetCreated(t *testing.T) {
+	real, link := symlinkedEmptyHome(t)
+	for _, spec := range []string{
+		"work=" + real + "/.claude,dev=" + link + "/.claude",
+		"work=" + real + "/a/b,dev=" + link + "/a/b",
+	} {
+		if _, err := Parse(spec, ""); err == nil || !strings.Contains(err.Error(), "duplicate profile dir") {
+			t.Errorf("Parse(%q) error = %v, want a duplicate profile dir", spec, err)
+		}
+	}
+	if _, err := Parse("work="+real+"/a,dev="+link+"/b", ""); err != nil {
+		t.Errorf("distinct missing dirs: %v", err)
 	}
 }
