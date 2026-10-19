@@ -86,4 +86,6 @@ func (m *memStore) MarkArchived(id string, _ time.Time) error { return m.ClearAr
 
 func (m *memStore) LastBridge(string) (string, error) { return "", nil }
 
+// LaunchGens knows no launches (Record writes only a durable store), so
+// without one a pass that overlaps a relaunch is not detected.
 func (m *memStore) LaunchGens() (map[string]int64, error) { return nil, nil }

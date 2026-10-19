@@ -182,7 +182,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		// A deleted session's live registry resets bridgeSessionId to null;
 		// fall back to the last-known bridge id so we can still confirm it. It
 		// is this launch's: a launch clears it, and a pass stores only a live
-		// one, and only if no launch has run since it read the sessions.
+		// one, and only if no launch has run since it read the sessions. Not
+		// yet between a new screen starting and its launch's Record: closing
+		// that window takes a lock shared with launches.
 		if bridge == "" {
 			if lb, lerr := st.LastBridge(ls.ID); lerr == nil && lb != "" {
 				bridge = lb

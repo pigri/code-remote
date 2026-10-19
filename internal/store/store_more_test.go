@@ -259,8 +259,11 @@ func TestProfileRoundTrip(t *testing.T) {
 	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t"}); err != nil {
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t", BridgeSessionID: "session_p", LaunchGen: 1}); err != nil {
 		t.Fatal(err)
+	}
+	if b, err := d.LastBridge(id); err != nil || b != "session_p" {
+		t.Fatalf("LastBridge after the upsert = %q, %v, want session_p", b, err)
 	}
 
 	all, err := d.AllSessions()
@@ -739,8 +742,14 @@ func TestLaunchDropsAnEarlierPassWrites(t *testing.T) {
 	if err := d.UpsertSession(cloud.SessionRecord{UUID: fresh, Screen: "p-" + fresh, BridgeSessionID: "session_old"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.SetFirstSeenArchived(fresh, at, 0); err != nil {
+		t.Fatal(err)
+	}
 	if b, _ := d.LastBridge(fresh); b != "" {
 		t.Errorf("LastBridge = %q from a pass before the first launch, want none", b)
+	}
+	if _, ok, _ := d.FirstSeenArchived(fresh); ok {
+		t.Error("archive clock started by a pass before the first launch")
 	}
 }
 
