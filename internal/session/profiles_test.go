@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -485,10 +487,12 @@ func TestProfilesKeepTheirParseTimeHome(t *testing.T) {
 func TestForProfileHoldsOneProfile(t *testing.T) {
 	const idC = "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e"
 	set, h := twoProfiles(t, "")
-	upgradeHome(t, h.private, idA, "1.0.0", "idle") // resolves to work, registered in private
+	upgradeHome(t, h.private, idA, "", "") // resolves to work, its claude runs in private
+	register(t, h.private, idA, idA, 7777)
+	withEnviron(t, map[string]string{"7777": h.private})
 	upgradeHome(t, h.work, idB, "1.0.0", "idle")
 	writeTitledLog(t, h.private, idC, "c") // private, not registered
-	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB, "test-rc-" + idC}}
+	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB, "test-rc-" + idC}, ps: "7777 10000 claude\n"}
 	withFakeScreen(t, fs)
 	fst := &fakeStore{stored: map[string]string{idA: "work", idB: "work", idC: "private"}}
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
@@ -540,9 +544,10 @@ func TestForProfileHoldsOneProfile(t *testing.T) {
 // A profile's view kills only its own sessions.
 func TestForProfileKillRefusesAnotherProfile(t *testing.T) {
 	set, h := twoProfiles(t, "")
-	upgradeHome(t, h.private, idA, "1.0.0", "idle")
+	register(t, h.private, idA, idA, 7777) // its claude runs in private
+	withEnviron(t, map[string]string{"7777": h.private})
 	upgradeHome(t, h.work, idB, "1.0.0", "idle")
-	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB}}
+	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB}, ps: "7777 10000 claude\n"}
 	withFakeScreen(t, fs)
 	fst := &fakeStore{stored: map[string]string{idA: "work", idB: "work"}}
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
@@ -568,9 +573,10 @@ func TestForProfileKillRefusesAnotherProfile(t *testing.T) {
 	}
 }
 
-// When two profiles' registries hold the same pid, the entry in the session's
-// own profile is its registration. When neither is in its own profile, it
-// has none: no entry a stale file left behind decides where it runs.
+// When two profiles' registries hold the same pid, the entry in the profile
+// its claude's environment names is its registration, whatever the store
+// says. When that environment cannot be read, it has none: no entry a stale
+// file left behind decides where it runs.
 func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 	user := t.TempDir()
 	t.Setenv("HOME", user)
@@ -596,14 +602,21 @@ func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 	reg(".claude-third", "s", stale)
 
 	for _, tc := range []struct {
-		stored, want, bridge string
+		name, stored string
+		environ      bool // the live claude's environment is readable: it runs in work
+		want, bridge string
 	}{
-		{"work", "work", "bridge_.claude"}, // the session's own entry wins over the later stale one
-		{"private", "private", ""},         // neither entry is its own: no registration
+		{"own entry", "work", true, "work", "bridge_.claude"},
+		{"stored elsewhere", "private", true, "work", "bridge_.claude"},
+		{"no environ, own entry", "work", false, "work", "bridge_.claude"},
+		{"no environ, stored elsewhere", "private", false, "private", ""},
 	} {
-		t.Run(tc.stored, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000\n"}
 			withFakeScreen(t, fs)
+			if tc.environ {
+				withEnviron(t, map[string]string{"7777": ""})
+			}
 			fst := &fakeStore{stored: map[string]string{idA: tc.stored}}
 			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
 			l, _ := m.List()
@@ -622,5 +635,605 @@ func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A session whose row names no profile, found in work by its transcript while
+// its claude runs in private, stays in private once it stops: the stop (or the
+// periodic sync before it) notes the registered profile, so a resume reopens
+// the conversation it was in there.
+func TestStopKeepsTheRegisteredProfile(t *testing.T) {
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	setup := func(t *testing.T) (*Manager, *fakeScreen, *fakeStore, homes) {
+		set, h := twoProfiles(t, "")
+		writeTitledLog(t, h.work, idA, "old work transcript")
+		writeTitledLog(t, h.private, conv, "private conversation")
+		sdir := filepath.Join(h.private, "sessions")
+		if err := os.MkdirAll(sdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		reg := `{"sessionId":"` + conv + `","pid":7777}`
+		if err := os.WriteFile(filepath.Join(sdir, "7777.json"), []byte(reg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --session-id " + idA + "\n", parentEnv: true}
+		withFakeScreen(t, fs)
+		fst := &fakeStore{stored: map[string]string{idA: ""}} // resolves to work by its transcript
+		withEnviron(t, map[string]string{"7777": h.private})
+		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}, fs, fst, h
+	}
+
+	t.Run("sync", func(t *testing.T) {
+		m, _, fst, _ := setup(t)
+		m.SyncConversations()
+		if fst.stored[idA] != "private" {
+			t.Errorf("stored profile after a sync = %q, want private", fst.stored[idA])
+		}
+	})
+
+	t.Run("kill then resume", func(t *testing.T) {
+		m, fs, _, h := setup(t)
+		if ok, err := m.Kill(idA); !ok || err != nil {
+			t.Fatalf("Kill = %v, %v", ok, err)
+		}
+		s, err := m.Resume(idA)
+		if err != nil {
+			t.Fatalf("Resume = %v, want the private conversation resumed", err)
+		}
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+conv) {
+			t.Fatalf("launches = %q, want one resuming %s", fs.launches, conv)
+		}
+		if v, _ := envValue(fs.cmds[0].Env, "CLAUDE_CONFIG_DIR"); v != h.private || s.Profile != "private" {
+			t.Errorf("resumed in CLAUDE_CONFIG_DIR %q, profile %q; want %q, private", v, s.Profile, h.private)
+		}
+	})
+}
+
+// Each operation reads the registries and the process table at most once,
+// however many times it looks at the running sessions.
+func TestOneRegistryReadPerOperation(t *testing.T) {
+	fastStop(t)
+	for _, tc := range []struct {
+		name     string
+		unlisted bool // the launched screen never shows up, so Create and Resume poll while idA runs
+		op       func(m *Manager) error
+	}{
+		{name: "List", op: func(m *Manager) error { _, err := m.List(); return err }},
+		{name: "Get", op: func(m *Manager) error { _, _, err := m.Get(idA); return err }},
+		{name: "ListAll", op: func(m *Manager) error { _, err := m.ListAll(m.Store.(*fakeStore)); return err }},
+		{name: "LiveRegistrations", op: func(m *Manager) error { m.LiveRegistrations(); return nil }},
+		{name: "SyncConversations", op: func(m *Manager) error { m.SyncConversations(); return nil }},
+		{name: "Kill", op: func(m *Manager) error { _, err := m.Kill(idA); return err }},
+		{name: "ProfileView.Kill", op: func(m *Manager) error {
+			v, err := m.ForProfile("private")
+			if err != nil {
+				return err
+			}
+			_, err = v.Kill(idA)
+			return err
+		}},
+		{name: "Restart", op: func(m *Manager) error { _, err := m.Restart(idA); return err }},
+		{name: "Upgrade", op: func(m *Manager) error { _, err := m.Upgrade(true, true); return err }},
+		{name: "Create", unlisted: true, op: func(m *Manager) error { _, err := m.Create("", "private"); return err }},
+		{name: "Resume", unlisted: true, op: func(m *Manager) error { _, err := m.Resume(idB); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			upgradeHome(t, h.private, idA, "1.0.0", "idle")
+			writeTitledLog(t, h.private, idB, "stopped")
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, version: "1.0.0", updateTo: "2.0.0"}
+			withFakeScreen(t, fs)
+			fst := &fakeStore{stored: map[string]string{idA: "private", idB: "private"}, stopped: []Session{{ID: idB}}}
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+			fs.unlisted = tc.unlisted
+			if err := tc.op(m); err != nil {
+				t.Fatal(err)
+			}
+			if fs.psCalls > 1 {
+				t.Errorf("%s ran ps %d times, want at most once", tc.name, fs.psCalls)
+			}
+			if tc.unlisted && fst.lookups[idA] != 0 {
+				t.Errorf("%s resolved the running session's profile %d times while polling, want 0", tc.name, fst.lookups[idA])
+			}
+		})
+	}
+}
+
+// register writes a registry entry for id as claude process pid under home.
+func register(t *testing.T, home, file, id string, pid int) {
+	t.Helper()
+	sdir := filepath.Join(home, "sessions")
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"sessionId":"` + id + `","pid":` + strconv.Itoa(pid) + `}`
+	if err := os.WriteFile(filepath.Join(sdir, file+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// withEnviron fakes the environment of the processes in dirs (pid -> its
+// CLAUDE_CONFIG_DIR, "" for unset); any other process's is unreadable. It
+// returns how often each pid's environment is read.
+func withEnviron(t *testing.T, dirs map[string]string) map[string]int {
+	t.Helper()
+	envs := map[string][]string{}
+	for pid, dir := range dirs {
+		envs[pid] = []string{"PATH=/usr/bin"}
+		if dir != "" {
+			envs[pid] = append(envs[pid], "CLAUDE_CONFIG_DIR="+dir)
+		}
+	}
+	return withRawEnviron(t, envs)
+}
+
+// withRawEnviron is withEnviron with each process's whole environment given.
+func withRawEnviron(t *testing.T, envs map[string][]string) map[string]int {
+	t.Helper()
+	reads := map[string]int{}
+	orig := procEnviron
+	procEnviron = func(pid string) ([]string, error) {
+		reads[pid]++
+		env, ok := envs[pid]
+		if !ok {
+			return nil, errors.New("no such process")
+		}
+		return env, nil
+	}
+	t.Cleanup(func() { procEnviron = orig })
+	return reads
+}
+
+const convZ = "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e" // a crashed private claude's conversation
+
+// The store says work. A crashed private claude left its registry file behind,
+// and the new work claude got its pid; a sync runs before that claude
+// registers. The stale entry moves nothing: the session stays in work, and a
+// stop and resume reopen its own work conversation.
+func TestStaleEntryOfAReusedPIDIsNotPersisted(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	writeTitledLog(t, h.private, convZ, "crashed")
+	register(t, h.private, "7777", convZ, 7777)
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n", parentEnv: true}
+	withFakeScreen(t, fs)
+	withEnviron(t, map[string]string{"7777": ""})
+	fst := &fakeStore{stored: map[string]string{idA: "work"}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	m.SyncConversations()
+	if _, err := m.Kill(idA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Resume(idA); err != nil {
+		t.Fatal(err)
+	}
+	if fst.stored[idA] != "work" {
+		t.Errorf("stored profile = %q, want work", fst.stored[idA])
+	}
+	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+idA) {
+		t.Errorf("launches = %q, want one resuming %s", fs.launches, idA)
+	}
+	if v, ok := envValue(fs.cmds[0].Env, "CLAUDE_CONFIG_DIR"); ok {
+		t.Errorf("resumed with CLAUDE_CONFIG_DIR=%q, want work's (unset)", v)
+	}
+}
+
+// A registry entry counts only in the profile its process's environment
+// names. When that cannot be read, an entry in another profile moves nothing.
+func TestRegistrationMustMatchItsProcessProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		environ string // the claude's CLAUDE_CONFIG_DIR: "-" unreadable, "" unset, "private"
+		want    string // the session's profile
+	}{
+		{"process in work", "", "work"},
+		{"process in private", "private", "private"},
+		{"environ unreadable", "-", "work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			writeTitledLog(t, h.work, idA, "a")
+			register(t, h.private, "7777", convZ, 7777)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+			switch tc.environ {
+			case "":
+				withEnviron(t, map[string]string{"7777": ""})
+			case "private":
+				withEnviron(t, map[string]string{"7777": h.private})
+			}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "work"}}}
+			if l, _ := m.List(); len(l) != 1 || l[0].Profile != tc.want {
+				t.Errorf("List = %+v, want the session in %s", l, tc.want)
+			}
+			if _, known := m.LiveRegistrations()[idA]; known != (tc.want == "private") {
+				t.Errorf("live registration found: %v, want %v", known, tc.want == "private")
+			}
+		})
+	}
+}
+
+// A profile the Store recorded is never overwritten from the registry, even
+// by the live claude's own entry: only a row with no profile gets one.
+func TestRecordedProfileIsNotOverwritten(t *testing.T) {
+	for _, stored := range []string{"work", "gone"} { // gone: no longer configured
+		t.Run(stored, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			writeTitledLog(t, h.work, idA, "a")
+			register(t, h.private, "7777", idA, 7777)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+			withEnviron(t, map[string]string{"7777": h.private})
+			fst := &fakeStore{stored: map[string]string{idA: stored}}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+			m.SyncConversations()
+			if fst.sets != 0 || fst.stored[idA] != stored {
+				t.Errorf("SetProfile calls %d, stored %q; want none, %s kept", fst.sets, fst.stored[idA], stored)
+			}
+		})
+	}
+}
+
+// Without its process's environment, of entries in two profiles only the one
+// in the session's own profile counts, whatever the other names, and none
+// when that profile is a guess; with it, the one in the process's profile
+// does.
+func TestCollisionNeedsTheProcessProfile(t *testing.T) {
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	for _, tc := range []struct {
+		name, stored, liveID string
+		environ              bool
+		want                 string
+		wantID               string // the registration found, "" for none
+	}{
+		{"recorded, own entry in work", "work", idA, false, "work", convZ},
+		{"guessed, entry naming the session", "", idA, false, "work", ""},
+		{"guessed, entry naming its conversation", "", conv, false, "work", ""},
+		{"environ names private", "work", idB, true, "private", idB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			register(t, h.work, "7777", convZ, 7777)
+			register(t, h.private, "7777", tc.liveID, 7777)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + conv + "\n"})
+			if tc.environ {
+				withEnviron(t, map[string]string{"7777": h.private})
+			}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: tc.stored}}}
+			if l, _ := m.List(); len(l) != 1 || l[0].Profile != tc.want {
+				t.Errorf("List = %+v, want the session in %s", l, tc.want)
+			}
+			r, known := m.LiveRegistrations()[idA]
+			if known != (tc.wantID != "") || r.SessionID != tc.wantID || r.owned != tc.environ {
+				t.Errorf("live registration = %+v (%v), want id %q, owned %v", r, known, tc.wantID, tc.environ)
+			}
+		})
+	}
+}
+
+// Entries whose pid no process has are dead, even when they name the session:
+// nothing is picked from them, and nothing is persisted.
+func TestDeadPIDEntriesAreDropped(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	register(t, h.work, "5555", idA, 5555)
+	register(t, h.private, "5555", idA, 5555)
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude\n"})
+	withEnviron(t, map[string]string{"5555": h.private, "7777": h.private})
+	fst := &fakeStore{stored: map[string]string{idA: ""}}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+	if l, _ := m.List(); len(l) != 1 || l[0].Profile != "work" {
+		t.Errorf("List = %+v, want the session in work, the ~/.claude guess", l)
+	}
+	if live := m.LiveRegistrations(); len(live) != 0 {
+		t.Errorf("live registrations = %+v, want none", live)
+	}
+	m.SyncConversations()
+	if fst.sets != 0 {
+		t.Errorf("SetProfile calls = %d, want none", fst.sets)
+	}
+}
+
+// A Session built outside parseSessions never writes a profile.
+func TestUnbuiltSessionWritesNoProfile(t *testing.T) {
+	set, _ := twoProfiles(t, "")
+	fst := &fakeStore{}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+	m.noteProfile(Session{ID: idA, Profile: "private"}, liveInfo{Known: true, Reg: Registration{Profile: "private"}})
+	if fst.sets != 0 {
+		t.Errorf("SetProfile calls = %d, want none", fst.sets)
+	}
+}
+
+// A sync that runs before the session's row exists writes nothing, and the
+// next one, once the row exists, writes the profile. After that write the
+// profile resolves from the Store, so no sync writes it again.
+func TestNoteProfileWritesOnceTheRowExists(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	register(t, h.private, "7777", idA, 7777)
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+	withEnviron(t, map[string]string{"7777": h.private})
+	fst := &fakeStore{noRows: true}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+	m.SyncConversations()
+	fst.noRows = false // the row is created
+	m.SyncConversations()
+	m.SyncConversations()
+	if fst.stored[idA] != "private" || fst.sets != 2 {
+		t.Errorf("stored %q after %d SetProfile calls; want private after 2", fst.stored[idA], fst.sets)
+	}
+}
+
+// The environment is read from /proc: this test process's own.
+func TestReadProcEnvironReadsOwnProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc/<pid>/environ is Linux only")
+	}
+	env, err := readProcEnviron(strconv.Itoa(os.Getpid()))
+	if err != nil || len(env) == 0 {
+		t.Fatalf("readProcEnviron(self) = %d entries, %v", len(env), err)
+	}
+	for _, kv := range env {
+		if !strings.Contains(kv, "=") {
+			t.Errorf("entry %q is not KEY=value", kv)
+		}
+	}
+}
+
+// A restart notes and resumes the conversation the session is in when it
+// stops, not the one it was in when the index was built.
+func TestRestartRereadsItsRegistration(t *testing.T) {
+	fastStop(t)
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	home := t.TempDir()
+	writeTitledLog(t, home, idA, "a")
+	writeTitledLog(t, home, conv, "after /clear")
+	register(t, home, "4242", idA, 4242)
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "4242 10000 claude --session-id " + idA + "\n"}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+	l, c := m.list()
+	info := m.liveIndex(c)(l[0])
+	register(t, home, "4242", conv, 4242) // claude moves on meanwhile
+	if _, err := m.restart(l[0], info, "", m.profiles()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+conv) || fst.convs[idA] != conv {
+		t.Errorf("launches %q, noted conversation %q; want both %s", fs.launches, fst.convs[idA], conv)
+	}
+}
+
+// An upgrade checks each session's state as it is when it gets to it: one
+// that turned busy while an earlier one restarted is skipped.
+func TestUpgradeRechecksBusyBeforeTheStop(t *testing.T) {
+	fastStop(t)
+	home := t.TempDir()
+	upgradeHome(t, home, idA, "1.0.0", "idle")
+	upgradeHome(t, home, idB, "1.0.0", "idle")
+	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB}, version: "1.0.0", updateTo: "2.0.0"}
+	fs.onLaunch = func() { // idB gets busy as idA comes back
+		reg := `{"sessionId":"` + idB + `","version":"1.0.0","status":"busy"}`
+		if err := os.WriteFile(filepath.Join(home, "sessions", idB+".json"), []byte(reg), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
+
+	res, err := m.Upgrade(true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, o := range res.Sessions {
+		got[o.ID] = o.Action
+	}
+	if got[idA] != ActionRestarted || got[idB] != ActionSkipped {
+		t.Errorf("outcomes = %+v, want %s restarted and %s skipped as busy", res.Sessions, idA, idB)
+	}
+}
+
+// The reviewer's probe: the live work claude on pid 7777 has not registered
+// yet, a crashed private claude's file holds that pid, and its environment
+// cannot be read. The stale entry moves nothing: the session stays in work, a
+// restart resumes it in work, and the Store keeps work.
+func TestUnownedEntryMovesNothing(t *testing.T) {
+	fastStop(t)
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	writeTitledLog(t, h.private, convZ, "crashed")
+	register(t, h.private, "7777", convZ, 7777)
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --session-id " + idA + "\n", parentEnv: true}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{stored: map[string]string{idA: "work"}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	if l, _ := m.List(); len(l) != 1 || l[0].Profile != "work" {
+		t.Errorf("List = %+v, want the session in work", l)
+	}
+	if _, err := m.Restart(idA); err != nil {
+		t.Fatal(err)
+	}
+	for i, l := range fs.launches {
+		v, _ := envValue(fs.cmds[i].Env, "CLAUDE_CONFIG_DIR")
+		if strings.Contains(l, convZ) || v == h.private {
+			t.Errorf("launch %q with CLAUDE_CONFIG_DIR %q, want %s resumed in work", l, v, idA)
+		}
+	}
+	if fst.stored[idA] != "work" || fst.sets != 0 {
+		t.Errorf("stored %q after %d SetProfile calls, want work kept", fst.stored[idA], fst.sets)
+	}
+}
+
+// Only an entry the process's environment confirms is recorded: without the
+// environment, neither an entry in the session's own profile nor one in
+// another writes a profile.
+func TestOnlyAnOwnedEntryIsRecorded(t *testing.T) {
+	for _, in := range []string{"own profile", "another profile"} {
+		t.Run(in, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			writeTitledLog(t, h.work, idA, "a")
+			home := h.work
+			if in == "another profile" {
+				home = h.private
+			}
+			register(t, home, "7777", idA, 7777)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+			fst := &fakeStore{stored: map[string]string{idA: ""}}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+			m.SyncConversations()
+			if _, err := m.Kill(idA); err != nil {
+				t.Fatal(err)
+			}
+			if fst.sets != 0 {
+				t.Errorf("SetProfile calls = %d, want none", fst.sets)
+			}
+		})
+	}
+}
+
+// A restart keeps a registration's ownership when it reads the file again,
+// so its stop still records the profile.
+func TestRestartKeepsOwnership(t *testing.T) {
+	fastStop(t)
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "old work transcript")
+	writeTitledLog(t, h.private, conv, "private conversation")
+	register(t, h.private, "7777", conv, 7777)
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --session-id " + idA + "\n"})
+	withEnviron(t, map[string]string{"7777": h.private})
+	fst := &fakeStore{stored: map[string]string{idA: ""}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+	if _, err := m.Restart(idA); err != nil {
+		t.Fatal(err)
+	}
+	if fst.sets != 1 {
+		t.Errorf("SetProfile calls = %d, want the stop to record private once", fst.sets)
+	}
+}
+
+// Without the environment, an entry in the session's own profile still tells
+// that its claude is busy, though an entry in another profile shares its pid.
+func TestUnownedEntryGivesLivenessInItsOwnProfile(t *testing.T) {
+	fastStop(t)
+	set, h := twoProfiles(t, "")
+	register(t, h.work, "7777", convZ, 7777)
+	upgradeHome(t, h.private, idA, "1.0.0", "busy")
+	if err := os.WriteFile(filepath.Join(h.private, "sessions", idA+".json"),
+		[]byte(`{"sessionId":"`+idA+`","pid":7777,"version":"1.0.0","status":"busy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude\n", version: "1.0.0", updateTo: "2.0.0"})
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "private"}}}
+	if r, known := m.LiveRegistrations()[idA]; !known || r.Status != "busy" || r.owned {
+		t.Errorf("live registration = %+v (%v), want the busy, unowned private entry", r, known)
+	}
+	res, err := m.Upgrade(true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sessions) != 1 || res.Sessions[0].Action != ActionSkipped {
+		t.Errorf("outcomes = %+v, want %s skipped as busy", res.Sessions, idA)
+	}
+}
+
+// An environment that names no profile, or holds nothing at all (a zombie's),
+// does not tell the profile: the entry in the session's own profile counts,
+// unowned, and is not dropped.
+func TestUnmappableEnvironIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{"literal tilde", []string{"CLAUDE_CONFIG_DIR=~/.claude-private"}},
+		{"relative dir", []string{"CLAUDE_CONFIG_DIR=.claude-private"}},
+		{"unknown dir", []string{"CLAUDE_CONFIG_DIR=/nonexistent/.claude-other"}},
+		{"no entries", []string{}},
+		{"zombie", []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			t.Chdir(h.user)
+			register(t, h.private, "7777", idA, 7777)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude\n"})
+			withRawEnviron(t, map[string][]string{"7777": tc.env})
+			fst := &fakeStore{stored: map[string]string{idA: "private"}}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+			if l, _ := m.List(); len(l) != 1 || l[0].Profile != "private" {
+				t.Errorf("List = %+v, want the session in private", l)
+			}
+			if r, known := m.LiveRegistrations()[idA]; !known || r.owned {
+				t.Errorf("live registration = %+v (%v), want the private entry, unowned", r, known)
+			}
+		})
+	}
+}
+
+// The environment is read only for the claudes of our screens, at most once
+// per process and operation, however many registry entries other processes
+// have.
+func TestEnvironReadOnlyForOurClaudes(t *testing.T) {
+	fastStop(t)
+	for _, tc := range []struct {
+		name string
+		op   func(m *Manager)
+	}{
+		{"List", func(m *Manager) { m.List() }},
+		{"Get", func(m *Manager) { m.Get(idA) }},
+		{"LiveRegistrations", func(m *Manager) { m.LiveRegistrations() }},
+		{"SyncConversations", func(m *Manager) { m.SyncConversations() }},
+		{"Upgrade", func(m *Manager) { m.Upgrade(true, false) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			register(t, h.private, "7777", idA, 7777)
+			register(t, h.private, "8888", idB, 8888)
+			register(t, h.work, "9999", convZ, 9999)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, version: "1.0.0", updateTo: "2.0.0",
+				ps: "7777 10000 claude\n8888 1 claude\n9999 1 claude\n"})
+			reads := withEnviron(t, map[string]string{"7777": h.private, "8888": h.private, "9999": ""})
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "private"}}}
+			tc.op(m)
+			if len(reads) != 1 || reads["7777"] != 1 {
+				t.Errorf("environment reads = %v, want 7777's once", reads)
+			}
+		})
+	}
+}
+
+// An upgrade reads each session's registry file once more before it acts on
+// it, not again inside the restart.
+func TestUpgradeRereadsEachRegistrationOnce(t *testing.T) {
+	fastStop(t)
+	home := t.TempDir()
+	upgradeHome(t, home, idA, "1.0.0", "idle")
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, version: "1.0.0", updateTo: "2.0.0"})
+	rereads := 0
+	orig := rereadFile
+	rereadFile = func(path, prof string) []Registration { rereads++; return orig(path, prof) }
+	t.Cleanup(func() { rereadFile = orig })
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
+	res, err := m.Upgrade(true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Sessions) != 1 || res.Sessions[0].Action != ActionRestarted || rereads != 1 {
+		t.Errorf("outcomes %+v after %d rereads, want %s restarted after 1", res.Sessions, rereads, idA)
+	}
+}
+
+// An entry that names the session but whose pid is a process running in
+// another profile is a stale file: it tells nothing, not even by the
+// session's id.
+func TestEntryOfAProcessInAnotherProfileTellsNothing(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	register(t, h.private, "7777", idA, 7777)
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude\n"})
+	withEnviron(t, map[string]string{"7777": ""}) // the claude runs in work
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "private"}}}
+	if r, known := m.LiveRegistrations()[idA]; known {
+		t.Errorf("live registration = %+v, want none", r)
 	}
 }

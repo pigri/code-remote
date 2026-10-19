@@ -26,7 +26,9 @@ type fakeScreen struct {
 	version    string
 	updateTo   string
 	failUpdate bool
-	ps         string   // canned `ps -o pid=,ppid=` output ("<pid> <ppid>" lines)
+	ps         string   // canned `ps -o pid=,ppid=,args=` output
+	psCalls    int      // times ps ran
+	unlisted   bool     // -dmS launches never show up in -ls
 	killed     []string // screen names quit via -S <name> -X quit
 	launches   []string // full argv of each -dmS launch, space-joined
 
@@ -35,6 +37,8 @@ type fakeScreen struct {
 	// a real launch's does.
 	cmds      []*exec.Cmd
 	parentEnv bool
+
+	onLaunch func() // runs after each -dmS launch
 }
 
 func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
@@ -52,9 +56,14 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 		if f.failCreate {
 			out, exit = "cannot create session", 1
 		} else {
-			f.created = append(f.created, args[1]) // args[1] is <prefix>-<id>
+			if !f.unlisted {
+				f.created = append(f.created, args[1]) // args[1] is <prefix>-<id>
+			}
 			f.launches = append(f.launches, strings.Join(args, " "))
 			launch = true
+			if f.onLaunch != nil {
+				f.onLaunch()
+			}
 		}
 	case len(args) > 0 && args[0] == "-S": // kill: -S <name> -X quit
 		if f.failKill {
@@ -64,6 +73,7 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 			f.created = slices.DeleteFunc(f.created, func(n string) bool { return n == args[1] })
 		}
 	case name == "ps":
+		f.psCalls++
 		out = f.ps
 	case len(args) > 0 && args[0] == "--version":
 		if f.version == "" {
@@ -307,6 +317,8 @@ type fakeStore struct {
 	stopped  []Session
 	convs    map[string]string // uuid -> conversation id
 	cwds     map[string]string // uuid -> cwd served by Cwd
+	sets     int               // calls to SetProfile
+	noRows   bool              // SetProfile matches no row
 }
 
 func (f *fakeStore) Cwd(uuid string) (string, error) { return f.cwds[uuid], nil }
@@ -340,6 +352,18 @@ func (f *fakeStore) Profile(uuid string) (string, error) {
 	}
 	f.lookups[uuid]++
 	return f.stored[uuid], nil
+}
+
+func (f *fakeStore) SetProfile(uuid, profile string) error {
+	f.sets++
+	if f.noRows { // like the DB's UPDATE on a session it has no row for
+		return nil
+	}
+	if f.stored == nil {
+		f.stored = map[string]string{}
+	}
+	f.stored[uuid] = profile
+	return nil
 }
 
 func (f *fakeStore) StoppedSessions(running []Session, keep func(string) bool) ([]Session, error) {

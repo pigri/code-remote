@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -338,12 +339,22 @@ func newProfileHost(t *testing.T, spec, def string, screens map[string]int) *pro
 		t.Fatal(err)
 	}
 	h.mgr = &session.Manager{Prefix: "crtest", ScreenBin: screen, ClaudeHome: filepath.Join(user, ".claude"),
-		Profiles: set, Store: db}
+		Profiles: set, Store: db, ProcEnviron: func(string) ([]string, error) { return nil, errors.New("no environ in tests") }}
 	return h
 }
 
 // register writes a registry entry for session id, as claude process pid,
 // under the profile dir dir (relative to HOME). An empty bridge is null.
+// environ makes process pid's environment name dir as its CLAUDE_CONFIG_DIR.
+func (h *profileHost) environ(pid, dir string) {
+	h.mgr.ProcEnviron = func(p string) ([]string, error) {
+		if p != pid {
+			return nil, errors.New("no such process")
+		}
+		return []string{"CLAUDE_CONFIG_DIR=" + filepath.Join(h.user, dir)}, nil
+	}
+}
+
 func (h *profileHost) register(t *testing.T, dir, file, id string, pid int, bridge string) {
 	t.Helper()
 	sdir := filepath.Join(h.user, dir, "sessions")
@@ -399,7 +410,9 @@ func TestReconcilerLeavesAnotherProfilesSession(t *testing.T) {
 		map[string]int{sessX: 99999998, sessW: 99999999})
 	// Both registries have reset their bridge, so the store's last one is all
 	// the reconciler has.
-	h.register(t, ".claude-private", sessX, sessX, 0, "")
+	fakePS(t, "  7777  99999998 claude\n")
+	h.register(t, ".claude-private", sessX, sessX, 7777, "")
+	h.environ("7777", ".claude-private")
 	h.register(t, ".claude", sessW, sessW, 0, "")
 	for id, bridge := range map[string]string{sessX: "session_private", sessW: "session_work"} {
 		// x's row says work, yet its claude runs in private.
@@ -433,11 +446,30 @@ func TestReconcilerIgnoresAStaleEntryWithAReusedPID(t *testing.T) {
 	}
 }
 
+// A session whose profile is only a guess (a legacy row and no transcript,
+// so the ~/.claude rule picks work) is not tied to a stale work entry that
+// shares its claude's pid with a live private entry: the guess cannot tell
+// the two apart, so neither is its registration and nothing is quit.
+func TestReconcilerIgnoresAStaleEntryInAGuessedProfile(t *testing.T) {
+	h := newProfileHost(t, "private=~/.claude-private,work=~/.claude", "work", map[string]int{sessX: 4242})
+	fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+	h.register(t, ".claude-private", sessX, sessX, 7777, "")
+	h.register(t, ".claude", sessZ, sessZ, 7777, "session_stale")
+	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.reconcile(t); got != "" {
+		t.Errorf("killed = %q, want nothing: the guess picked a stale entry", got)
+	}
+}
+
 // With an unambiguous live registration, a session's profile is the one it
 // registered in, everywhere: in the listing and in each profile's view.
 func TestListShowsTheRegisteredProfile(t *testing.T) {
 	h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "", map[string]int{sessX: 4242})
-	h.register(t, ".claude-private", sessX, sessX, 0, "")
+	fakePS(t, "  7777  4242 claude\n")
+	h.register(t, ".claude-private", sessX, sessX, 7777, "")
+	h.environ("7777", ".claude-private")
 	// A legacy row: no profile recorded, and no transcript to find one by.
 	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", ""); err != nil {
 		t.Fatal(err)
