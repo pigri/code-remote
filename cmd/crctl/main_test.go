@@ -1,16 +1,21 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 )
 
@@ -54,19 +59,21 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 type fakeBackend struct {
-	sessions   []session.Session
-	created    session.Session
-	createdDir string
-	resumed    session.Session
-	resumedID  string
-	resumedIDs []string
-	movedDir   string           // dir passed to resume / restart
-	resumeErrs map[string]error // per-id failures, checked before resumeErr
-	removed    string
-	listErr    error
-	createErr  error
-	resumeErr  error
-	removeErr  error
+	sessions    []session.Session
+	created     session.Session
+	createdDir  string
+	createdProf string
+	resumed     session.Session
+	resumedID   string
+	resumedIDs  []string
+	movedDir    string           // dir passed to resume / restart
+	movedProf   string           // profile passed to resume / restart
+	resumeErrs  map[string]error // per-id failures, checked before resumeErr
+	removed     string
+	listErr     error
+	createErr   error
+	resumeErr   error
+	removeErr   error
 
 	restartedID string
 	restartErr  error
@@ -78,12 +85,12 @@ type fakeBackend struct {
 }
 
 func (f *fakeBackend) list() ([]session.Session, error) { return f.sessions, f.listErr }
-func (f *fakeBackend) create(dir string) (session.Session, error) {
-	f.createdDir = dir
+func (f *fakeBackend) create(dir, prof string) (session.Session, error) {
+	f.createdDir, f.createdProf = dir, prof
 	return f.created, f.createErr
 }
-func (f *fakeBackend) resume(id, dir string) (session.Session, error) {
-	f.movedDir = dir
+func (f *fakeBackend) resume(id, dir, prof string) (session.Session, error) {
+	f.movedDir, f.movedProf = dir, prof
 	f.resumedID = id
 	f.resumedIDs = append(f.resumedIDs, id)
 	if err := f.resumeErrs[id]; err != nil {
@@ -91,8 +98,8 @@ func (f *fakeBackend) resume(id, dir string) (session.Session, error) {
 	}
 	return f.resumed, f.resumeErr
 }
-func (f *fakeBackend) restart(id, dir string) (session.Session, error) {
-	f.movedDir = dir
+func (f *fakeBackend) restart(id, dir, prof string) (session.Session, error) {
+	f.movedDir, f.movedProf = dir, prof
 	f.restartedID = id
 	return session.Session{ID: id, Screen: "p-" + id}, f.restartErr
 }
@@ -427,7 +434,7 @@ func TestHTTPBackend(t *testing.T) {
 		}
 	})
 	t.Run("create with dir sends body", func(t *testing.T) {
-		s, err := be.create("/work")
+		s, err := be.create("/work", "")
 		if err != nil || s.ID != "s2" {
 			t.Fatalf("create = %+v, %v", s, err)
 		}
@@ -436,7 +443,7 @@ func TestHTTPBackend(t *testing.T) {
 		}
 	})
 	t.Run("restart", func(t *testing.T) {
-		s, err := be.restart("s3", "")
+		s, err := be.restart("s3", "", "")
 		if err != nil || s.ID != "s2" {
 			t.Fatalf("restart = %+v, %v", s, err)
 		}
@@ -784,5 +791,261 @@ func TestTrustFlag(t *testing.T) {
 	}
 	if out := captureStdout(t, func() { trustHint(session.Session{Screen: "p-s1"}) }); out != "" {
 		t.Errorf("trustHint(trusted) = %q, want nothing", out)
+	}
+}
+
+func TestProfileFlag(t *testing.T) {
+	for _, form := range [][]string{{"--profile", "work"}, {"--profile=work"}} {
+		t.Run("new "+strings.Join(form, " "), func(t *testing.T) {
+			be := &fakeBackend{created: session.Session{ID: "id1"}}
+			_ = captureStdout(t, func() {
+				if err := create(be, append([]string{"--dir", "/w"}, form...)); err != nil {
+					t.Fatalf("create: %v", err)
+				}
+			})
+			if be.createdProf != "work" || be.createdDir != "/w" {
+				t.Errorf("create got dir=%q profile=%q, want /w and work", be.createdDir, be.createdProf)
+			}
+		})
+		for _, c := range []struct {
+			name string
+			cmd  func(backend, []string) error
+		}{{"resume", resume}, {"restart", restart}} {
+			t.Run(c.name+" "+strings.Join(form, " "), func(t *testing.T) {
+				be := &fakeBackend{}
+				_ = captureStdout(t, func() {
+					if err := c.cmd(be, append(slices.Clone(form), "s1")); err != nil {
+						t.Fatalf("%s: %v", c.name, err)
+					}
+				})
+				if be.movedProf != "work" {
+					t.Errorf("%s got profile %q, want work", c.name, be.movedProf)
+				}
+			})
+		}
+	}
+	t.Run("no flag means no profile", func(t *testing.T) {
+		be := &fakeBackend{}
+		_ = captureStdout(t, func() {
+			if err := resume(be, []string{"s1"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if be.movedProf != "" {
+			t.Errorf("profile = %q, want empty", be.movedProf)
+		}
+	})
+	for _, args := range [][]string{
+		{"new", "--profile"},
+		{"new", "--profile="},
+		{"resume", "s1", "--profile"},
+		{"restart", "s1", "--profile="},
+		{"resume", "all", "--profile", "work"},
+	} {
+		be := &fakeBackend{}
+		var err error
+		switch args[0] {
+		case "new":
+			err = create(be, args[1:])
+		case "resume":
+			err = resume(be, args[1:])
+		default:
+			err = restart(be, args[1:])
+		}
+		if err == nil {
+			t.Errorf("%v = nil error, want a usage error", args)
+		}
+		if be.createdProf != "" || be.movedProf != "" || len(be.resumedIDs) != 0 {
+			t.Errorf("%v reached the backend", args)
+		}
+	}
+}
+
+func TestListProfileColumn(t *testing.T) {
+	be := &fakeBackend{sessions: []session.Session{
+		{ID: "w1", Title: "a", Status: "Detached", Screen: "p-w1", Profile: "work", LastActive: "2026-01-03T00:00:00Z"},
+		{ID: "p1", Title: "b", Status: "Stopped", Screen: "p-p1", Profile: "private", LastActive: "2026-01-02T00:00:00Z"},
+		{ID: "o1", Title: "c", Status: "Detached", Screen: "p-o1", LastActive: "2026-01-01T00:00:00Z"}, // server omitted it
+	}}
+	out := captureStdout(t, func() {
+		if err := list(be); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+	})
+	lines := strings.Split(out, "\n")
+	header := strings.Fields(lines[0])
+	if want := []string{"ID", "TITLE", "PROFILE", "STATUS"}; !slices.Equal(header[:4], want) {
+		t.Fatalf("header starts %v, want %v:\n%s", header[:4], want, out)
+	}
+	for i, want := range [][]string{{"w1", "a", "work", "Detached"}, {"p1", "b", "private", "Stopped"}, {"o1", "c", "-", "Detached"}} {
+		if got := strings.Fields(lines[i+1]); !slices.Equal(got[:4], want) {
+			t.Errorf("row %d starts %v, want %v:\n%s", i, got[:4], want, out)
+		}
+	}
+}
+
+func TestHTTPBackendSendsProfile(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotBody = r.URL.Path, nil
+		data, _ := io.ReadAll(r.Body)
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &gotBody); err != nil {
+				t.Errorf("body %q: %v", data, err)
+			}
+		}
+		_, _ = w.Write([]byte(`{"id":"s2","screen":"p-s2","profile":"work"}`))
+	}))
+	defer srv.Close()
+	be := &httpBackend{base: srv.URL, token: "t"}
+	for _, c := range []struct {
+		name, wantPath string
+		call           func() (session.Session, error)
+		want           map[string]string
+	}{
+		{"create", "/sessions", func() (session.Session, error) { return be.create("", "work") }, map[string]string{"profile": "work"}},
+		{"create with dir", "/sessions", func() (session.Session, error) { return be.create("/w", "work") }, map[string]string{"dir": "/w", "profile": "work"}},
+		{"resume", "/sessions/s2/resume", func() (session.Session, error) { return be.resume("s2", "", "work") }, map[string]string{"profile": "work"}},
+		{"restart", "/sessions/s2/restart", func() (session.Session, error) { return be.restart("s2", "/w", "work") }, map[string]string{"dir": "/w", "profile": "work"}},
+		{"resume, no flags", "/sessions/s2/resume", func() (session.Session, error) { return be.resume("s2", "", "") }, nil},
+	} {
+		s, err := c.call()
+		if err != nil || s.Profile != "work" {
+			t.Errorf("%s = %+v, %v", c.name, s, err)
+		}
+		if gotPath != c.wantPath || !maps.Equal(gotBody, c.want) {
+			t.Errorf("%s sent %s %v, want %s %v", c.name, gotPath, gotBody, c.wantPath, c.want)
+		}
+	}
+}
+
+// TestLocalBackendPassesProfile checks that the profile reaches the Manager.
+// Each call names a profile the Manager refuses before it would launch
+// anything; without the profile it would go on to the (missing) screen.
+func TestLocalBackendPassesProfile(t *testing.T) {
+	work, private := t.TempDir(), t.TempDir()
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work="+work+",private="+private)
+	profiles, err := profile.FromEnv("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "11111111-2222-4333-8444-555555555555"
+	proj := filepath.Join(work, "projects", "p")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	be := &localBackend{mgr: &session.Manager{
+		Prefix: "p", ScreenBin: missing, ClaudeBin: missing,
+		WorkspaceRoot: "/", Profiles: profiles,
+	}}
+	for _, c := range []struct {
+		name string
+		call func() (session.Session, error)
+		want error
+	}{
+		{"create unknown", func() (session.Session, error) { return be.create("", "nope") }, session.ErrInvalidProfile},
+		{"resume unknown", func() (session.Session, error) { return be.resume(id, "", "nope") }, session.ErrInvalidProfile},
+		{"resume other", func() (session.Session, error) { return be.resume(id, "", "private") }, session.ErrOtherProfile},
+		{"restart other", func() (session.Session, error) { return be.restart(id, "", "private") }, session.ErrOtherProfile},
+	} {
+		if _, err := c.call(); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+	}
+}
+
+const (
+	unknownHint = "CLAUDE_REMOTE_PROFILES"
+	moveHint    = "moving a session between profiles is not supported yet"
+)
+
+func TestProfileErrors(t *testing.T) {
+	unknown := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
+	other := fmt.Errorf("%w: s1 is in profile %q, not %q", session.ErrOtherProfile, "work", "private")
+	for _, c := range []struct {
+		name     string
+		be       *fakeBackend
+		cmd      func(backend, []string) error
+		args     []string
+		want     error
+		hint     string
+		notHints []string
+	}{
+		{"new unknown", &fakeBackend{createErr: unknown}, create, []string{"--profile", "nope"}, session.ErrInvalidProfile, unknownHint, []string{moveHint}},
+		{"resume unknown", &fakeBackend{resumeErr: unknown}, resume, []string{"s1", "--profile", "nope"}, session.ErrInvalidProfile, unknownHint, []string{moveHint}},
+		{"resume other", &fakeBackend{resumeErr: other}, resume, []string{"s1", "--profile", "private"}, session.ErrOtherProfile, moveHint, []string{unknownHint}},
+		{"restart other", &fakeBackend{restartErr: other}, restart, []string{"s1", "--profile", "private"}, session.ErrOtherProfile, moveHint, []string{unknownHint}},
+		{"other error unchanged", &fakeBackend{restartErr: errors.New("boom")}, restart, []string{"s1"}, nil, "boom", []string{unknownHint, moveHint}},
+	} {
+		var err error
+		_ = captureStdout(t, func() { err = c.cmd(c.be, c.args) })
+		if err == nil || (c.want != nil && !errors.Is(err, c.want)) || !contains(err.Error(), c.hint) {
+			t.Errorf("%s: err = %v, want %v with %q", c.name, err, c.want, c.hint)
+			continue
+		}
+		for _, h := range c.notHints {
+			if contains(err.Error(), h) {
+				t.Errorf("%s: err = %v, should not say %q", c.name, err, h)
+			}
+		}
+	}
+}
+
+func TestProfileErrorsHTTP(t *testing.T) {
+	var status int
+	var msg string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	}))
+	defer srv.Close()
+	t.Setenv("CLAUDE_REMOTE_API_URL", srv.URL)
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	for _, c := range []struct {
+		name     string
+		args     []string
+		status   int
+		msg      string
+		want     error
+		hint     string
+		notHints []string
+	}{
+		{"new unknown", []string{"new", "--profile", "nope"}, 400, `unknown profile: "nope"`,
+			session.ErrInvalidProfile, `unknown profile: "nope" (400)`, []string{moveHint}},
+		{"restart unknown", []string{"restart", "s1", "--profile", "nope"}, 400, `unknown profile: "nope"`,
+			session.ErrInvalidProfile, unknownHint, []string{moveHint}},
+		{"resume other", []string{"resume", "s1", "--profile", "private"}, 409,
+			`session is in another profile: s1 is in profile "work", not "private", and moving it is not supported`,
+			session.ErrOtherProfile, moveHint, []string{unknownHint}},
+		{"restart other", []string{"restart", "s1", "--profile", "private"}, 409,
+			`session is in another profile: s1 is in profile "work", not "private", and moving it is not supported`,
+			session.ErrOtherProfile, "(409)", []string{unknownHint}},
+		{"already running is no move", []string{"resume", "s1"}, 409, "session already running",
+			nil, "session already running (409)", []string{unknownHint, moveHint}},
+		{"bad dir is no profile", []string{"new", "--dir", "/x"}, 400, "invalid directory: /x",
+			nil, "invalid directory", []string{unknownHint, moveHint}},
+		{"unknown session", []string{"restart", "s1", "--profile", "work"}, 404, "session not resumable: no session s1",
+			nil, "no session s1 (404)", []string{unknownHint, moveHint}},
+	} {
+		status, msg = c.status, c.msg
+		var err error
+		_ = captureStdout(t, func() { err = run(c.args) })
+		if err == nil || (c.want != nil && !errors.Is(err, c.want)) || !contains(err.Error(), c.hint) {
+			t.Errorf("%s: err = %v, want %v with %q", c.name, err, c.want, c.hint)
+			continue
+		}
+		if c.want == nil && (errors.Is(err, session.ErrInvalidProfile) || errors.Is(err, session.ErrOtherProfile)) {
+			t.Errorf("%s: err = %v reads as a profile error", c.name, err)
+		}
+		for _, h := range c.notHints {
+			if contains(err.Error(), h) {
+				t.Errorf("%s: err = %v, should not say %q", c.name, err, h)
+			}
+		}
 	}
 }
