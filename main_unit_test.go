@@ -437,7 +437,7 @@ func TestReconcilerLeavesAnotherProfilesSession(t *testing.T) {
 		if err := h.db.Record(id, "crtest-"+id, "", "", "Detached", "", "work"); err != nil {
 			t.Fatal(err)
 		}
-		if err := h.db.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "crtest-" + id, BridgeSessionID: bridge}); err != nil {
+		if err := h.db.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "crtest-" + id, BridgeSessionID: bridge, LaunchGen: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}

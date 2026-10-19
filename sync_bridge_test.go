@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"claude-remote-api/internal/cloud"
+	"claude-remote-api/internal/session"
 )
 
 // cloudOf is an account whose cloud holds sessions; any other id reads as
@@ -209,5 +210,86 @@ func TestReconcilerStoresNoStaleBridgeWhenPsFailsOnce(t *testing.T) {
 	rec.ReconcileOnce(context.Background())
 	if got := h.quits(); got != "" {
 		t.Errorf("quit %q once ps read again", got)
+	}
+}
+
+// relaunchMidTick is a profile view whose ListLive runs relaunch once, right
+// after its snapshot: a restart or resume that overlaps a tick.
+type relaunchMidTick struct {
+	*session.ProfileView
+	relaunch func()
+}
+
+func (v *relaunchMidTick) ListLive() ([]session.Session, map[string]session.Registration) {
+	local, live := v.ProfileView.ListLive()
+	if v.relaunch != nil {
+		v.relaunch()
+		v.relaunch = nil
+	}
+	return local, live
+}
+
+// A tick that read a session before it was relaunched neither stores the old
+// claude's bridge nor starts its archive clock nor quits it: all of that is
+// the old launch's, and the new claude has not bridged yet.
+func TestReconcilerDropsATickOverlappingARelaunch(t *testing.T) {
+	for _, grace := range []time.Duration{0, 15 * time.Minute} {
+		t.Run(grace.String(), func(t *testing.T) {
+			h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "", map[string]int{sessX: 4242})
+			fakePS(t, "  5555  4242 claude\\n")
+			h.register(t, ".claude", "5555", sessX, 5555, "session_old")
+			h.recordProfile(t, map[string]string{sessX: "work"})
+			now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+			rec, _ := h.syncer(t, archived("session_old"), grace, &now)
+			rec.Manager = &relaunchMidTick{ProfileView: rec.Manager.(*session.ProfileView), relaunch: func() {
+				fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+				h.recordProfile(t, map[string]string{sessX: "work"}) // the resume
+			}}
+
+			rec.ReconcileOnce(context.Background())
+			if got := h.quits(); got != "" {
+				t.Fatalf("the overlapping tick quit %q, relaunched while it ran", got)
+			}
+			if b, _ := h.db.LastBridge(sessX); b != "" {
+				t.Errorf("the overlapping tick stored bridge %q of the claude the relaunch replaced", b)
+			}
+			if _, ok, _ := h.db.FirstSeenArchived(sessX); ok {
+				t.Errorf("the overlapping tick started the archive clock of the relaunched session")
+			}
+			h.register(t, ".claude", "7777", sessX, 7777, "")
+			now = now.Add(grace + time.Minute)
+			rec.ReconcileOnce(context.Background())
+			if got := h.quits(); got != "" {
+				t.Fatalf("the next tick quit %q over what the overlapping one stored", got)
+			}
+		})
+	}
+}
+
+// With no relaunch, a tick stores the live bridge and starts the archive
+// clock, and a tick after the grace quits the session.
+func TestReconcilerStoresTheBridgeAndQuitsAfterTheGrace(t *testing.T) {
+	h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "", map[string]int{sessX: 4242})
+	fakePS(t, "  7777  4242 claude\\n")
+	h.register(t, ".claude", "7777", sessX, 7777, "session_live")
+	h.recordProfile(t, map[string]string{sessX: "work"})
+	grace := 15 * time.Minute
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	rec, _ := h.syncer(t, archived("session_live"), grace, &now)
+
+	rec.ReconcileOnce(context.Background())
+	if got := h.quits(); got != "" {
+		t.Fatalf("quit %q within the grace", got)
+	}
+	if b, err := h.db.LastBridge(sessX); err != nil || b != "session_live" {
+		t.Errorf("LastBridge = %q, %v, want session_live", b, err)
+	}
+	if first, ok, err := h.db.FirstSeenArchived(sessX); err != nil || !ok || !first.Equal(now) {
+		t.Errorf("FirstSeenArchived = %v, %v, %v, want %v", first, ok, err, now)
+	}
+	now = now.Add(grace)
+	rec.ReconcileOnce(context.Background())
+	if got, want := h.quits(), "crtest-"+sessX+"\n"; got != want {
+		t.Errorf("quit %q after the grace, want %q", got, want)
 	}
 }
