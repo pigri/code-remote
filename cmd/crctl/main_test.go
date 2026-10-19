@@ -82,9 +82,13 @@ type fakeBackend struct {
 	gotRestart  bool
 	gotForce    bool
 	gotIDs      []string
+
+	profileList session.ProfileList
+	profilesErr error
 }
 
-func (f *fakeBackend) list() ([]session.Session, error) { return f.sessions, f.listErr }
+func (f *fakeBackend) profiles() (session.ProfileList, error) { return f.profileList, f.profilesErr }
+func (f *fakeBackend) list() ([]session.Session, error)       { return f.sessions, f.listErr }
 func (f *fakeBackend) create(dir, prof string) (session.Session, error) {
 	f.createdDir, f.createdProf = dir, prof
 	return f.created, f.createErr
@@ -847,6 +851,9 @@ func TestProfileFlag(t *testing.T) {
 		{"resume", "s1", "--profile"},
 		{"restart", "s1", "--profile="},
 		{"resume", "all", "--profile", "work"},
+		{"new", "--profile=private", "--profile"},
+		{"new", "--profile", "private", "--profile"},
+		{"restart", "s1", "--profile=private", "--profile"},
 	} {
 		be := &fakeBackend{}
 		var err error
@@ -1086,15 +1093,22 @@ func TestHTTPBackendDroppedProfile(t *testing.T) {
 		"restart": func(prof string) (session.Session, error) { return be.restart("s2", "", prof) },
 	}
 	for name, call := range calls {
+		// A new session in the wrong account can go; an existing one resumed
+		// or restarted is still the session it was, so stopping it fixes
+		// nothing.
+		advice, notAdvice := "crctl rm s2", "leave out --profile"
+		if name != "create" {
+			advice, notAdvice = notAdvice, advice
+		}
 		reply = `{"id":"s2","screen":"p-s2"}`
 		_, err := call("private")
-		if err == nil || !contains(err.Error(), "does not support profiles") || !contains(err.Error(), "crctl rm s2") {
-			t.Errorf("%s with the profile omitted: err = %v, want a refusal naming crctl rm s2", name, err)
+		if err == nil || !contains(err.Error(), "does not support profiles") || !contains(err.Error(), advice) || contains(err.Error(), notAdvice) {
+			t.Errorf("%s with the profile omitted: err = %v, want a refusal advising %q, not %q", name, err, advice, notAdvice)
 		}
 		reply = `{"id":"s2","screen":"p-s2","profile":"default"}`
 		_, err = call("private")
-		if err == nil || !contains(err.Error(), `"default"`) || !contains(err.Error(), "crctl rm s2") {
-			t.Errorf("%s under another profile: err = %v, want a refusal naming default and crctl rm s2", name, err)
+		if err == nil || !contains(err.Error(), `"default"`) || !contains(err.Error(), advice) || contains(err.Error(), notAdvice) {
+			t.Errorf("%s under another profile: err = %v, want a refusal naming default and advising %q, not %q", name, err, advice, notAdvice)
 		}
 		reply = `{"id":"s2","screen":"p-s2"}`
 		if _, err := call(""); err != nil {

@@ -345,6 +345,7 @@ type sessionManager interface {
 	Get(id string) (session.Session, bool, error)
 	Kill(id string) (bool, error)
 	ValidID(id string) bool
+	ProfileList() session.ProfileList
 }
 
 // newHandler builds the fully-wired HTTP handler (audit log + routes + bearer
@@ -365,6 +366,7 @@ func newHandler(token string, mgr sessionManager, logger *slog.Logger, stopped s
 	mux.HandleFunc("GET /sessions", srv.list)
 	mux.HandleFunc("GET /sessions/{id}", srv.get)
 	mux.HandleFunc("DELETE /sessions/{id}", srv.delete)
+	mux.HandleFunc("GET /profiles", srv.profiles)
 	return auditMiddleware(logger, authMiddleware(token, mux))
 }
 
@@ -554,6 +556,12 @@ func (s *server) list(w http.ResponseWriter, _ *http.Request) {
 		sessions = []session.Session{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// profiles lists the profile names and the default (GET /profiles). It never
+// names a dir.
+func (s *server) profiles(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.mgr.ProfileList())
 }
 
 func (s *server) get(w http.ResponseWriter, r *http.Request) {

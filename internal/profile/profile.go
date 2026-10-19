@@ -34,7 +34,15 @@ type Set struct {
 	multi bool
 }
 
-var validName = regexp.MustCompile(`^[a-z0-9_-]+$`)
+// validName is [a-z0-9_-]+ with no leading '-', which would read as a flag on
+// a command line.
+var validName = regexp.MustCompile(`^[a-z0-9_][a-z0-9_-]*$`)
+
+// NameRule says what ValidName accepts.
+const NameRule = "want [a-z0-9_-]+, not starting with '-'"
+
+// ValidName reports whether name can name a profile.
+func ValidName(name string) bool { return validName.MatchString(name) }
 
 // Parse reads a "name=dir,name=dir" list. A dir of "~" or starting "~/" is
 // relative to userHome; every dir MUST then be absolute, and is cleaned.
@@ -52,7 +60,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 		}
 		name, dir = strings.TrimSpace(name), strings.TrimSpace(dir)
 		if !validName.MatchString(name) {
-			return nil, fmt.Errorf("invalid profile name %q: want [a-z0-9_-]+", name)
+			return nil, fmt.Errorf("invalid profile name %q: %s", name, NameRule)
 		}
 		if dir == "" {
 			return nil, fmt.Errorf("profile %q: empty dir", name)
