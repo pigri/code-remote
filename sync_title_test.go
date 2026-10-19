@@ -73,6 +73,23 @@ func TestReconcilerQuitsByTitleACounterpartSeenActive(t *testing.T) {
 	}
 }
 
+// After a title quit, a tick that runs before the session's next launch is
+// recorded, as one can while the new screen starts, does not quit it again over
+// the same counterpart.
+func TestReconcilerQuitsByTitleOnceUntilTheNextLaunch(t *testing.T) {
+	h, rec, cl, _ := titleHost(t, 0, "running")
+	rec.ReconcileOnce(context.Background())
+	(*cl)[0].SessionStatus = "archived"
+	rec.ReconcileOnce(context.Background())
+	if got, want := h.quits(), "crtest-"+sessX+"\n"; got != want {
+		t.Fatalf("quit %q, want %q", got, want)
+	}
+	rec.ReconcileOnce(context.Background())
+	if got, want := h.quits(), "crtest-"+sessX+"\n"; got != want {
+		t.Errorf("quit %q after a second tick, want only the first quit", got)
+	}
+}
+
 // titleHost is session sessX, titled and resumed in the work profile, its new
 // claude registered unbridged in /repo, and a reconciler matching by title
 // against a cloud holding one counterpart with that title and cwd in status.

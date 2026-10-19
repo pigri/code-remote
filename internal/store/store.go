@@ -332,7 +332,7 @@ func (d *DB) ClearArchiveClock(id string) error {
 // MarkArchived records the auto-quit, clears the grace clock, and logs an event.
 func (d *DB) MarkArchived(id string, t time.Time) error {
 	if _, err := d.db.Exec(
-		`UPDATE sessions SET archived_at=?, first_seen_archived=NULL WHERE uuid=?`, t.Unix(), id); err != nil {
+		`UPDATE sessions SET archived_at=?, first_seen_archived=NULL, title_active=0 WHERE uuid=?`, t.Unix(), id); err != nil {
 		return err
 	}
 	return d.logEvent(id, "auto_archive", "")

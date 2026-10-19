@@ -91,8 +91,7 @@ func (m *memStore) ClearArchiveClock(id string) error {
 	return nil
 }
 
-// MarkArchived also forgets the title sighting: knowing no launches, this
-// store treats the quit as the end of the launch.
+// MarkArchived also forgets the title sighting, as the durable store does.
 func (m *memStore) MarkArchived(id string, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
