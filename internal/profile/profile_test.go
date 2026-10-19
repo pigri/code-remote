@@ -403,3 +403,37 @@ func TestProfileKeepsItsParseTimeHome(t *testing.T) {
 		t.Errorf("private Env = %v", got)
 	}
 }
+
+// ForConfigDir maps the CLAUDE_CONFIG_DIR a claude process runs with to the
+// profile it is in: unset is ~/.claude, a dir is the profile with that dir,
+// through symlinks too.
+func TestForConfigDir(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".claude-private"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, "priv-link")
+	if err := os.Symlink(filepath.Join(home, ".claude-private"), link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "private")
+	s, err := FromEnv("", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		dir, want string
+		ok        bool
+	}{
+		{"", "work", true},
+		{filepath.Join(home, ".claude-private"), "private", true},
+		{link + "/", "private", true},
+		{filepath.Join(home, ".claude"), "work", true},
+		{filepath.Join(home, "other"), "", false},
+	} {
+		if p, ok := s.ForConfigDir(tc.dir); ok != tc.ok || p.Name != tc.want {
+			t.Errorf("ForConfigDir(%q) = %q, %v; want %q, %v", tc.dir, p.Name, ok, tc.want, tc.ok)
+		}
+	}
+}

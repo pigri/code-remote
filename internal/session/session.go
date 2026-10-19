@@ -36,7 +36,7 @@ type Session struct {
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
 
-	by resolvedBy // how parseSessions resolved Profile, before any move to a registered one
+	unrecorded bool // parseSessions found no profile for it in the Store
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -79,11 +79,14 @@ type Manager struct {
 	TrustDirs     bool        // mark a session's directory as trusted before launching into it
 	Profiles      profile.Set // the configured claude config dirs
 
+	// ProcEnviron reads a process's environment; optional, /proc/<pid>/environ
+	// when nil. A seam for tests.
+	ProcEnviron func(pid string) ([]string, error)
+
 	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
 
 	convMu   sync.Mutex
 	convSeen map[string]string // session id -> conversation id last written to Store
-	profSeen map[string]string // session id -> profile last written to Store
 }
 
 // ErrInvalidDir is returned (wrapped) when a requested session working
@@ -113,6 +116,28 @@ var ErrOtherProfile = errors.New("session is in another profile")
 
 // execCommand is the seam for shelling out to screen; overridden in tests.
 var execCommand = exec.Command
+
+// procEnviron is what reads a process's environment when the Manager sets no
+// ProcEnviron; overridden in tests.
+var procEnviron = readProcEnviron
+
+// readProcEnviron reads process pid's environment from /proc (Linux only; the
+// process must be the caller's user's).
+func readProcEnviron(pid string) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", pid, "environ"))
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimRight(string(data), "\x00"), "\x00"), nil
+}
+
+// environ is process pid's environment.
+func (m *Manager) environ(pid string) ([]string, error) {
+	if m.ProcEnviron != nil {
+		return m.ProcEnviron(pid)
+	}
+	return procEnviron(pid)
+}
 
 var (
 	uuidRe       = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -747,7 +772,7 @@ func (m *Manager) registeredProfiles(sessions []Session, c *regCache) {
 	ix := c.index()
 	for i := range sessions {
 		s := &sessions[i]
-		r, ok, _, _ := ix.lookup(*s, s.Profile)
+		r, ok, _, _ := ix.lookup(*s)
 		if !ok || r.Profile == "" || r.Profile == s.Profile {
 			continue
 		}
@@ -775,8 +800,8 @@ func (m *Manager) parseSessions(out string) []Session {
 	sessions := m.parseScreens(out)
 	for i := range sessions {
 		s := &sessions[i]
-		p, by := m.resolveProfile(s.ID)
-		s.Profile, s.by = p.Name, by
+		p, unrecorded := m.resolveProfile(s.ID)
+		s.Profile, s.unrecorded = p.Name, unrecorded
 		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 	}
 	return sessions
@@ -903,8 +928,8 @@ type Registration struct {
 	Status          string // idle | busy | shell | waiting | ...
 	Profile         string // the profile whose registry holds the entry
 
-	path  string    // the registry file
-	mtime time.Time // when the file was last written
+	path  string // the registry file
+	owned bool   // its process's environment names its profile
 }
 
 // Registrations reads claude's process registry under <dir>/sessions/*.json of
@@ -946,9 +971,6 @@ func readRegistrations(paths []string, profile string) []Registration {
 			continue
 		}
 		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p}
-		if fi, err := os.Stat(p); err == nil {
-			reg.mtime = fi.ModTime()
-		}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}

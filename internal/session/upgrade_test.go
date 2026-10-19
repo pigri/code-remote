@@ -99,7 +99,7 @@ func TestRestart(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, "sessions", "4242.json"), []byte(reg), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 3600 3600\n"}
+		fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000\n"}
 		withFakeScreen(t, fs)
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
 
@@ -363,7 +363,7 @@ func TestListAllAnnotatesVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fs := &fakeScreen{version: "2.1.287", ps: "4242 10000 3600 3600\n",
+	fs := &fakeScreen{version: "2.1.287", ps: "4242 10000\n",
 		created: []string{"test-rc-" + oldID, "test-rc-" + newID, "test-rc-" + noReg}}
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home}
@@ -421,7 +421,7 @@ func TestDriftedSessionLifecycle(t *testing.T) {
 	}
 
 	st := &fakeStore{stopped: []Session{{ID: id, Screen: "test-rc-" + id}}}
-	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 3600 claude --resume " + id + "\n"}
+	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 claude --resume " + id + "\n"}
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: st}
 
@@ -488,7 +488,7 @@ func TestRestartWithoutRegistry(t *testing.T) {
 			upgradeHome(t, home, c, "", "")
 		}
 		fs := &fakeScreen{created: []string{"test-rc-" + id},
-			ps: "4242 10000 3600 /usr/bin/claude --resume " + argvID + " --remote-control " + id + "\n"}
+			ps: "4242 10000 /usr/bin/claude --resume " + argvID + " --remote-control " + id + "\n"}
 		withFakeScreen(t, fs)
 		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: st}, fs
 	}
@@ -527,7 +527,7 @@ func TestSyncConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := &fakeStore{}
-	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 3600 claude\n"})
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 claude\n"})
 	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home, Store: st}
 	m.SyncConversations()
 	if st.convs[id] != liveID {
@@ -547,7 +547,7 @@ func TestLiveRegistrationsJoinsResumedSessionByProcess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "sessions", "4242.json"), []byte(reg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 3600 claude --resume " + conv + " --remote-control " + id + "\n"}
+	fs := &fakeScreen{created: []string{"test-rc-" + id}, ps: "4242 10000 claude --resume " + conv + " --remote-control " + id + "\n"}
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home}
 

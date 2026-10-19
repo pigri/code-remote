@@ -18,16 +18,6 @@ type profileSetter interface {
 	SetProfile(uuid, profile string) error
 }
 
-// resolvedBy is how a session's profile was found.
-type resolvedBy uint8
-
-const (
-	byUnknown    resolvedBy = iota // not resolved by parseSessions
-	byGuess                        // the ~/.claude rule or the default
-	byTranscript                   // the profile holding its transcript
-	byStore                        // the profile the Store recorded, or the only one
-)
-
 // profiles lists the profiles sessions can run under. Without
 // CLAUDE_REMOTE_PROFILES that is one profile, whose dir is ClaudeHome.
 func (m *Manager) profiles() []profile.Profile {
@@ -74,55 +64,46 @@ func (m *Manager) profileOf(id string) profile.Profile {
 	return p
 }
 
-// resolveProfile is profileOf, and how it found the profile.
-func (m *Manager) resolveProfile(id string) (profile.Profile, resolvedBy) {
+// resolveProfile is profileOf, and whether the Store holds no profile for id
+// ("" recorded).
+func (m *Manager) resolveProfile(id string) (p profile.Profile, unrecorded bool) {
 	list := m.profiles()
 	if len(list) == 1 {
-		return list[0], byStore
+		return list[0], false
 	}
 	if ps, ok := m.Store.(profileStore); ok {
-		if name, err := ps.Profile(id); err == nil && name != "" {
-			if p, err := m.lookupProfile(name); err == nil {
-				return p, byStore
+		if name, err := ps.Profile(id); err == nil {
+			if p, err := m.lookupProfile(name); err == nil && name != "" {
+				return p, false
 			}
+			unrecorded = name == ""
 		}
 	}
 	for _, p := range list {
 		if logIn(p.Dir, id) != "" {
-			return p, byTranscript
+			return p, unrecorded
 		}
 	}
 	for _, p := range list {
 		if p.IsUserClaude() {
-			return p, byGuess
+			return p, unrecorded
 		}
 	}
-	p, _ := m.lookupProfile("")
-	return p, byGuess
+	p, _ = m.lookupProfile("")
+	return p, unrecorded
 }
 
 // noteProfile best-effort records in the Store the profile running session s
-// registered in, as found by liveIndex (info), when the Store holds none it
-// resolves by. Once s stops, its profile resolves from the Store, so it
-// resumes there. A recorded profile is never overwritten: an entry in another
-// profile may be a stale one whose pid the session's claude reused.
+// runs under, as its own claude's registration shows it (info), when the
+// Store holds none for s. Once s stops, its profile resolves from the Store,
+// so it resumes there. A profile the Store holds, configured or not, is never
+// overwritten. After a write s resolves from the Store, so it is not repeated.
 func (m *Manager) noteProfile(s Session, info liveInfo) {
 	ps, ok := m.Store.(profileSetter)
-	if !ok || !m.Profiles.Multi() || !info.Known || info.Reg.Profile != s.Profile ||
-		(s.by != byGuess && s.by != byTranscript) {
+	if !ok || !m.Profiles.Multi() || !s.unrecorded || !info.Known || !info.Reg.owned || info.Reg.Profile != s.Profile {
 		return
 	}
-	m.convMu.Lock()
-	defer m.convMu.Unlock()
-	if m.profSeen[s.ID] == s.Profile {
-		return
-	}
-	if ps.SetProfile(s.ID, s.Profile) == nil {
-		if m.profSeen == nil {
-			m.profSeen = map[string]string{}
-		}
-		m.profSeen[s.ID] = s.Profile
-	}
+	_ = ps.SetProfile(s.ID, s.Profile)
 }
 
 // sessionProfile is the profile of s, a session List resolved, without

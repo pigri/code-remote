@@ -26,7 +26,7 @@ type fakeScreen struct {
 	version    string
 	updateTo   string
 	failUpdate bool
-	ps         string   // canned `ps -o pid=,ppid=,etimes=,args=` output
+	ps         string   // canned `ps -o pid=,ppid=,args=` output
 	psCalls    int      // times ps ran
 	unlisted   bool     // -dmS launches never show up in -ls
 	killed     []string // screen names quit via -S <name> -X quit
@@ -37,6 +37,8 @@ type fakeScreen struct {
 	// a real launch's does.
 	cmds      []*exec.Cmd
 	parentEnv bool
+
+	onLaunch func() // runs after each -dmS launch
 }
 
 func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
@@ -59,6 +61,9 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 			}
 			f.launches = append(f.launches, strings.Join(args, " "))
 			launch = true
+			if f.onLaunch != nil {
+				f.onLaunch()
+			}
 		}
 	case len(args) > 0 && args[0] == "-S": // kill: -S <name> -X quit
 		if f.failKill {

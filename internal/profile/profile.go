@@ -143,6 +143,18 @@ func (s Set) Names() []string {
 // the single-profile fallback.
 func (s Set) Multi() bool { return s.multi }
 
+// ForConfigDir is the profile a claude running with CLAUDE_CONFIG_DIR=dir is
+// in: the one whose dir is dir, or for "" (unset) the one at ~/.claude. ok is
+// false when no profile matches.
+func (s Set) ForConfigDir(dir string) (Profile, bool) {
+	for _, p := range s.list {
+		if (dir == "" && p.IsUserClaude()) || (dir != "" && sameDir(p.Dir, dir)) {
+			return p, true
+		}
+	}
+	return Profile{}, false
+}
+
 // sameDir reports whether a and b name the same dir: equal once cleaned, or
 // resolving to the same path through symlinks.
 func sameDir(a, b string) bool {
