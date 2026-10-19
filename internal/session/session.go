@@ -34,13 +34,14 @@ type Session struct {
 	Version    string `json:"version,omitempty"`     // claude version the session is running
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
+	Profile    string `json:"-"`                     // the profile it was recorded under; "" when none was
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
 // discoverable (resumable) after its screen is gone. Optional; a nil Store
 // simply means no resumable tracking. Satisfied by *store.DB.
 type Recorder interface {
-	Record(uuid, screen, title, cwd, status, createdAt string) error
+	Record(uuid, screen, title, cwd, status, createdAt, profile string) error
 	// SetConversation / Conversation persist the claude conversation id a
 	// session is currently in, which drifts from the session id when claude
 	// moves it onto a new conversation (see Manager.liveIndex).
@@ -227,7 +228,7 @@ func (m *Manager) record(s Session, cwd string) {
 	if status == "" {
 		status = "Detached"
 	}
-	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt)
+	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt, "")
 }
 
 // HasSessionLog reports whether an on-disk claude log exists for id (i.e. the

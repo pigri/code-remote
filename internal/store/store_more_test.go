@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +31,10 @@ func TestRecordAndStoppedSessions(t *testing.T) {
 	d := openTemp(t)
 	const running, stopped = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 
-	if err := d.Record(running, "p-"+running, "live one", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(running, "p-"+running, "live one", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Record(stopped, "p-"+stopped, "stopped one", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(stopped, "p-"+stopped, "stopped one", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -70,7 +71,7 @@ func TestRecordClearsArchiveAndStampsResumed(t *testing.T) {
 	}
 
 	// Resuming records it live: archived_at cleared, resumed_at stamped.
-	if err := d.Record(id, "p-"+id, "back", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "back", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := d.AllSessions()
@@ -128,7 +129,7 @@ func TestConversation(t *testing.T) {
 		t.Fatalf("SetConversation created a row: %q", got)
 	}
 
-	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SetConversation(id, conv); err != nil {
@@ -138,7 +139,7 @@ func TestConversation(t *testing.T) {
 		t.Fatalf("Conversation = %q, %v, want %q", got, err, conv)
 	}
 	// Re-recording the session (resume) must not forget the conversation.
-	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := d.Conversation(id); got != conv {
@@ -157,7 +158,7 @@ func TestMigrateAddsConvID(t *testing.T) {
 		t.Fatal(err)
 	}
 	const id = "11111111-1111-1111-1111-111111111111"
-	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	d.Close()
@@ -184,17 +185,147 @@ func TestCwd(t *testing.T) {
 	if got, err := d.Cwd(id); err != nil || got != "" {
 		t.Fatalf("Cwd(unknown) = %q, %v, want empty", got, err)
 	}
-	if err := d.Record(id, "p-"+id, "t", "/home", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "/home", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	// A relaunch in another directory moves it; one with no dir keeps it.
-	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Record(id, "p-"+id, "t", "", "Detached", "now"); err != nil {
+	if err := d.Record(id, "p-"+id, "t", "", "Detached", "now", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := d.Cwd(id); err != nil || got != "/repo" {
 		t.Fatalf("Cwd = %q, %v, want /repo", got, err)
+	}
+}
+
+// A session's profile survives every read path, and the reconciler's upserts
+// leave it alone.
+func TestProfileRoundTrip(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := d.AllSessions()
+	if err != nil || len(all) != 1 || all[0].Profile != "private" {
+		t.Fatalf("AllSessions = %+v, %v, want one row with profile private", all, err)
+	}
+	stopped, err := d.StoppedSessions(nil, nil)
+	if err != nil || len(stopped) != 1 || stopped[0].Profile != "private" {
+		t.Fatalf("StoppedSessions = %+v, %v, want one row with profile private", stopped, err)
+	}
+
+	// A Record that names no profile keeps the stored one.
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "private" {
+		t.Fatalf("AllSessions after Record without profile = %+v, %v, want profile private", all, err)
+	}
+
+	// A relaunch under another profile records it.
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "work" {
+		t.Fatalf("AllSessions after relaunch = %+v, %v, want profile work", all, err)
+	}
+}
+
+// A row the reconciler creates has no recorded profile until a Record names one.
+func TestProfileOfReconcilerRow(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id}); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "" {
+		t.Fatalf("AllSessions = %+v, %v, want one row with no profile", all, err)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "private" {
+		t.Fatalf("AllSessions after Record = %+v, %v, want profile private", all, err)
+	}
+}
+
+// A database written before the profile column existed gains it on Open: its
+// rows read back with no recorded profile, and a second Open changes nothing.
+func TestMigrateAddsProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The schema as Open created it before the profile column.
+	const oldSchema = `
+CREATE TABLE sessions (
+	uuid                TEXT PRIMARY KEY,
+	screen              TEXT,
+	title               TEXT,
+	cwd                 TEXT,
+	local_status        TEXT,
+	cloud_status        TEXT,
+	connection_status   TEXT,
+	bridge_session_id   TEXT,
+	created_at          TEXT,
+	first_seen_archived INTEGER,
+	archived_at         INTEGER,
+	resumed_at          INTEGER,
+	updated_at          INTEGER,
+	conv_id             TEXT
+);
+CREATE TABLE events (
+	id     INTEGER PRIMARY KEY AUTOINCREMENT,
+	uuid   TEXT,
+	kind   TEXT,
+	detail TEXT,
+	at     INTEGER
+);
+CREATE INDEX idx_events_uuid ON events(uuid);
+INSERT INTO sessions
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, conv_id)
+VALUES
+	('11111111-1111-1111-1111-111111111111', 'p-1', 'one', '/repo', 'Detached', '', '', '', 'now', 2, 'c1'),
+	('22222222-2222-2222-2222-222222222222', 'p-2', 'two', '/home', 'Detached', 'archived', '', 'session_x', 'then', 1, NULL);`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := range 2 {
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open #%d of old db: %v", i+1, err)
+		}
+		all, err := d.AllSessions()
+		if err != nil || len(all) != 2 {
+			t.Fatalf("Open #%d: AllSessions = %+v, %v, want 2 rows", i+1, all, err)
+		}
+		for _, s := range all {
+			if s.Profile != "" {
+				t.Errorf("Open #%d: %s profile = %q, want none", i+1, s.UUID, s.Profile)
+			}
+		}
+		if all[0].Title != "one" || all[1].Bridge != "session_x" {
+			t.Errorf("Open #%d: rows not preserved: %+v", i+1, all)
+		}
+		stopped, err := d.StoppedSessions(nil, nil)
+		if err != nil || len(stopped) != 2 || stopped[0].Profile != "" || stopped[1].Profile != "" {
+			t.Errorf("Open #%d: StoppedSessions = %+v, %v, want 2 rows with no profile", i+1, stopped, err)
+		}
+		var n int
+		if err := d.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='profile' AND "notnull"=1 AND dflt_value=''''''`).Scan(&n); err != nil || n != 1 {
+			t.Errorf("Open #%d: profile columns = %d, %v, want one NOT NULL DEFAULT ''", i+1, n, err)
+		}
+		d.Close()
 	}
 }
