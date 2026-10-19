@@ -9,6 +9,7 @@ tmp=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -r "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/home/.claude/sessions" "$tmp/claude/sessions" "$tmp/busy/sessions" "$tmp/repo"
 HOME="$tmp/home" git -C "$tmp/repo" init -q
+cd "$tmp/repo" || exit 1 # this shell's cwd, which CLAUDE_PID=$$ points the script at
 cat >"$tmp/bin/crctl" <<'EOF'
 #!/bin/sh
 if [ "$1" = help ]; then
@@ -72,6 +73,9 @@ cwd=$tmp/repo rs "$P" STY=1.pigri-dev-remote-work-$id -- --check --profile priva
 want 0 "move:    to profile private" "move check"
 want 0 "stays in the work account's Claude apps" "move warning"
 want 0 "trust:   $tmp/repo (in profile private)" "move trusts the current dir"
+# A move with no dir trusts the cwd of the session's claude, not of the script.
+rs "$P" CLAUDE_PID=$$ STY=1.pigri-dev-remote-work-$id -- --check --profile private
+want 0 "trust:   $tmp/repo (in profile private)" "move trusts the claude process's cwd"
 rs "$P" STY=1.pigri-dev-remote-work-$id -- --check --profile private
 want 1 "runs in $tmp/home, which the move would mark as a trusted folder" "move from the home dir"
 cwd=/ rs "$P" STY=1.pigri-dev-remote-work-$id -- --check --profile private

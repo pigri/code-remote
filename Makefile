@@ -13,11 +13,12 @@ RUNDIR   ?= $(HOME)/.local/share/code-remote
 SKILLDIR ?= $(HOME)/.claude/skills
 # The skills/ dir of each profile in CLAUDE_REMOTE_PROFILES whose dir exists,
 # besides SKILLDIR. A profile dir that does not exist is skipped, not created;
-# so, with a warning, is one with a space or a quote, which make cannot list.
-SKILLDIRS ?= $(SKILLDIR) $(shell printf '%s\n' '$(subst ','\'',$(CLAUDE_REMOTE_PROFILES))' | tr ',' '\n' | \
+# so, with a warning, is one with a character outside [A-Za-z0-9._/@+=,:-]
+# (after ~ expansion), because make would split or run it in the recipe.
+SKILLDIRS ?= $(SKILLDIR) $(shell printf '%s\n' '$(subst ','\'',$(value CLAUDE_REMOTE_PROFILES))' | tr ',' '\n' | \
 	sed -n 's/^[^=]*=[[:space:]]*//p' | sed 's/[[:space:]]*$$//; s|/*$$||' | while IFS= read -r d; do \
 	case $$d in ('~') d=$$HOME ;; ('~/'*) d=$$HOME/$${d#'~/'} ;; esac; \
-	case $$d in (*[[:space:]\'\"]*) echo "install-skill: skipping profile dir '$$d': it has a space or a quote" >&2; continue ;; esac; \
+	case $$d in (*[!A-Za-z0-9._/@+=,:-]*) echo "install-skill: skipping profile dir '$$d': it has a character outside A-Za-z0-9._/@+=,:-" >&2; continue ;; esac; \
 	[ -d "$$d" ] && echo "$$d/skills"; done | grep -vxF '$(SKILLDIR)')
 INSTALL  ?= install
 VERSION  ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 0.0.0-dev)
