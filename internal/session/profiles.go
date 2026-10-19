@@ -132,18 +132,14 @@ func (m *Manager) hasConv(p profile.Profile, id string) bool {
 	return p.Dir == "" || logIn(p.Dir, m.storedConv(p.Dir, id)) != ""
 }
 
-// launchProfile is the profile to relaunch session id, whose profile is own,
-// under when the caller asked for prof: own for "". Another profile would be a
-// move between profiles, which is refused with ErrOtherProfile.
-func (m *Manager) launchProfile(id string, own profile.Profile, prof string) (profile.Profile, error) {
+// launchProfile is the profile to relaunch a session whose profile is own
+// under when the caller asked for prof: own for "". Another one is a move
+// between profiles.
+func (m *Manager) launchProfile(own profile.Profile, prof string) (profile.Profile, error) {
 	if prof == "" || prof == own.Name {
 		return own, nil
 	}
-	if _, err := m.lookupProfile(prof); err != nil {
-		return profile.Profile{}, err
-	}
-	return profile.Profile{}, fmt.Errorf("%w: %s is in profile %q, not %q, and moving it is not supported",
-		ErrOtherProfile, id, own.Name, prof)
+	return m.lookupProfile(prof)
 }
 
 // ProfileView is the part of a Manager that one profile owns: its running

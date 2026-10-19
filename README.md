@@ -162,8 +162,9 @@ requests.
 `POST /sessions`, `resume` and `restart` also take `"profile": "<name>"`, one
 of `CLAUDE_REMOTE_PROFILES`. On create it picks the account, and it defaults to
 `CLAUDE_REMOTE_DEFAULT_PROFILE`. On resume and restart it defaults to the
-session's own profile, and naming another one is refused with `409`: a session
-cannot move between profiles yet. An unknown profile is `400`. A profile
+session's own profile; naming another one moves the session there (see
+[Moving between profiles](#moving-between-profiles)). An unknown profile is
+`400`. A profile
 listed at `~/.claude` launches Claude with `CLAUDE_CONFIG_DIR` unset, so it
 keeps its config in `~/.claude.json`; any other profile launches it with
 `CLAUDE_CONFIG_DIR=<dir>`. Without `CLAUDE_REMOTE_PROFILES`, Claude inherits the
@@ -192,6 +193,28 @@ and screen name are unchanged, but the Claude apps list the moved session as a
 new entry and the previous one goes away (archived). The new entry is named
 after the session's title (its id when it has none). Passing
 `dir` again — even the same directory — forks and re-registers again.
+
+### Moving between profiles
+
+`restart` (or `resume`) with `{"profile": "<other>"}`, and optionally `"dir"`,
+moves a session to another profile, so it comes back under the other Claude
+account. The session is stopped, and its conversation is **copied**, with its
+file modes: `projects/<project>/<conv>.jsonl` and its `<conv>/` dir (subagent
+transcripts, tool results), plus the session id's own log when Claude has moved
+the session onto another conversation, since its title is set there. The old
+profile keeps its copy, so a failed move
+loses nothing. Claude then resumes it in the new profile as a fork, like a move
+to another directory, under that profile's screen name and environment. The
+database records the new profile only once that launch has started; a failed
+launch removes the copy and leaves the session stopped in the old profile. The
+old Remote Control session in the first account goes idle. Nothing archives it:
+it stays in that account's Claude apps until it is archived there by hand.
+
+A move is refused with `409` when the new profile already holds a different
+copy of a file it would copy, even one that appears during the move; nothing
+is overwritten. An identical copy is
+accepted, so a move can be repeated. Naming the session's own profile without
+a `dir` is a plain restart.
 
 Claude asks "do you trust this folder?" the first time it starts in a directory,
 and a detached session just waits there. A session launched into a folder Claude
@@ -354,7 +377,7 @@ crctl resume all    # relaunch every stopped session
 crctl restart <id>  # stop a session and resume it under the same id
 crctl restart <id> --dir ~/work/repo  # ...and move it into that directory
 crctl restart <id> --dir ~/work/repo --trust  # ...marking it a trusted folder first
-crctl restart <id> --profile work  # ...naming its profile (it must be its own)
+crctl restart <id> --profile work  # ...moving it to the "work" profile (account)
 crctl upgrade --all # update claude, restart running sessions onto the new version
 crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
@@ -365,9 +388,13 @@ crctl profiles      # list the profiles; * marks the default
 `CLAUDE_REMOTE_PROFILES` (the API server's, in remote mode). On `new` it picks
 the account. It defaults to `CLAUDE_REMOTE_DEFAULT_PROFILE`, else the first
 profile listed in `CLAUDE_REMOTE_PROFILES`. On `resume` and `restart` it
-defaults to the session's own profile. Naming another one is refused: moving a
-session between profiles is not supported yet. An unknown profile is an error
-too. Without `CLAUDE_REMOTE_PROFILES` the only profile is `default`.
+defaults to the session's own profile. Naming another one moves the session
+there, under the other Claude account (see
+[Moving between profiles](#moving-between-profiles)). An unknown profile is an
+error. Without `CLAUDE_REMOTE_PROFILES` the only profile is `default`.
+
+An API server from before moves between profiles refuses one with `409`.
+`crctl` then says to upgrade the server, or to leave out `--profile`.
 
 An API server that predates profiles ignores `--profile` and launches the
 session under its only account. `crctl` then fails with an error that says the

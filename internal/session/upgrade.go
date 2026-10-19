@@ -135,7 +135,7 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 		case known && !force && reg.Status != "" && reg.Status != "idle":
 			o.Action, o.Reason = ActionSkipped, reg.Status+" (use force to restart anyway)"
 		default:
-			if _, rerr := m.restartAs(s, info, "", p); rerr != nil {
+			if _, rerr := m.restartAs(s, info, "", p, p); rerr != nil {
 				o.Action, o.Reason = ActionFailed, rerr.Error()
 			} else {
 				o.Action = ActionRestarted
@@ -176,7 +176,8 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 func (m *Manager) Restart(id string) (Session, error) { return m.RestartIn(id, "", "") }
 
 // RestartIn is Restart with the session moved to working directory dir, under
-// profile prof (see ResumeIn). A bad dir or profile is refused before anything
+// profile prof (see ResumeIn). A bad dir or profile, or a move that would
+// overwrite a different copy of the conversation, is refused before anything
 // is stopped.
 func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
@@ -193,32 +194,38 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
 		}
 	}
-	p, err := m.launchProfile(id, own, prof)
+	p, err := m.launchProfile(own, prof)
 	if err != nil {
 		return Session{}, err
 	}
 	if !running {
-		return m.resume(id, m.storedConv(p.Dir, id), dir, p)
+		return m.resume(id, m.storedConv(own.Dir, id), dir, own, p)
 	}
 	return m.restart(s, m.liveIndex(c)(s), dir, p)
 }
 
-// restart is RestartIn for a session known to be running in profile p; info is
+// restart is RestartIn for a running session, relaunched in profile p; info is
 // what liveIndex found for it.
 func (m *Manager) restart(s Session, info liveInfo, dir string, p profile.Profile) (Session, error) {
-	return m.restartAs(s, m.reread(s, info), dir, p)
+	return m.restartAs(s, m.reread(s, info), dir, m.sessionProfile(s), p)
 }
 
-// restartAs is restart with info already read again.
-func (m *Manager) restartAs(s Session, info liveInfo, dir string, p profile.Profile) (Session, error) {
+// restartAs is restart with info already read again, for s running in
+// profile from.
+func (m *Manager) restartAs(s Session, info liveInfo, dir string, from, p profile.Profile) (Session, error) {
 	id, conv := s.ID, info.Conv
 	if dir != "" {
 		if _, err := m.resolveDir(dir); err != nil {
 			return Session{}, err
 		}
 	}
-	if p.Dir != "" && logIn(p.Dir, conv) == "" {
+	if from.Dir != "" && logIn(from.Dir, conv) == "" {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s (not restarting)", ErrNotResumable, conv)
+	}
+	if from.Name != p.Name {
+		if _, err := m.planMove(id, from, p, conv); err != nil {
+			return Session{}, err
+		}
 	}
 
 	// Wait for the claude process itself, not just its screen, to exit before a
@@ -254,7 +261,7 @@ func (m *Manager) restartAs(s Session, info liveInfo, dir string, p profile.Prof
 		}
 		time.Sleep(stopPoll)
 	}
-	return m.resume(id, conv, dir, p)
+	return m.resume(id, conv, dir, from, p)
 }
 
 // liveInfo is what is known about a running session's claude process.

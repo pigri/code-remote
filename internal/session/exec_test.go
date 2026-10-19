@@ -41,6 +41,7 @@ type fakeScreen struct {
 	parentEnv bool
 
 	onLaunch func() // runs after each -dmS launch
+	onKill   func() // runs before each -S ... -X quit
 }
 
 func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
@@ -69,6 +70,9 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 			}
 		}
 	case len(args) > 0 && args[0] == "-S": // kill: -S <[pid.]name> -X quit
+		if f.onKill != nil {
+			f.onKill()
+		}
 		f.syncPIDs()
 		for _, n := range f.vanish {
 			if i := slices.Index(f.created, n); i >= 0 {

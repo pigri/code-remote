@@ -456,13 +456,15 @@ func readLaunchBody(w http.ResponseWriter, r *http.Request) (body launchBody, ok
 }
 
 // profileStatus maps the profile errors of ResumeIn and RestartIn to a
-// status: an unknown profile is a bad request, and another profile than the
-// session's own conflicts with where it is. 0 for any other error.
+// status: an unknown profile is a bad request. A move that would overwrite a
+// different copy of the conversation in the target profile conflicts with
+// what is there: the request is valid, and succeeds once that copy is moved
+// aside. 0 for any other error.
 func profileStatus(err error) int {
 	switch {
 	case errors.Is(err, session.ErrInvalidProfile):
 		return http.StatusBadRequest
-	case errors.Is(err, session.ErrOtherProfile):
+	case errors.Is(err, session.ErrOtherProfile), errors.Is(err, session.ErrMoveConflict):
 		return http.StatusConflict
 	}
 	return 0
@@ -470,7 +472,7 @@ func profileStatus(err error) int {
 
 // resume relaunches a stopped session by its id (POST /sessions/{id}/resume).
 // Optional JSON body: {"dir": "..."} to move the session to that directory,
-// {"profile": "..."} naming its profile.
+// {"profile": "..."} to move it to that profile.
 func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
@@ -506,7 +508,7 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 // restart stops a session and resumes it under the same id
 // (POST /sessions/{id}/restart). A stopped session is simply resumed.
 // Optional JSON body: {"dir": "..."} to move the session to that directory,
-// {"profile": "..."} naming its profile.
+// {"profile": "..."} to move it to that profile.
 func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
