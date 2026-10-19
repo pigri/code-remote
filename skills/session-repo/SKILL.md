@@ -57,11 +57,16 @@ account. A session can move to another one and keep its history.
 2. **Pick the profile** the user named. Only the names in
    `CLAUDE_REMOTE_PROFILES` count. If unsure which one, ask.
 3. **Confirm.** Run `restart-self.sh --check --profile <name>`, adding a repo
-   dir only if the user also asked to move into one. Relay any error as is.
-4. **Warn, then wrap up** as in step 4 above. Tell the user that the session
-   comes back under the other account, with the same history, as a new
-   session in that account's Claude apps. Its old entry stays in the first
-   account's Claude apps until they archive it there by hand.
+   dir if the user also asked to move into one. Relay any error as is. The
+   `trust:` line names the dir the move marks as a trusted folder in the
+   other profile: the repo, else the session's current dir. The script
+   refuses a move without a dir from the home dir or `/`; then ask the user
+   which dir to move into.
+4. **Wrap up, then warn.** Finish or park whatever is in flight; background
+   shells do not survive, uncommitted changes do. Tell the user that the
+   session comes back under the other account, with the same history, as a
+   new session in that account's Claude apps. Its old entry stays in the
+   first account's Claude apps until they archive it there by hand.
 5. **Run `restart-self.sh --profile <name> [dir]` as the last action of the
    turn**, then end the turn, as in step 5 above.
 

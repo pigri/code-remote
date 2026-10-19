@@ -520,7 +520,9 @@ Notes:
 
 - The move marks the repo as a trusted folder for Claude (a detached session
   can't answer the trust prompt), so the skill only moves into a repo you named
-  or the session has been working in.
+  or the session has been working in. A move to another profile without a repo
+  marks the session's current dir instead, in that profile; the skill refuses
+  it when that dir is your home dir or `/`.
 - Background shells started by the session don't survive the restart;
   uncommitted changes in the working tree do.
 - If a session doesn't come back, the helper's output is in

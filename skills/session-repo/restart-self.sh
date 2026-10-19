@@ -115,6 +115,19 @@ if [ -n "$dir" ]; then
 	repo=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || die "$dir is not inside a git repository"
 	echo "target:  $repo ($(git -C "$repo" remote get-url origin 2>/dev/null || echo 'no origin remote'))"
 fi
+if [ -n "$to" ]; then
+	# --trust marks the dir the session comes back in as trusted in profile
+	# $to: the repo, else the dir its claude runs in, which crctl keeps.
+	trust=$repo
+	if [ -z "$trust" ]; then
+		trust=$(readlink "/proc/${CLAUDE_PID:-none}/cwd" 2>/dev/null) || trust=$(pwd -P)
+		case $trust in
+		/ | "$(cd "$HOME" 2>/dev/null && pwd -P)")
+			die "this session runs in $trust, which the move would mark as a trusted folder in profile '$to'; name the directory to move it into" ;;
+		esac
+	fi
+	echo "trust:   $trust (in profile $to)"
+fi
 help=$("$CRCTL" help 2>&1) || true
 grep -q -- '--trust' <<<"$help" ||
 	die "$CRCTL has no 'restart --dir --trust'; upgrade code-remote (crctl) to a version that does"
