@@ -315,12 +315,24 @@ func TestRunPickBackendError(t *testing.T) {
 func TestPickBackend(t *testing.T) {
 	t.Run("local by default", func(t *testing.T) {
 		t.Setenv("CLAUDE_REMOTE_API_URL", "")
+		db := filepath.Join(t.TempDir(), "test.db")
+		t.Setenv("CLAUDE_REMOTE_DB", db)
 		be, err := pickBackend()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := be.(*localBackend); !ok {
-			t.Errorf("got %T, want *localBackend", be)
+		lb, ok := be.(*localBackend)
+		if !ok {
+			t.Fatalf("got %T, want *localBackend", be)
+		}
+		if lb.stopped == nil {
+			t.Fatal("local backend has no session store")
+		}
+		if c, ok := lb.stopped.(io.Closer); ok {
+			t.Cleanup(func() { c.Close() })
+		}
+		if _, err := os.Stat(db); err != nil {
+			t.Errorf("pickBackend did not open the session DB at CLAUDE_REMOTE_DB: %v", err)
 		}
 	})
 	t.Run("remote with token", func(t *testing.T) {
