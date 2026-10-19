@@ -986,18 +986,20 @@ func readRegistrations(paths []string, profile string) []Registration {
 			continue
 		}
 		var rec struct {
-			SessionID       string  `json:"sessionId"`
-			PID             int     `json:"pid"`
-			Version         string  `json:"version"`
-			Cwd             string  `json:"cwd"`
-			BridgeSessionID *string `json:"bridgeSessionId"`
-			Status          string  `json:"status"`
-			ProcStart       string  `json:"procStart"`
+			SessionID       string          `json:"sessionId"`
+			PID             int             `json:"pid"`
+			Version         string          `json:"version"`
+			Cwd             string          `json:"cwd"`
+			BridgeSessionID *string         `json:"bridgeSessionId"`
+			Status          string          `json:"status"`
+			ProcStart       json.RawMessage `json:"procStart"`
 		}
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
 			continue
 		}
-		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p, procStart: rec.ProcStart}
+		var start string
+		_ = json.Unmarshal(rec.ProcStart, &start) // only a string is a start, as claude reads it
+		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p, procStart: start}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}

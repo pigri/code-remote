@@ -307,13 +307,14 @@ func (m *Manager) liveConv(s Session, home string, info liveInfo) string {
 }
 
 // reread is info with s's registration read again from its file, so a stop
-// that comes a while after the index was built notes where s is by then.
+// that comes a while after the index was built notes where s is by then. A
+// file another process has written at the pid since is not s's.
 func (m *Manager) reread(s Session, info liveInfo) liveInfo {
 	if !info.Known || info.Reg.path == "" {
 		return info
 	}
 	regs := rereadFile(info.Reg.path, info.Reg.Profile)
-	if len(regs) != 1 || regs[0].PID != info.Reg.PID {
+	if len(regs) != 1 || regs[0].PID != info.Reg.PID || regs[0].procStart != info.Reg.procStart {
 		return info
 	}
 	regs[0].owned = info.Reg.owned

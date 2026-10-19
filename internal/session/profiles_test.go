@@ -981,27 +981,40 @@ func TestReadProcEnvironReadsOwnProcess(t *testing.T) {
 }
 
 // A restart notes and resumes the conversation the session is in when it
-// stops, not the one it was in when the index was built.
+// stops, not the one it was in when the index was built. A file that another
+// process wrote at the pid meanwhile is not read as the session's: the restart
+// keeps what the index found.
 func TestRestartRereadsItsRegistration(t *testing.T) {
-	fastStop(t)
 	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
-	home := t.TempDir()
-	writeTitledLog(t, home, idA, "a")
-	writeTitledLog(t, home, conv, "after /clear")
-	register(t, home, "4242", idA, 4242)
-	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "4242 10000 claude --session-id " + idA + "\n"}
-	withFakeScreen(t, fs)
-	fst := &fakeStore{}
-	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+	for _, tc := range []struct {
+		name, laterStart, laterID, want string
+	}{
+		{"claude moves on", "100", conv, conv},
+		{"another claude takes the pid", "200", convZ, idA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fastStop(t)
+			home := t.TempDir()
+			writeTitledLog(t, home, idA, "a")
+			writeTitledLog(t, home, conv, "after /clear")
+			writeTitledLog(t, home, convZ, "another claude")
+			registerStarted(t, home, "4242", idA, 4242, "100", time.Now())
+			withProcStart(t, map[string]string{"4242": "100"})
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "4242 10000 claude --session-id " + idA + "\n"}
+			withFakeScreen(t, fs)
+			fst := &fakeStore{}
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
 
-	l, c := m.list()
-	info := m.liveIndex(c)(l[0])
-	register(t, home, "4242", conv, 4242) // claude moves on meanwhile
-	if _, err := m.restart(l[0], info, "", m.profiles()[0]); err != nil {
-		t.Fatal(err)
-	}
-	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+conv) || fst.convs[idA] != conv {
-		t.Errorf("launches %q, noted conversation %q; want both %s", fs.launches, fst.convs[idA], conv)
+			l, c := m.list()
+			info := m.liveIndex(c)(l[0])
+			registerStarted(t, home, "4242", tc.laterID, 4242, tc.laterStart, time.Now())
+			if _, err := m.restart(l[0], info, "", m.profiles()[0]); err != nil {
+				t.Fatal(err)
+			}
+			if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+tc.want) || fst.convs[idA] != tc.want {
+				t.Errorf("launches %q, noted conversation %q; want both %s", fs.launches, fst.convs[idA], tc.want)
+			}
+		})
 	}
 }
 
@@ -1376,5 +1389,38 @@ func TestReadProcStartReadsOwnProcess(t *testing.T) {
 	}
 	if again, _ := readProcStart(self); again != got {
 		t.Errorf("readProcStart(self) changed: %q, then %q", got, again)
+	}
+}
+
+// claude writes procStart as a string. One of another type is not recorded:
+// the entry is kept, with its session id, and counts by its pid as before.
+func TestNonStringProcStartKeepsTheEntry(t *testing.T) {
+	const cleared = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	for _, tc := range []struct{ name, start string }{
+		{"number", `12345`},
+		{"object", `{"ticks":"12345"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeTitledLog(t, home, idA, "a")
+			writeTitledLog(t, home, cleared, "cleared")
+			register(t, home, "7777", cleared, 7777)
+			body := `{"sessionId":"` + cleared + `","pid":7777,"status":"idle","procStart":` + tc.start + `}`
+			if err := os.WriteFile(filepath.Join(home, "sessions", "7777.json"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			withProcStart(t, map[string]string{"7777": "200"})
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+			fst := &fakeStore{}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+			if r, ok := m.LiveRegistrations()[idA]; !ok || r.SessionID != cleared || r.Status != "idle" {
+				t.Errorf("live registration = %+v (%v), want %s, idle", r, ok, cleared)
+			}
+			m.SyncConversations()
+			if fst.convs[idA] != cleared {
+				t.Errorf("synced conversation = %q, want %s", fst.convs[idA], cleared)
+			}
+		})
 	}
 }
