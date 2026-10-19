@@ -33,7 +33,11 @@ func main() {
 // run wires up and serves the API, returning a process exit code. It blocks
 // until ctx is cancelled (signal) or the server fails, then shuts down
 // gracefully. Split out from main so it's testable without spawning a process.
-func run(ctx context.Context) int {
+func run(parent context.Context) int {
+	// Shutdown cancels this, whatever started it, so the background workers
+	// stop on a server error too.
+	ctx, stop := context.WithCancel(parent)
+	defer stop()
 	token := os.Getenv("CLAUDE_REMOTE_API_TOKEN")
 	if token == "" {
 		log.Print("CLAUDE_REMOTE_API_TOKEN is required (this endpoint launches processes; refusing to run unauthenticated)")
@@ -88,19 +92,9 @@ func run(ctx context.Context) int {
 	// Keep the store's note of each session's current conversation fresh, so a
 	// session that dies without warning (crash, host reboot) still resumes where
 	// it left off rather than at the conversation it was launched with.
+	var convSync *syncHandle
 	if db != nil {
-		go func() {
-			t := time.NewTicker(time.Minute)
-			defer t.Stop()
-			for {
-				mgr.SyncConversations()
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-				}
-			}
-		}()
+		convSync = startConvSync(ctx, mgr)
 	}
 
 	httpSrv := &http.Server{
@@ -128,13 +122,20 @@ func run(ctx context.Context) int {
 		logger.Error("server_error", "error", exitErr.Error())
 	}
 
-	// Drain in-flight requests, then stop the reconciler and checkpoint+close
-	// the SQLite store.
+	// Drain in-flight requests, then stop the reconciler and the conversation
+	// sync, and checkpoint+close the SQLite store.
+	stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	// The workers get their own budget, so a slow Shutdown cannot leave them none.
+	workersCtx, cancelWorkers := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWorkers()
 	if err := sync.Close(); err != nil {
 		logger.Warn("sync_close", "error", err.Error())
+	}
+	if !convSync.wait(workersCtx) {
+		logger.Warn("conversation_sync_close", "error", "still running at the shutdown deadline")
 	}
 	if db != nil {
 		if err := db.Close(); err != nil {
@@ -146,6 +147,29 @@ func run(ctx context.Context) int {
 		return 1
 	}
 	return 0
+}
+
+// syncConversations is one conversation sync pass; a variable so tests can
+// hold it open.
+var syncConversations = (*session.Manager).SyncConversations
+
+// startConvSync keeps the store's note of each session's current conversation
+// fresh until ctx is done; the handle waits for the pass in flight.
+func startConvSync(ctx context.Context, mgr *session.Manager) *syncHandle {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for ctx.Err() == nil {
+			syncConversations(mgr)
+			select {
+			case <-ctx.Done():
+			case <-t.C:
+			}
+		}
+	}()
+	return &syncHandle{done: done}
 }
 
 // auditLogger builds the structured logger used for the audit trail.
@@ -175,6 +199,24 @@ func (h *syncHandle) Close() error {
 		<-h.done // let the in-flight reconcile finish before the store is closed
 	}
 	return nil
+}
+
+// wait is Close bounded by ctx; false when the worker outlived it.
+func (h *syncHandle) wait(ctx context.Context) bool {
+	if h == nil || h.done == nil {
+		return true
+	}
+	select {
+	case <-h.done:
+		return true
+	default:
+	}
+	select {
+	case <-h.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // startSessionSync launches the background reconciler that polls the Anthropic
