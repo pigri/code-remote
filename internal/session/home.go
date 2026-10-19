@@ -6,13 +6,13 @@ import (
 )
 
 // DefaultClaudeHome is the claude config dir to read session logs and the
-// process registry from: CLAUDE_HOME, else CLAUDE_CONFIG_DIR (where claude
-// itself keeps them when it is set), else ~/.claude. "" when no home is known.
+// process registry from: CLAUDE_CONFIG_DIR, which the launched claude inherits
+// and writes them to, else CLAUDE_HOME, else ~/.claude. "" when no home is known.
 func DefaultClaudeHome() string {
-	if v := os.Getenv("CLAUDE_HOME"); v != "" {
+	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
 		return v
 	}
-	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
+	if v := os.Getenv("CLAUDE_HOME"); v != "" {
 		return v
 	}
 	if h, err := os.UserHomeDir(); err == nil {

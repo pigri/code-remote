@@ -14,8 +14,8 @@ func TestDefaultClaudeHome(t *testing.T) {
 	tests := []struct {
 		name, claudeHome, configDir, want string
 	}{
-		{"CLAUDE_HOME wins", "/custom/home", "/custom/config", "/custom/home"},
-		{"CLAUDE_CONFIG_DIR next", "", "/custom/config", "/custom/config"},
+		{"CLAUDE_CONFIG_DIR wins", "/custom/home", "/custom/config", "/custom/config"},
+		{"CLAUDE_HOME next", "/custom/home", "", "/custom/home"},
 		{"~/.claude last", "", "", filepath.Join(userHome, ".claude")},
 	}
 	for _, tt := range tests {
