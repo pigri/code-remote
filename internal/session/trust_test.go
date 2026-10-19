@@ -131,3 +131,27 @@ func TestLaunchTrustsOrFlagsDir(t *testing.T) {
 		}
 	}
 }
+
+// A Manager only touches the config it was given: the caller's own
+// CLAUDE_CONFIG_DIR is resolved at startup (DefaultClaudeConfig), never here.
+func TestTrustDirIgnoresCallerConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := (&Manager{}).TrustDir("/repo"); err == nil {
+		t.Error("TrustDir with no configured location = nil error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude.json")); !os.IsNotExist(err) {
+		t.Errorf("TrustDir wrote the caller's config: stat err = %v", err)
+	}
+}
+
+func TestDefaultClaudeConfig(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/custom/config")
+	if got, want := DefaultClaudeConfig(), "/custom/config/.claude.json"; got != want {
+		t.Errorf("DefaultClaudeConfig() = %q, want %q", got, want)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if got := DefaultClaudeConfig(); got != "" {
+		t.Errorf("DefaultClaudeConfig() without CLAUDE_CONFIG_DIR = %q, want \"\" (beside ClaudeHome)", got)
+	}
+}

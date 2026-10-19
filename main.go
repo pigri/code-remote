@@ -81,7 +81,7 @@ func run(ctx context.Context) int {
 		logger.Info("session_store_enabled", "path", dbPath)
 	}
 
-	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome,
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome, ClaudeConfig: session.DefaultClaudeConfig(),
 		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT"),
 		TrustDirs:     envBool("CLAUDE_REMOTE_TRUST_DIRS", false)}
 	var stopped session.StoppedLister
