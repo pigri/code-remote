@@ -227,8 +227,9 @@ set `CLAUDE_REMOTE_TRUST_DIRS=1` for the API (or pass `--trust` to a local
 directory under `CLAUDE_WORKSPACE_ROOT` is one you trust.
 
 `POST /sessions/{id}/restart` quits the session's `screen` and relaunches it with
-`claude --resume <id>` — same session id, screen name, Remote Control name, and
-working directory. If Claude moved the session onto a new conversation id while
+`claude --resume <id>` — same session id, screen name, and working directory.
+The Remote Control session is named after the session's title (its id when it
+has none), so a relaunch that has to register a new one keeps the title. If Claude moved the session onto a new conversation id while
 it ran (e.g. after `/clear`), the conversation it is in now is the one resumed,
 not the one it was launched with. It refuses with `404` (and leaves the session running) when
 there is no on-disk log to resume from; a session that is already stopped is

@@ -647,13 +647,16 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	fork := dir != "" || move
 	if fork {
 		args = append(args, "--fork-session") // a move: see ResumeIn
-		// The fork's new Remote Control session is titled after its name, and
-		// the title set on the old one doesn't follow. Name it after the
-		// session's title so it keeps showing under that. ("=" keeps a title
-		// that starts with "-" from being read as a flag.)
-		if t := convTitle(from.Dir, id, conv); t != "" {
-			rc = []string{"--remote-control=" + t}
-		}
+	}
+	// A new Remote Control session is titled after its name, and the title set
+	// on a previous one doesn't follow. That is a fork's, and also a relaunch
+	// that can't reattach the bridge it had (a move not yet registered, a
+	// bridge that is gone). So name it after the session's title, whenever it
+	// has one, so it keeps showing under that. ("=" keeps a title that starts
+	// with "-" from being read as a flag.)
+	title := convTitle(from.Dir, id, conv)
+	if title != "" {
+		rc = []string{"--remote-control=" + title}
 	}
 	undo := func() {}
 	if move {
@@ -693,6 +696,9 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	for i := 0; i < 10; i++ {
 		if s, ok := m.running(id); ok {
 			moveTo(&s, p)
+			if title != "" {
+				s.Title = title // moveTo and the screen list read the session id's own log
+			}
 			m.record(&s, cwd, p)
 			noteConv()
 			s.NeedsTrust = needsTrust
@@ -700,7 +706,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	s := Session{ID: id, Screen: name, Status: "Detached"}
+	s := Session{ID: id, Screen: name, Status: "Detached", Title: title}
 	m.record(&s, cwd, p)
 	noteConv()
 	s.NeedsTrust = needsTrust
