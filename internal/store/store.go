@@ -86,8 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
 		return err
 	}
 	// These columns were added after the first release; CREATE TABLE IF NOT
-	// EXISTS won't add them to an existing database. A profile of '' is the
-	// default one, which every session recorded before profiles ran under.
+	// EXISTS won't add them to an existing database. A profile of '' means
+	// none was recorded.
 	for _, col := range []struct{ name, def string }{
 		{"conv_id", "TEXT"},
 		{"profile", "TEXT NOT NULL DEFAULT ''"},
@@ -170,7 +170,8 @@ ON CONFLICT(uuid) DO UPDATE SET
 // row and clears the archive markers, stamping resumed_at when the session had
 // previously been archived. This is what makes a session discoverable as
 // resumable after its screen is gone, independent of the cloud reconciler.
-// profile is the profile the session runs under; "" is the default one.
+// profile names the profile the session runs under; "" records none and keeps
+// the stored one.
 func (d *DB) Record(uuid, screen, title, cwd, status, createdAt, profile string) error {
 	// cloud_status/connection_status/bridge_session_id are seeded to '' so a
 	// fresh row scans cleanly (AllSessions reads them as non-null strings); the
@@ -183,7 +184,7 @@ INSERT INTO sessions
 VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?)
 ON CONFLICT(uuid) DO UPDATE SET
 	screen=excluded.screen,
-	profile=excluded.profile,
+	profile=CASE WHEN excluded.profile != '' THEN excluded.profile ELSE sessions.profile END,
 	title=CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
 	cwd=CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
 	local_status=excluded.local_status,

@@ -32,7 +32,7 @@ type Session struct {
 	Version    string `json:"version,omitempty"`     // claude version the session is running
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
-	Profile    string `json:"-"`                     // the profile it runs under, "" for the default; not in the API yet
+	Profile    string `json:"-"`                     // the profile it was recorded under; "" when none was
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays

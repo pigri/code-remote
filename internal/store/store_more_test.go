@@ -221,7 +221,15 @@ func TestProfileRoundTrip(t *testing.T) {
 		t.Fatalf("StoppedSessions = %+v, %v, want one row with profile private", stopped, err)
 	}
 
-	// A relaunch records the profile it runs under.
+	// A Record that names no profile keeps the stored one.
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "private" {
+		t.Fatalf("AllSessions after Record without profile = %+v, %v, want profile private", all, err)
+	}
+
+	// A relaunch under another profile records it.
 	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "work"); err != nil {
 		t.Fatal(err)
 	}
@@ -230,8 +238,26 @@ func TestProfileRoundTrip(t *testing.T) {
 	}
 }
 
+// A row the reconciler creates has no recorded profile until a Record names one.
+func TestProfileOfReconcilerRow(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id}); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "" {
+		t.Fatalf("AllSessions = %+v, %v, want one row with no profile", all, err)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "private" {
+		t.Fatalf("AllSessions after Record = %+v, %v, want profile private", all, err)
+	}
+}
+
 // A database written before the profile column existed gains it on Open: its
-// rows read back with the default profile, and a second Open changes nothing.
+// rows read back with no recorded profile, and a second Open changes nothing.
 func TestMigrateAddsProfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	old, err := sql.Open("sqlite", path)
@@ -285,7 +311,7 @@ VALUES
 		}
 		for _, s := range all {
 			if s.Profile != "" {
-				t.Errorf("Open #%d: %s profile = %q, want default", i+1, s.UUID, s.Profile)
+				t.Errorf("Open #%d: %s profile = %q, want none", i+1, s.UUID, s.Profile)
 			}
 		}
 		if all[0].Title != "one" || all[1].Bridge != "session_x" {
@@ -293,7 +319,7 @@ VALUES
 		}
 		stopped, err := d.StoppedSessions(nil, nil)
 		if err != nil || len(stopped) != 2 || stopped[0].Profile != "" || stopped[1].Profile != "" {
-			t.Errorf("Open #%d: StoppedSessions = %+v, %v, want 2 rows with default profile", i+1, stopped, err)
+			t.Errorf("Open #%d: StoppedSessions = %+v, %v, want 2 rows with no profile", i+1, stopped, err)
 		}
 		var n int
 		if err := d.db.QueryRow(
