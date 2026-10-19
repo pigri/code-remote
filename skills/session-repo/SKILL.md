@@ -1,6 +1,6 @@
 ---
 name: session-repo
-description: Restart this Claude session inside the git repository it is working on, keeping the conversation. Use when a remote (crctl / screen) session was started outside its repo - e.g. in the home directory - so the Claude apps show no branch, diff or pull request for it; or when the user asks to restart this session, move it, or point it at a repo ("restart yourself in the api repo", "PRs aren't showing up for this session").
+description: Restart this Claude session inside the git repository it is working on, keeping the conversation. Use when a remote (crctl / screen) session was started outside its repo - e.g. in the home directory - so the Claude apps show no branch, diff or pull request for it; or when the user asks to restart this session, move it, or point it at a repo ("restart yourself in the api repo", "PRs aren't showing up for this session"). Also use it to move this session to another profile, that is another Claude account ("move this session to my private profile", "switch this session to my work account").
 ---
 
 # session-repo
@@ -15,7 +15,8 @@ file) lets the session do it to itself.
 ## Steps
 
 1. **Check where you are.** Run `restart-self.sh --check`. It prints this
-   session's id and current directory, or says this claude is not a
+   session's id, its profile when profiles are set up, and its current
+   directory, or says this claude is not a
    crctl-managed screen session - in which case stop and tell the user; there
    is nothing to restart.
 
@@ -45,6 +46,24 @@ file) lets the session do it to itself.
    `crctl restart` on your own session directly - it would kill the command
    mid-flight - and do not keep working after scheduling, since the helper
    waits for idle and anything started now is cut off.
+
+## Move to another profile
+
+With profiles (`CLAUDE_REMOTE_PROFILES`), each profile is a separate Claude
+account. A session can move to another one and keep its history.
+
+1. **Check.** Run `restart-self.sh --check`. Without a `profile:` line there
+   are no profiles to move between: tell the user and stop.
+2. **Pick the profile** the user named. Only the names in
+   `CLAUDE_REMOTE_PROFILES` count. If unsure which one, ask.
+3. **Confirm.** Run `restart-self.sh --check --profile <name>`, adding a repo
+   dir only if the user also asked to move into one. Relay any error as is.
+4. **Warn, then wrap up** as in step 4 above. Tell the user that the session
+   comes back under the other account, with the same history, as a new
+   session in that account's Claude apps. Its old entry stays in the first
+   account's Claude apps until they archive it there by hand.
+5. **Run `restart-self.sh --profile <name> [dir]` as the last action of the
+   turn**, then end the turn, as in step 5 above.
 
 ## Afterwards
 
