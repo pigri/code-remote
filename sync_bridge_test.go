@@ -293,3 +293,54 @@ func TestReconcilerStoresTheBridgeAndQuitsAfterTheGrace(t *testing.T) {
 		t.Errorf("quit %q after the grace, want %q", got, want)
 	}
 }
+
+// A session the store had not recorded before the tick, as a single-profile
+// host syncs it, is covered too: its first launch moves it past the
+// generation 0 the tick read.
+func TestReconcilerDropsATickOverlappingAFirstRecord(t *testing.T) {
+	for _, grace := range []time.Duration{0, 15 * time.Minute} {
+		t.Run(grace.String(), func(t *testing.T) {
+			h := newProfileHost(t, "work=~/.claude", "", map[string]int{sessX: 4242})
+			fakePS(t, "  5555  4242 claude\\n")
+			h.register(t, ".claude", "5555", sessX, 5555, "session_old")
+			now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+			rec, _ := h.syncer(t, archived("session_old"), grace, &now)
+			rec.Manager = &relaunchMidTick{ProfileView: rec.Manager.(*session.ProfileView), relaunch: func() {
+				fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+				h.recordProfile(t, map[string]string{sessX: ""}) // the first Record
+			}}
+
+			rec.ReconcileOnce(context.Background())
+			if got := h.quits(); got != "" {
+				t.Fatalf("the overlapping tick quit %q, launched while it ran", got)
+			}
+			if b, _ := h.db.LastBridge(sessX); b != "" {
+				t.Errorf("the overlapping tick stored bridge %q of the claude the launch replaced", b)
+			}
+			if _, ok, _ := h.db.FirstSeenArchived(sessX); ok {
+				t.Errorf("the overlapping tick started the archive clock of the launched session")
+			}
+			h.register(t, ".claude", "7777", sessX, 7777, "")
+			now = now.Add(grace + time.Minute)
+			rec.ReconcileOnce(context.Background())
+			if got := h.quits(); got != "" {
+				t.Fatalf("the next tick quit %q over what the overlapping one stored", got)
+			}
+		})
+	}
+}
+
+// Without the overlap, the same unrecorded session is synced and quit: the
+// test above is not passing because no tick reaches it.
+func TestReconcilerQuitsAnUnrecordedSingleProfileSession(t *testing.T) {
+	h := newProfileHost(t, "work=~/.claude", "", map[string]int{sessX: 4242})
+	fakePS(t, "  5555  4242 claude\\n")
+	h.register(t, ".claude", "5555", sessX, 5555, "session_old")
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	rec, _ := h.syncer(t, archived("session_old"), 0, &now)
+
+	rec.ReconcileOnce(context.Background())
+	if got, want := h.quits(), "crtest-"+sessX+"\n"; got != want {
+		t.Errorf("quit %q, want %q", got, want)
+	}
+}
