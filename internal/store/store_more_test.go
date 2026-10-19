@@ -223,6 +223,34 @@ func TestProfile(t *testing.T) {
 	}
 }
 
+// SetProfile changes only the profile: the row's bridge, status and archive
+// state stay as they were.
+func TestSetProfile(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t", LocalStatus: "Detached", BridgeSessionID: "session_b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetProfile(id, "private"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Profile(id); err != nil || got != "private" {
+		t.Errorf("Profile = %q, %v, want private", got, err)
+	}
+	if b, err := d.LastBridge(id); err != nil || b != "session_b" {
+		t.Errorf("LastBridge = %q, %v, want session_b kept", b, err)
+	}
+	if err := d.SetProfile("22222222-2222-2222-2222-222222222222", "private"); err != nil {
+		t.Errorf("SetProfile(unknown) = %v, want a no-op", err)
+	}
+	if all, _ := d.AllSessions(); len(all) != 1 {
+		t.Errorf("rows = %d after SetProfile of an unknown session, want 1", len(all))
+	}
+}
+
 // A session's profile survives every read path, and the reconciler's upserts
 // leave it alone.
 func TestProfileRoundTrip(t *testing.T) {

@@ -12,6 +12,22 @@ type profileStore interface {
 	Profile(uuid string) (string, error)
 }
 
+// profileSetter is optionally implemented by the Store to note a session's
+// profile without touching the rest of its row. Satisfied by *store.DB.
+type profileSetter interface {
+	SetProfile(uuid, profile string) error
+}
+
+// resolvedBy is how a session's profile was found.
+type resolvedBy uint8
+
+const (
+	byGuess      resolvedBy = iota // the ~/.claude rule or the default
+	byTranscript                   // the profile holding its transcript
+	byStore                        // the profile the Store recorded, or the only one
+	byRegistry                     // the registry its claude registered in
+)
+
 // profiles lists the profiles sessions can run under. Without
 // CLAUDE_REMOTE_PROFILES that is one profile, whose dir is ClaudeHome.
 func (m *Manager) profiles() []profile.Profile {
@@ -54,29 +70,46 @@ func (m *Manager) lookupProfile(name string) (profile.Profile, error) {
 // one at ~/.claude, where every session from before profiles lives; else the
 // default.
 func (m *Manager) profileOf(id string) profile.Profile {
+	p, _ := m.resolveProfile(id)
+	return p
+}
+
+// resolveProfile is profileOf, and how it found the profile.
+func (m *Manager) resolveProfile(id string) (profile.Profile, resolvedBy) {
 	list := m.profiles()
 	if len(list) == 1 {
-		return list[0]
+		return list[0], byStore
 	}
 	if ps, ok := m.Store.(profileStore); ok {
 		if name, err := ps.Profile(id); err == nil && name != "" {
 			if p, err := m.lookupProfile(name); err == nil {
-				return p
+				return p, byStore
 			}
 		}
 	}
 	for _, p := range list {
 		if logIn(p.Dir, id) != "" {
-			return p
+			return p, byTranscript
 		}
 	}
 	for _, p := range list {
 		if p.IsUserClaude() {
-			return p
+			return p, byGuess
 		}
 	}
 	p, _ := m.lookupProfile("")
-	return p
+	return p, byGuess
+}
+
+// noteProfile best-effort records in the Store the profile running session s
+// registered in, as found by liveIndex (info), unless the Store already holds
+// it. Once s stops, its profile resolves from the Store, so it resumes there.
+func (m *Manager) noteProfile(s Session, info liveInfo) {
+	ps, ok := m.Store.(profileSetter)
+	if !ok || !m.Profiles.Multi() || !info.Known || info.Reg.Profile != s.Profile || s.by == byStore {
+		return
+	}
+	_ = ps.SetProfile(s.ID, s.Profile)
 }
 
 // sessionProfile is the profile of s, a session List resolved, without
@@ -173,12 +206,12 @@ func (v *ProfileView) LiveRegistrations() map[string]Registration {
 // Kill is Manager.Kill for a session v's profile owns. A session another
 // profile owns is refused with ErrOtherProfile and left running.
 func (v *ProfileView) Kill(id string) (bool, error) {
-	s, ok, err := v.m.Get(id)
-	if err != nil || !ok {
-		return false, err
+	s, ok, c := v.m.get(id)
+	if !ok {
+		return false, nil
 	}
 	if s.Profile != v.profile {
 		return false, fmt.Errorf("%w: %s runs in profile %q, not %q", ErrOtherProfile, id, s.Profile, v.profile)
 	}
-	return v.m.Kill(id)
+	return v.m.stop(s, c)
 }

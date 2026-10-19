@@ -433,6 +433,23 @@ func TestReconcilerIgnoresAStaleEntryWithAReusedPID(t *testing.T) {
 	}
 }
 
+// A session whose profile is only a guess (a legacy row and no transcript,
+// so the ~/.claude rule picks work) is not tied to a stale work entry that
+// shares its claude's pid with a live private entry: the guess cannot tell
+// the two apart, so neither is its registration and nothing is quit.
+func TestReconcilerIgnoresAStaleEntryInAGuessedProfile(t *testing.T) {
+	h := newProfileHost(t, "private=~/.claude-private,work=~/.claude", "work", map[string]int{sessX: 4242})
+	fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+	h.register(t, ".claude-private", sessX, sessX, 7777, "")
+	h.register(t, ".claude", sessZ, sessZ, 7777, "session_stale")
+	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.reconcile(t); got != "" {
+		t.Errorf("killed = %q, want nothing: the guess picked a stale entry", got)
+	}
+}
+
 // With an unambiguous live registration, a session's profile is the one it
 // registered in, everywhere: in the listing and in each profile's view.
 func TestListShowsTheRegisteredProfile(t *testing.T) {

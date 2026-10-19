@@ -35,6 +35,8 @@ type Session struct {
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
+
+	by resolvedBy // how Profile was found
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -212,7 +214,8 @@ func (m *Manager) Create(dir, prof string) (Session, error) {
 	}
 
 	for i := 0; i < 10; i++ {
-		if s, ok, _ := m.Get(id); ok {
+		if s, ok := m.running(id); ok {
+			moveTo(&s, p)
 			m.record(&s, cwd, p)
 			s.NeedsTrust = needsTrust
 			return s, nil
@@ -273,11 +276,8 @@ func lastActiveIn(home, id string) string {
 // running and whose on-disk log still exists. Stopped entries carry live titles
 // and Status "Stopped". A nil store yields just the running sessions.
 func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
-	running, err := m.List()
-	if err != nil {
-		return nil, err
-	}
-	m.annotateLive(running)
+	running, c := m.list()
+	m.annotateLive(running, c)
 	if store == nil {
 		return running, nil
 	}
@@ -320,11 +320,11 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 // needs a restart to pick up an upgrade) and, when claude has moved the session
 // onto a new conversation id, that conversation's title and last-active time.
 // It also persists each session's current conversation (see noteConv).
-func (m *Manager) annotateLive(running []Session) {
+func (m *Manager) annotateLive(running []Session, c *regCache) {
 	if len(running) == 0 {
 		return
 	}
-	live := m.liveIndex()
+	live := m.liveIndex(c)
 	installed := m.Version()
 	for i := range running {
 		s := &running[i]
@@ -351,11 +351,11 @@ func (m *Manager) annotateLive(running []Session) {
 // session whose claude registered under a different id (a resumed session
 // registers under the conversation it resumed) is still found.
 func (m *Manager) LiveRegistrations() map[string]Registration {
-	running, _ := m.List()
+	running, c := m.list()
 	if len(running) == 0 {
 		return nil
 	}
-	live := m.liveIndex()
+	live := m.liveIndex(c)
 	out := make(map[string]Registration, len(running))
 	for _, s := range running {
 		if info := live(s); info.Known {
@@ -366,19 +366,22 @@ func (m *Manager) LiveRegistrations() map[string]Registration {
 }
 
 // SyncConversations persists the conversation each running session is
-// currently in, so one that later stops without warning (crash, host reboot)
-// still resumes where it left off. Cheap; meant to be called periodically.
+// currently in, and the profile it registered in, so one that later stops
+// without warning (crash, host reboot) still resumes where it left off. Cheap;
+// meant to be called periodically.
 func (m *Manager) SyncConversations() {
 	if m.Store == nil {
 		return
 	}
-	running, _ := m.List()
+	running, c := m.list()
 	if len(running) == 0 {
 		return
 	}
-	live := m.liveIndex()
+	live := m.liveIndex(c)
 	for _, s := range running {
-		m.noteConv(s.ID, live(s).Conv)
+		info := live(s)
+		m.noteConv(s.ID, info.Conv)
+		m.noteProfile(s, info)
 	}
 }
 
@@ -463,9 +466,7 @@ func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	own := m.profileOf(id)
 	if prof != "" && !m.hasConv(own, id) {
 		// Not found comes before any check of prof, as it would without one.
-		if _, running, err := m.Get(id); err != nil {
-			return Session{}, err
-		} else if !running {
+		if _, running := m.running(id); !running {
 			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
 		}
 	}
@@ -499,10 +500,10 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 
 	// Already running? Resuming would launch a second claude against the same
 	// session id — refuse and hand back the live session so the caller can 409.
-	if s, ok, err := m.Get(id); err != nil {
-		return Session{}, err
-	} else if ok {
-		return s, ErrAlreadyRunning
+	if s, ok := m.running(id); ok {
+		one := []Session{s}
+		m.registeredProfiles(one, &regCache{m: m})
+		return one[0], ErrAlreadyRunning
 	}
 
 	// The session must exist on disk to resume. When its profile has no dir we
@@ -563,7 +564,8 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 	}
 
 	for i := 0; i < 10; i++ {
-		if s, ok, _ := m.Get(id); ok {
+		if s, ok := m.running(id); ok {
+			moveTo(&s, p)
 			m.record(&s, cwd, p)
 			noteConv()
 			s.NeedsTrust = needsTrust
@@ -692,21 +694,50 @@ func scrubEnv(cmd *exec.Cmd, p profile.Profile) {
 // List returns all running sessions owned by this manager, each in its
 // profile: the one its claude registered in, else its resolved one.
 func (m *Manager) List() ([]Session, error) {
+	sessions, _ := m.list()
+	return sessions, nil
+}
+
+// list is List, with the registry cache it used, so the rest of the caller's
+// operation reads the registries and the process table no second time.
+func (m *Manager) list() ([]Session, *regCache) {
+	c := &regCache{m: m}
+	sessions := m.screens()
+	m.registeredProfiles(sessions, c)
+	return sessions, c
+}
+
+// screens returns the running sessions, each in its resolved profile, without
+// reading any registry: enough to tell whether a session runs.
+func (m *Manager) screens() []Session {
 	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
 	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
-	sessions := m.parseSessions(string(out))
-	m.registeredProfiles(sessions)
-	return sessions, nil
+	return m.parseSessions(string(out))
+}
+
+// running returns session id from screens, if it runs.
+func (m *Manager) running(id string) (Session, bool) {
+	return find(m.screens(), id)
+}
+
+// find returns the session with id among sessions.
+func find(sessions []Session, id string) (Session, bool) {
+	for _, s := range sessions {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return Session{}, false
 }
 
 // registeredProfiles puts each running session whose claude has a
 // registration (see regIndex) in the profile it registered in, so every
 // caller sees one profile for it. With one profile there is nothing to move.
-func (m *Manager) registeredProfiles(sessions []Session) {
+func (m *Manager) registeredProfiles(sessions []Session, c *regCache) {
 	if !m.Profiles.Multi() || len(sessions) == 0 {
 		return
 	}
-	ix := m.regIndex()
+	ix := c.index()
 	for i := range sessions {
 		s := &sessions[i]
 		r, ok, _, _ := ix.lookup(*s, s.Profile)
@@ -717,9 +748,18 @@ func (m *Manager) registeredProfiles(sessions []Session) {
 		if err != nil {
 			continue
 		}
-		s.Profile = p.Name
-		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
+		moveTo(s, p)
+		s.by = byRegistry
 	}
+}
+
+// moveTo puts s in profile p, reading its title and last-active time there.
+func moveTo(s *Session, p profile.Profile) {
+	if s.Profile == p.Name {
+		return
+	}
+	s.Profile = p.Name
+	s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 }
 
 // parseSessions turns `screen -ls` output into our sessions (prefix-scoped,
@@ -739,8 +779,8 @@ func (m *Manager) parseSessions(out string) []Session {
 		if !ok || !m.ValidID(id) {
 			continue
 		}
-		p := m.profileOf(id)
-		s := Session{ID: id, Screen: name, PID: pid, Title: titleIn(p.Dir, id), LastActive: lastActiveIn(p.Dir, id), Profile: p.Name}
+		p, by := m.resolveProfile(id)
+		s := Session{ID: id, Screen: name, PID: pid, Title: titleIn(p.Dir, id), LastActive: lastActiveIn(p.Dir, id), Profile: p.Name, by: by}
 		switch {
 		case strings.Contains(line, "(Detached)"):
 			s.Status = "Detached"
@@ -757,33 +797,45 @@ func (m *Manager) parseSessions(out string) []Session {
 
 // Get returns the session for the given claude session id, if running.
 func (m *Manager) Get(id string) (Session, bool, error) {
-	sessions, err := m.List()
-	if err != nil {
-		return Session{}, false, err
-	}
-	for _, s := range sessions {
-		if s.ID == id {
-			return s, true, nil
-		}
-	}
-	return Session{}, false, nil
+	s, ok, _ := m.get(id)
+	return s, ok, nil
+}
+
+// get is Get, with the registry cache it used (see list).
+func (m *Manager) get(id string) (Session, bool, *regCache) {
+	sessions, c := m.list()
+	s, ok := find(sessions, id)
+	return s, ok, c
 }
 
 // Kill terminates the session. The bool reports whether it existed.
 func (m *Manager) Kill(id string) (bool, error) {
-	s, ok, err := m.Get(id)
-	if err != nil || !ok {
-		return false, err
+	s, ok, c := m.get(id)
+	if !ok {
+		return false, nil
 	}
-	// Last chance to learn which conversation the session is in: once the
-	// process is gone only the Store remembers, and Resume depends on it.
+	return m.stop(s, c)
+}
+
+// stop is Kill for s, which get found running with registry cache c.
+func (m *Manager) stop(s Session, c *regCache) (bool, error) {
+	var info liveInfo
 	if m.Store != nil {
-		m.noteConv(id, m.liveIndex()(s).Conv)
+		info = m.liveIndex(c)(s)
 	}
-	if out, err := execCommand(m.ScreenBin, "-S", m.screenName(id), "-X", "quit").CombinedOutput(); err != nil {
-		return true, fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
+	return true, m.kill(s, info)
+}
+
+// kill quits running session s, whose claude liveIndex found as info. Last
+// chance to learn which conversation and profile the session is in: once the
+// process is gone only the Store remembers, and Resume depends on both.
+func (m *Manager) kill(s Session, info liveInfo) error {
+	m.noteConv(s.ID, info.Conv)
+	m.noteProfile(s, info)
+	if out, err := execCommand(m.ScreenBin, "-S", m.screenName(s.ID), "-X", "quit").CombinedOutput(); err != nil {
+		return fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return true, nil
+	return nil
 }
 
 // titleIn reads the current display name claude persists for a session. The

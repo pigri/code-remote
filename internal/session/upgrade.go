@@ -106,10 +106,7 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 		return res, nil
 	}
 
-	running, err := m.List()
-	if err != nil {
-		return res, err
-	}
+	running, c := m.list()
 	if len(ids) > 0 {
 		byID := make(map[string]Session, len(running))
 		for _, s := range running {
@@ -124,7 +121,7 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 			}
 		}
 	}
-	live := m.liveIndex()
+	live := m.liveIndex(c)
 	for _, s := range running {
 		info := live(s)
 		reg, known := info.Reg, info.Known
@@ -182,10 +179,7 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	s, running, err := m.Get(id)
-	if err != nil {
-		return Session{}, err
-	}
+	s, running, c := m.get(id)
 	var own profile.Profile
 	if running {
 		own = m.sessionProfile(s)
@@ -203,7 +197,7 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 	if !running {
 		return m.resume(id, m.storedConv(p.Dir, id), dir, p)
 	}
-	return m.restart(s, m.liveIndex()(s), dir, p)
+	return m.restart(s, m.liveIndex(c)(s), dir, p)
 }
 
 // restart is RestartIn for a session known to be running in profile p; info is
@@ -223,12 +217,14 @@ func (m *Manager) restart(s Session, info liveInfo, dir string, p profile.Profil
 	// second claude opens the same conversation.
 	pid := info.Reg.PID
 
-	if _, err := m.Kill(id); err != nil {
-		return Session{}, err
+	if _, up := m.running(id); up {
+		if err := m.kill(s, info); err != nil {
+			return Session{}, err
+		}
 	}
 	deadline := time.Now().Add(stopTimeout)
 	for {
-		_, alive, _ := m.Get(id)
+		_, alive := m.running(id)
 		if !alive && !pidAlive(pid) {
 			break
 		}
@@ -266,8 +262,8 @@ var resumeArgRe = regexp.MustCompile(`--(?:resume|session-id)[ =]([0-9a-f-]{36})
 // the process's command line (what it was launched with); the session id
 // itself. Candidates without an on-disk log are passed over, so Conv is always
 // something that can be resumed if anything is.
-func (m *Manager) liveIndex() func(Session) liveInfo {
-	ix := m.regIndex()
+func (m *Manager) liveIndex(c *regCache) func(Session) liveInfo {
+	ix := c.index()
 	return func(s Session) liveInfo {
 		prof := m.sessionProfile(s)
 		home := prof.Dir
@@ -308,6 +304,21 @@ type regIndex struct {
 	child       map[string]proc // screen pid -> its child
 }
 
+// regCache builds a regIndex on first use and keeps it, so one operation
+// reads the registries and the process table at most once.
+type regCache struct {
+	m  *Manager
+	ix *regIndex
+}
+
+func (c *regCache) index() regIndex {
+	if c.ix == nil {
+		ix := c.m.regIndex()
+		c.ix = &ix
+	}
+	return *c.ix
+}
+
 // regIndex reads every profile's registry and the process table once.
 func (m *Manager) regIndex() regIndex {
 	regs, _ := m.Registrations()
@@ -341,31 +352,37 @@ func (m *Manager) regIndex() regIndex {
 }
 
 // lookup finds running session s's claude process and its registration, for
-// a session in profile prof: by the process's pid, else by s's id.
+// a session in profile prof: by the process's pid, else by s's id. When s's
+// profile is a guess (see resolvedBy), so is prof.
 func (ix regIndex) lookup(s Session, prof string) (reg Registration, known bool, p proc, hasProc bool) {
+	guess := s.by == byGuess
 	p, hasProc = ix.child[s.PID]
 	hasProc = hasProc && s.PID != ""
 	if hasProc {
-		if reg, known = pickReg(ix.byPID[p.pid], prof); known {
+		if reg, known = pickReg(ix.byPID[p.pid], prof, guess); known {
 			return reg, known, p, hasProc
 		}
 	}
-	reg, known = pickReg(ix.byID[s.ID], prof)
+	reg, known = pickReg(ix.byID[s.ID], prof, guess)
 	return reg, known, p, hasProc
 }
 
 // pickReg is the registration among regs, which share a pid or a session id,
 // for a session in profile prof. Within one profile the last read wins. Across
-// profiles only an entry in prof does: a stale file left by a crashed claude
-// can share a live claude's pid, so an entry in another profile proves
-// nothing, and none is picked.
-func pickReg(regs []Registration, prof string) (Registration, bool) {
+// profiles only an entry in prof does, and only when prof is not a guess: a
+// stale file left by a crashed claude can share a live claude's pid, so an
+// entry in another profile proves nothing, and neither does one in a profile
+// that was guessed. Then none is picked.
+func pickReg(regs []Registration, prof string, guess bool) (Registration, bool) {
 	if len(regs) == 0 {
 		return Registration{}, false
 	}
 	last := regs[len(regs)-1]
 	for _, r := range regs {
 		if r.Profile != last.Profile {
+			if guess {
+				return Registration{}, false
+			}
 			for i := len(regs) - 1; i >= 0; i-- {
 				if regs[i].Profile == prof {
 					return regs[i], true

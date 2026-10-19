@@ -203,6 +203,13 @@ func (d *DB) Profile(uuid string) (string, error) {
 	return p, err
 }
 
+// SetProfile notes the profile a session runs under, leaving the rest of its
+// row alone. A no-op for sessions the mirror doesn't know.
+func (d *DB) SetProfile(uuid, profile string) error {
+	_, err := d.db.Exec(`UPDATE sessions SET profile=? WHERE uuid=?`, profile, uuid)
+	return err
+}
+
 // UpsertSession records/updates the mirrored view, preserving the ledger columns
 // (grace clock, archived_at, resumed_at).
 func (d *DB) UpsertSession(r cloud.SessionRecord) error {

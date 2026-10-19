@@ -624,3 +624,99 @@ func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 		})
 	}
 }
+
+// A session whose row says work while its claude runs in private stays in
+// private once it stops: the stop (or the periodic sync before it) notes the
+// registered profile, so a resume reopens the conversation it was in there.
+func TestStopKeepsTheRegisteredProfile(t *testing.T) {
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	setup := func(t *testing.T) (*Manager, *fakeScreen, *fakeStore, homes) {
+		set, h := twoProfiles(t, "")
+		writeTitledLog(t, h.work, idA, "old work transcript")
+		writeTitledLog(t, h.private, conv, "private conversation")
+		sdir := filepath.Join(h.private, "sessions")
+		if err := os.MkdirAll(sdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		reg := `{"sessionId":"` + conv + `","pid":7777}`
+		if err := os.WriteFile(filepath.Join(sdir, "7777.json"), []byte(reg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --session-id " + idA + "\n", parentEnv: true}
+		withFakeScreen(t, fs)
+		fst := &fakeStore{stored: map[string]string{idA: "work"}}
+		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}, fs, fst, h
+	}
+
+	t.Run("sync", func(t *testing.T) {
+		m, _, fst, _ := setup(t)
+		m.SyncConversations()
+		if fst.stored[idA] != "private" {
+			t.Errorf("stored profile after a sync = %q, want private", fst.stored[idA])
+		}
+	})
+
+	t.Run("kill then resume", func(t *testing.T) {
+		m, fs, _, h := setup(t)
+		if ok, err := m.Kill(idA); !ok || err != nil {
+			t.Fatalf("Kill = %v, %v", ok, err)
+		}
+		s, err := m.Resume(idA)
+		if err != nil {
+			t.Fatalf("Resume = %v, want the private conversation resumed", err)
+		}
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+conv) {
+			t.Fatalf("launches = %q, want one resuming %s", fs.launches, conv)
+		}
+		if v, _ := envValue(fs.cmds[0].Env, "CLAUDE_CONFIG_DIR"); v != h.private || s.Profile != "private" {
+			t.Errorf("resumed in CLAUDE_CONFIG_DIR %q, profile %q; want %q, private", v, s.Profile, h.private)
+		}
+	})
+}
+
+// Each operation reads the registries and the process table at most once,
+// however many times it looks at the running sessions.
+func TestOneRegistryReadPerOperation(t *testing.T) {
+	fastStop(t)
+	for _, tc := range []struct {
+		name     string
+		unlisted bool // the launched screen never shows up, so Create and Resume poll while idA runs
+		op       func(m *Manager) error
+	}{
+		{name: "List", op: func(m *Manager) error { _, err := m.List(); return err }},
+		{name: "Get", op: func(m *Manager) error { _, _, err := m.Get(idA); return err }},
+		{name: "ListAll", op: func(m *Manager) error { _, err := m.ListAll(m.Store.(*fakeStore)); return err }},
+		{name: "LiveRegistrations", op: func(m *Manager) error { m.LiveRegistrations(); return nil }},
+		{name: "SyncConversations", op: func(m *Manager) error { m.SyncConversations(); return nil }},
+		{name: "Kill", op: func(m *Manager) error { _, err := m.Kill(idA); return err }},
+		{name: "ProfileView.Kill", op: func(m *Manager) error {
+			v, err := m.ForProfile("private")
+			if err != nil {
+				return err
+			}
+			_, err = v.Kill(idA)
+			return err
+		}},
+		{name: "Restart", op: func(m *Manager) error { _, err := m.Restart(idA); return err }},
+		{name: "Upgrade", op: func(m *Manager) error { _, err := m.Upgrade(true, true); return err }},
+		{name: "Create", unlisted: true, op: func(m *Manager) error { _, err := m.Create("", "private"); return err }},
+		{name: "Resume", unlisted: true, op: func(m *Manager) error { _, err := m.Resume(idB); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			upgradeHome(t, h.private, idA, "1.0.0", "idle")
+			writeTitledLog(t, h.private, idB, "stopped")
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, version: "1.0.0", updateTo: "2.0.0"}
+			withFakeScreen(t, fs)
+			fst := &fakeStore{stored: map[string]string{idA: "private", idB: "private"}, stopped: []Session{{ID: idB}}}
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+			fs.unlisted = tc.unlisted
+			if err := tc.op(m); err != nil {
+				t.Fatal(err)
+			}
+			if fs.psCalls > 1 {
+				t.Errorf("%s ran ps %d times, want at most once", tc.name, fs.psCalls)
+			}
+		})
+	}
+}
