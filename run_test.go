@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,13 +44,19 @@ func TestRunServesAndShutsDown(t *testing.T) {
 	t.Setenv("SCREEN_BIN", os.Args[0]) // any existing executable resolves LookPath
 	t.Setenv("CLAUDE_BIN", os.Args[0])
 	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0") // ephemeral port
-	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")     // no reconciler/store
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")     // no reconciler
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg) // where the default DB would land
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
 
 	// Pre-cancelled context: run binds the listener then immediately shuts down.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if code := run(ctx); code != 0 {
 		t.Errorf("run graceful shutdown = %d, want 0", code)
+	}
+	if _, err := os.Stat(filepath.Join(xdg, "code-remote")); !os.IsNotExist(err) {
+		t.Errorf("run opened the default session DB: stat err = %v", err)
 	}
 }
 
