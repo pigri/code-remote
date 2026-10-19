@@ -444,6 +444,36 @@ func TestMoveConflictAfterTheStop(t *testing.T) {
 	}
 }
 
+// A conflict found only when a file is put in place reads as one too: API
+// clients tell it by the sentinel at the start of the text. The text names
+// no profile dir.
+func TestMoveConflictAtPublish(t *testing.T) {
+	m, fst, h := moveSetup(t)
+	log := filepath.Join("projects", "repo", idA+".jsonl")
+	orig := beforePublish
+	t.Cleanup(func() { beforePublish = orig })
+	beforePublish = func(to string) {
+		if to == filepath.Join(h.work, log) {
+			writeConv(t, h.work, convFiles{log: "other\n"}, nil)
+		}
+	}
+	fs := &fakeScreen{}
+	withFakeScreen(t, fs)
+	_, err := m.ResumeIn(idA, "", "work")
+	if !errors.Is(err, ErrMoveConflict) || !strings.HasPrefix(err.Error(), ErrMoveConflict.Error()) {
+		t.Fatalf("err = %v, want it to start with %q", err, ErrMoveConflict)
+	}
+	if strings.Contains(err.Error(), h.work) || strings.Contains(err.Error(), h.private) {
+		t.Errorf("err = %v names a profile dir", err)
+	}
+	if len(fs.launches) != 0 || fst.stored[idA] != "private" {
+		t.Errorf("launched %v, stored %q; want nothing launched, private kept", fs.launches, fst.stored[idA])
+	}
+	if got := tree(t, h.work); !mapsEqual(got, map[string]string{"projects": "/", "projects/repo": "/", log: "other\n"}) {
+		t.Errorf("work = %v, want only the file that appeared", got)
+	}
+}
+
 // The conversation copied is the one resume uses: the Store's conv_id.
 func TestMoveCopiesTheStoredConversation(t *testing.T) {
 	m, fst, h := moveSetup(t)

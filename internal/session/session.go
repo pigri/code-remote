@@ -655,6 +655,9 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	if move {
 		var err error
 		if undo, err = cp.run(); err != nil {
+			if errors.Is(err, ErrMoveConflict) {
+				return Session{}, fmt.Errorf("%w (moving to profile %q)", err, p.Name)
+			}
 			return Session{}, fmt.Errorf("copy the conversation to profile %q: %w", p.Name, err)
 		}
 	}
