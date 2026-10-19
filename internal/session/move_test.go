@@ -204,7 +204,7 @@ func TestCopyConvCleansUpAPartialCopy(t *testing.T) {
 	}
 }
 
-// A copy that fails at its rename leaves no temp file behind.
+// A copy that fails to put a file in place leaves no temp file behind.
 func TestCopyConvLeavesNoTempFile(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	writeConv(t, src, sidecarConv(convX), nil)
@@ -215,7 +215,7 @@ func TestCopyConvLeavesNoTempFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A dir where the transcript goes, made after the plan, fails its rename,
+	// A dir where the transcript goes, made after the plan, fails its link,
 	// which comes after the sidecar's.
 	if err := os.Mkdir(filepath.Join(dst, "projects", "repo", convX+".jsonl"), 0o700); err != nil {
 		t.Fatal(err)
@@ -226,6 +226,98 @@ func TestCopyConvLeavesNoTempFile(t *testing.T) {
 	want := map[string]string{"projects": "/", "projects/repo": "/", "projects/repo/" + convX + ".jsonl": "/"}
 	if got := tree(t, dst); !mapsEqual(got, want) {
 		t.Errorf("target = %v, want only the dir in the way: %v", got, want)
+	}
+}
+
+// A file that appears in the target between the plan and the copy is never
+// replaced: the same content is accepted and left to whoever made it, other
+// content is ErrMoveConflict.
+func TestCopyConvNeverReplacesAFileThatAppears(t *testing.T) {
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	for _, c := range []struct{ name, body string }{
+		{"identical", sidecarConv(convX)[log]},
+		{"different", "other\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			writeConv(t, src, sidecarConv(convX), nil)
+			cp, err := planCopy(src, dst, "repo", convX)
+			if err != nil {
+				t.Fatal(err)
+			}
+			orig := beforePublish
+			t.Cleanup(func() { beforePublish = orig })
+			beforePublish = func(to string) {
+				if to == filepath.Join(dst, log) {
+					writeConv(t, dst, convFiles{log: c.body}, nil)
+				}
+			}
+			undo, err := cp.run()
+			if c.name == "different" {
+				if !errors.Is(err, ErrMoveConflict) {
+					t.Fatalf("run err = %v, want ErrMoveConflict", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("run: %v", err)
+				}
+				undo()
+			}
+			want := map[string]string{"projects": "/", "projects/repo": "/", log: c.body}
+			if got := tree(t, dst); !mapsEqual(got, want) {
+				t.Errorf("target = %v, want only the file that appeared, as it was: %v", got, want)
+			}
+		})
+	}
+}
+
+// A dir that appears in the target between the plan and the copy is used,
+// and left to whoever made it.
+func TestCopyConvUsesADirThatAppears(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeConv(t, src, convFiles{filepath.Join("projects", "repo", convX+".jsonl"): "x\n"}, nil)
+	cp, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dst, "projects", "repo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	undo, err := cp.run()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	undo()
+	if got := tree(t, dst); !mapsEqual(got, map[string]string{"projects": "/", "projects/repo": "/"}) {
+		t.Errorf("target after undo = %v, want the dirs that appeared kept", got)
+	}
+}
+
+// A symlink in A is not copied: neither a sidecar entry nor the transcript.
+func TestCopyConvRefusesSymlinks(t *testing.T) {
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	side := filepath.Join("projects", "repo", convX, "tool-results", "a.txt")
+	for _, rel := range []string{side, log} {
+		t.Run(filepath.Base(rel), func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			writeConv(t, src, sidecarConv(convX), nil)
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.WriteFile(target, []byte("outside\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(src, rel)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(src, rel)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := copyConv(t, src, dst, "repo", convX); err == nil {
+				t.Error("copyConv with a symlink = nil, want a refusal")
+			}
+			if got := tree(t, dst); len(got) != 0 {
+				t.Errorf("target = %v, want nothing copied", got)
+			}
+		})
 	}
 }
 
@@ -315,6 +407,43 @@ func TestMoveBetweenProfiles(t *testing.T) {
 	}
 }
 
+// A move after claude moved the session onto another conversation keeps the
+// title, which is set under the session id.
+func TestMoveKeepsTheTitleOfTheSessionID(t *testing.T) {
+	m, fst, _ := moveSetup(t)
+	writeConv(t, m.profiles()[1].Dir, convFiles{filepath.Join("projects", "other", convX+".jsonl"): "{}\n"}, nil)
+	fst.convs = map[string]string{idA: convX}
+	fs := &fakeScreen{}
+	withFakeScreen(t, fs)
+	if _, err := m.ResumeIn(idA, "", "work"); err != nil {
+		t.Fatal(err)
+	}
+	l, _ := m.List()
+	if len(l) != 1 || l[0].Profile != "work" || l[0].Title != "private title" {
+		t.Errorf("listed after the move = %+v, want it in work, titled \"private title\"", l)
+	}
+}
+
+// A conflict that appears while the session stops is still refused: nothing
+// is launched or overwritten, and the Store keeps A.
+func TestMoveConflictAfterTheStop(t *testing.T) {
+	m, fst, h := moveSetup(t)
+	log := filepath.Join("projects", "repo", idA+".jsonl")
+	fs := &fakeScreen{created: []string{"test-rc-private-" + idA}}
+	fs.onKill = func() { writeConv(t, h.work, convFiles{log: "other\n"}, nil) }
+	withFakeScreen(t, fs)
+	if _, err := m.RestartIn(idA, "", "work"); !errors.Is(err, ErrMoveConflict) {
+		t.Fatalf("err = %v, want ErrMoveConflict", err)
+	}
+	if len(fs.killed) != 1 || len(fs.launches) != 0 || fst.stored[idA] != "private" {
+		t.Errorf("killed %v, launched %v, stored %q; want stopped, nothing launched, private kept",
+			fs.killed, fs.launches, fst.stored[idA])
+	}
+	if got := tree(t, h.work); !mapsEqual(got, map[string]string{"projects": "/", "projects/repo": "/", log: "other\n"}) {
+		t.Errorf("work = %v, want only the conflicting file", got)
+	}
+}
+
 // The conversation copied is the one resume uses: the Store's conv_id.
 func TestMoveCopiesTheStoredConversation(t *testing.T) {
 	m, fst, h := moveSetup(t)
@@ -325,9 +454,9 @@ func TestMoveCopiesTheStoredConversation(t *testing.T) {
 	if _, err := m.ResumeIn(idA, "", "work"); err != nil {
 		t.Fatal(err)
 	}
-	got := tree(t, filepath.Join(h.work, "projects", "repo"))
-	if !mapsEqual(got, map[string]string{convX + ".jsonl": "{}\n"}) {
-		t.Errorf("work = %v, want only %s copied", got, convX)
+	// The session id's own log comes along, for its title.
+	if got, want := tree(t, h.work), tree(t, h.private); !mapsEqual(got, want) {
+		t.Errorf("work = %v, want %s and %s copied: %v", got, convX, idA, want)
 	}
 	// Its title falls back to the one set under the session id, read in A.
 	if want := "--resume " + convX + " --fork-session --remote-control=private title"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {

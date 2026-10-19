@@ -200,16 +200,19 @@ after the session's title (its id when it has none). Passing
 moves a session to another profile, so it comes back under the other Claude
 account. The session is stopped, and its conversation is **copied**, with its
 file modes: `projects/<project>/<conv>.jsonl` and its `<conv>/` dir (subagent
-transcripts, tool results). The old profile keeps its copy, so a failed move
+transcripts, tool results), plus the session id's own log when Claude has moved
+the session onto another conversation, since its title is set there. The old
+profile keeps its copy, so a failed move
 loses nothing. Claude then resumes it in the new profile as a fork, like a move
 to another directory, under that profile's screen name and environment. The
 database records the new profile only once that launch has started; a failed
 launch removes the copy and leaves the session stopped in the old profile. The
-old Remote Control session in the first account goes idle, and that account's
-sync archives it after its grace period.
+old Remote Control session in the first account goes idle. Nothing archives it:
+it stays in that account's Claude apps until it is archived there by hand.
 
 A move is refused with `409` when the new profile already holds a different
-copy of a file it would copy; nothing is overwritten. An identical copy is
+copy of a file it would copy, even one that appears during the move; nothing
+is overwritten. An identical copy is
 accepted, so a move can be repeated. Naming the session's own profile without
 a `dir` is a plain restart.
 

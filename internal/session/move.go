@@ -28,8 +28,8 @@ type convCopy struct {
 
 // copyEntry is one dir or file of a convCopy, with the mode it gets.
 type copyEntry struct {
-	src, dst string
-	mode     fs.FileMode
+	rel, src, dst string
+	mode          fs.FileMode
 }
 
 // plainName reports whether name is one path element that stays where it is
@@ -44,17 +44,22 @@ func plainName(name string) bool {
 // exists with the same content is left as it is; one with other content is
 // ErrMoveConflict.
 func planCopy(src, dst, slug, conv string) (*convCopy, error) {
+	c := &convCopy{}
+	return c, c.add(src, dst, slug, conv)
+}
+
+// add is planCopy into c.
+func (c *convCopy) add(src, dst, slug, conv string) error {
 	if !plainName(slug) || !plainName(conv) {
-		return nil, fmt.Errorf("not copying conversation %q of project %q: not a plain file name", conv, slug)
+		return fmt.Errorf("not copying conversation %q of project %q: not a plain file name", conv, slug)
 	}
 	if src == "" || dst == "" {
-		return nil, errors.New("a move between profiles needs both profile dirs")
+		return errors.New("a move between profiles needs both profile dirs")
 	}
-	c := &convCopy{}
 	rel := filepath.Join("projects", slug)
 	for _, d := range []string{"projects", rel} {
 		if err := c.addDir(src, dst, d); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	side := filepath.Join(rel, conv)
@@ -73,15 +78,16 @@ func planCopy(src, dst, slug, conv string) (*convCopy, error) {
 			return fmt.Errorf("not copying %s: not a regular file", r)
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
 	} else if !os.IsNotExist(err) {
-		return nil, err
+		return err
 	}
-	return c, c.addFile(src, dst, filepath.Join(rel, conv+".jsonl"))
+	return c.addFile(src, dst, filepath.Join(rel, conv+".jsonl"))
 }
 
-// addDir plans dir rel of src for a target that lacks it.
+// addDir plans dir rel of src for a target that lacks it. A dir planned
+// twice is made once (see run).
 func (c *convCopy) addDir(src, dst, rel string) error {
 	from, to := filepath.Join(src, rel), filepath.Join(dst, rel)
 	sfi, err := os.Stat(from)
@@ -90,7 +96,7 @@ func (c *convCopy) addDir(src, dst, rel string) error {
 	}
 	switch dfi, err := os.Stat(to); {
 	case os.IsNotExist(err):
-		c.dirs = append(c.dirs, copyEntry{from, to, sfi.Mode().Perm()})
+		c.dirs = append(c.dirs, copyEntry{rel, from, to, sfi.Mode().Perm()})
 		return nil
 	case err != nil:
 		return err
@@ -110,11 +116,22 @@ func (c *convCopy) addFile(src, dst, rel string) error {
 	if !sfi.Mode().IsRegular() {
 		return fmt.Errorf("not copying %s: not a regular file", rel)
 	}
-	differs := fmt.Errorf("%w: %s differs there; not overwriting it", ErrMoveConflict, rel)
-	switch dfi, err := os.Lstat(to); {
-	case os.IsNotExist(err):
-		c.files = append(c.files, copyEntry{from, to, sfi.Mode().Perm()})
+	if _, err := os.Lstat(to); os.IsNotExist(err) {
+		c.files = append(c.files, copyEntry{rel, from, to, sfi.Mode().Perm()})
 		return nil
+	}
+	return sameFile(rel, from, to)
+}
+
+// sameFile is nil when file to has the content of from, else ErrMoveConflict
+// naming rel.
+func sameFile(rel, from, to string) error {
+	differs := fmt.Errorf("%w: %s differs there; not overwriting it", ErrMoveConflict, rel)
+	sfi, err := os.Lstat(from)
+	if err != nil {
+		return err
+	}
+	switch dfi, err := os.Lstat(to); {
 	case err != nil:
 		return err
 	case !dfi.Mode().IsRegular() || dfi.Size() != sfi.Size():
@@ -134,8 +151,10 @@ func (c *convCopy) addFile(src, dst, rel string) error {
 	return nil
 }
 
-// run carries out the copy. On failure it removes what it created and
-// returns the error; on success, undo does that.
+// run carries out the copy. An entry that appeared in the target since the
+// plan is never replaced or claimed: a dir is used, a file must have the same
+// content (see copyFile). On failure run removes what it created and returns
+// the error; on success, undo does that.
 func (c *convCopy) run() (undo func(), err error) {
 	var made []string
 	remove := func() {
@@ -144,7 +163,9 @@ func (c *convCopy) run() (undo func(), err error) {
 		}
 	}
 	for _, d := range c.dirs {
-		if err := os.Mkdir(d.dst, d.mode); err != nil {
+		if err := os.Mkdir(d.dst, d.mode); errors.Is(err, fs.ErrExist) {
+			continue
+		} else if err != nil {
 			remove()
 			return nil, err
 		}
@@ -155,30 +176,39 @@ func (c *convCopy) run() (undo func(), err error) {
 		}
 	}
 	for _, f := range c.files {
-		if err := copyFile(f.src, f.dst, f.mode); err != nil {
+		created, err := copyFile(f)
+		if err != nil {
 			remove()
 			return nil, err
 		}
-		made = append(made, f.dst)
+		if created {
+			made = append(made, f.dst)
+		}
 	}
 	return remove, nil
 }
 
-// copyFile copies src to dst, which does not exist, with mode: it writes a
-// temp file beside dst and renames it into place, so dst is never partial.
-func copyFile(src, dst string, mode fs.FileMode) error {
-	in, err := os.Open(src)
+// beforePublish runs just before copyFile puts a file in place; a test seam.
+var beforePublish = func(dst string) {}
+
+// copyFile copies f with its mode. It writes a temp file beside f.dst and
+// links it into place, which never replaces a file, so f.dst is never partial
+// or overwritten. A file already at f.dst is kept when it has the same
+// content (created is false) and is ErrMoveConflict otherwise.
+func copyFile(f copyEntry) (created bool, err error) {
+	in, err := os.Open(f.src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer in.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(f.dst), "."+filepath.Base(f.dst)+".tmp-*")
 	if err != nil {
-		return err
+		return false, err
 	}
+	defer os.Remove(tmp.Name())
 	_, err = io.Copy(tmp, in)
 	if err == nil {
-		err = tmp.Chmod(mode)
+		err = tmp.Chmod(f.mode)
 	}
 	if err == nil {
 		err = tmp.Sync()
@@ -186,24 +216,33 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), dst)
-	}
 	if err != nil {
-		_ = os.Remove(tmp.Name())
+		return false, err
 	}
-	return err
+	beforePublish(f.dst)
+	if err := os.Link(tmp.Name(), f.dst); errors.Is(err, fs.ErrExist) {
+		return false, sameFile(f.rel, f.src, f.dst)
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// planMove checks that conversation conv, logged in profile from, can be
-// copied into profile to, and returns the copy. Its errors start with the
-// sentinel's text, which the API's clients match on.
-func (m *Manager) planMove(from, to profile.Profile, conv string) (*convCopy, error) {
+// planMove checks that session id's conversation conv, logged in profile
+// from, can be copied into profile to, and returns the copy. When conv is not
+// id, id's own log is copied too, when it has one: the session's title is set
+// there. Its errors start with the sentinel's text, which the API's clients
+// match on.
+func (m *Manager) planMove(id string, from, to profile.Profile, conv string) (*convCopy, error) {
 	log := logIn(from.Dir, conv)
 	if log == "" {
 		return nil, fmt.Errorf("%w: no claude session log for %s in profile %q", ErrNotResumable, conv, from.Name)
 	}
-	c, err := planCopy(from.Dir, to.Dir, filepath.Base(filepath.Dir(log)), conv)
+	c := &convCopy{}
+	err := c.add(from.Dir, to.Dir, filepath.Base(filepath.Dir(log)), conv)
+	if own := logIn(from.Dir, id); err == nil && conv != id && own != "" {
+		err = c.add(from.Dir, to.Dir, filepath.Base(filepath.Dir(own)), id)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w (moving to profile %q)", err, to.Name)
 	}

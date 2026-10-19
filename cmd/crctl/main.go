@@ -796,8 +796,8 @@ Usage:
                       one moves the session there: its conversation is copied
                       into that profile and the session comes back under the
                       other account, as a new Remote Control session. The old
-                      one in the first account is archived by that account's
-                      sync once its grace period has passed
+                      one stays in the first account's Claude apps until it
+                      is archived there by hand
   --trust             with new/resume/restart: mark the session's directory as a
                       trusted folder for claude first, so a detached session
                       doesn't wait at the trust prompt (or CLAUDE_REMOTE_TRUST_DIRS=1)

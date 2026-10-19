@@ -223,7 +223,7 @@ func (m *Manager) restartAs(s Session, info liveInfo, dir string, from, p profil
 		return Session{}, fmt.Errorf("%w: no claude session log for %s (not restarting)", ErrNotResumable, conv)
 	}
 	if from.Name != p.Name {
-		if _, err := m.planMove(from, p, conv); err != nil {
+		if _, err := m.planMove(id, from, p, conv); err != nil {
 			return Session{}, err
 		}
 	}

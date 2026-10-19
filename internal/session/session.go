@@ -619,7 +619,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	var cp *convCopy
 	if move {
 		var err error
-		if cp, err = m.planMove(from, p, conv); err != nil {
+		if cp, err = m.planMove(id, from, p, conv); err != nil {
 			return Session{}, err
 		}
 	}
