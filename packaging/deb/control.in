@@ -4,7 +4,7 @@ Architecture: __ARCH__
 Maintainer: pigri <david@papp.ai>
 Section: utils
 Priority: optional
-Depends: screen
+Depends: screen, procps
 Homepage: https://github.com/pigri/code-remote
 Description: Remote control for detached Claude Code sessions
  REST API and the crctl CLI to launch and manage detached Claude Code
