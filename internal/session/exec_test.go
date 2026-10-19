@@ -623,7 +623,7 @@ func TestResumeInMovesSession(t *testing.T) {
 		}
 		// A move forks the conversation so claude registers it afresh from the
 		// new directory; which conversation that is isn't known yet.
-		if want := "--resume " + id + " --fork-session --remote-control " + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
+		if want := "--resume " + id + " --fork-session --remote-control=" + id; len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 			t.Errorf("launches = %v, want one with %q", fs.launches, want)
 		}
 		if c := fst.convs[id]; c != "" {
@@ -799,8 +799,51 @@ func TestResumeKeepsTitle(t *testing.T) {
 		if _, err := m.Resume(id); err != nil {
 			t.Fatalf("Resume: %v", err)
 		}
-		if want := "--resume " + id + " --remote-control " + id; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+		if want := "--resume " + id + " --remote-control=" + id; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
 			t.Errorf("launches = %v, want one ending in %q", fs.launches, want)
 		}
 	})
+}
+
+func TestRCName(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	for _, tc := range []struct{ name, title, want string }{
+		{"plain", "My Title", "My Title"},
+		{"empty falls back to the id", "", id},
+		{"whitespace only", " \t ", id},
+		{"controls only", "\x00\n\r", id},
+		{"NUL dropped", "a\x00b", "ab"},
+		{"newline and tab dropped", "line1\nline2\tx\r", "line1line2x"},
+		{"C1 dropped", "a\u0085b", "ab"},
+		{"trimmed", "  My Title \n", "My Title"},
+		{"leading dash kept", "- My Title", "- My Title"},
+		{"multibyte kept", "Ünï ✓", "Ünï ✓"},
+		{"capped in runes", strings.Repeat("é", rcNameMax+50), strings.Repeat("é", rcNameMax)},
+		{"capped then trimmed", strings.Repeat("a", rcNameMax-1) + " b", strings.Repeat("a", rcNameMax-1)},
+		{"huge", strings.Repeat("x", 1<<20), strings.Repeat("x", rcNameMax)},
+	} {
+		if got := rcName(tc.title, id); got != tc.want {
+			t.Errorf("%s: rcName(%q) = %q, want %q", tc.name, tc.title, got, tc.want)
+		}
+	}
+}
+
+func TestResumeLaunchesWithHostileTitle(t *testing.T) {
+	const id = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	home := t.TempDir()
+	upgradeHome(t, home, id, "", "")
+	appendTitle(t, home, id, "ok\\u0000bad")
+	fs, fst := &fakeScreen{}, &fakeStore{}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+	if _, err := m.Resume(id); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if want := "--remote-control=okbad"; len(fs.launches) != 1 || !strings.HasSuffix(fs.launches[0], want) {
+		t.Errorf("launches = %q, want one ending in %q", fs.launches, want)
+	}
+	if len(fst.titles) != 1 || fst.titles[0] != "ok\x00bad" {
+		t.Errorf("recorded titles = %q, want the raw title", fst.titles)
+	}
 }

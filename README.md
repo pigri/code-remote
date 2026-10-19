@@ -447,8 +447,8 @@ auto-archived) but whose on-disk Claude log survives. Resumable rows show
 `Stopped` and a `crctl resume <id>` hint instead of a `screen -r` attach command.
 
 Claude can move a running session onto a new conversation id (e.g. after
-`/clear`). code-remote follows it: the session keeps its id, screen name and
-Remote Control name, while `ls` shows the title and activity of the conversation
+`/clear`). code-remote follows it: the session keeps its id and screen
+name, while `ls` shows the title and activity of the conversation
 it is in now, and `resume`/`restart` reopen that conversation rather than the
 one the session was launched with. The current conversation is noted in the
 SQLite mirror whenever sessions are listed, stopped or restarted, and once a

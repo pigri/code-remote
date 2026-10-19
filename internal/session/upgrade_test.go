@@ -83,7 +83,7 @@ func TestRestart(t *testing.T) {
 		if len(fs.killed) != 1 || len(fs.launches) != 1 {
 			t.Fatalf("killed=%v launches=%v, want one of each", fs.killed, fs.launches)
 		}
-		if want := "--resume " + id + " --remote-control " + id; !strings.Contains(fs.launches[0], want) {
+		if want := "--resume " + id + " --remote-control=" + id; !strings.Contains(fs.launches[0], want) {
 			t.Errorf("relaunch argv %q missing %q", fs.launches[0], want)
 		}
 	})
@@ -108,7 +108,7 @@ func TestRestart(t *testing.T) {
 			t.Fatalf("Restart = %+v, %v", s, err)
 		}
 		// Same screen + Remote Control name, but the live conversation.
-		want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control " + id
+		want := "test-rc-" + id + " claude --resume " + liveID + " --remote-control=" + id
 		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], want) {
 			t.Errorf("relaunch argv %v, want it to contain %q", fs.launches, want)
 		}
@@ -511,7 +511,7 @@ func TestRestartWithoutRegistry(t *testing.T) {
 		if _, err := m.Restart(id); err != nil {
 			t.Fatal(err)
 		}
-		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+argvID+" --remote-control "+id) {
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+argvID+" --remote-control="+id) {
 			t.Errorf("relaunch argv %v, want --resume %s", fs.launches, argvID)
 		}
 	})
@@ -521,7 +521,7 @@ func TestRestartWithoutRegistry(t *testing.T) {
 		if _, err := m.Restart(id); err != nil {
 			t.Fatal(err)
 		}
-		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+storID+" --remote-control "+id) {
+		if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+storID+" --remote-control="+id) {
 			t.Errorf("relaunch argv %v, want --resume %s", fs.launches, storID)
 		}
 	})
