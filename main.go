@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -72,7 +73,7 @@ func run(parent context.Context) int {
 	// One credentials file would sign every profile's sync into one account.
 	if profiles.Multi() && os.Getenv("CLAUDE_REMOTE_CREDENTIALS") != "" {
 		log.Print("CLAUDE_REMOTE_CREDENTIALS cannot be used with CLAUDE_REMOTE_PROFILES: " +
-			"the session sync uses the default profile's own credentials")
+			"each profile's session sync uses its own <dir>/.credentials.json")
 		return 1
 	}
 
@@ -101,7 +102,7 @@ func run(parent context.Context) int {
 		stopped = db
 	}
 
-	sync := startSessionSync(ctx, logger, mgr, db)
+	sessionSync := startSessionSync(ctx, logger, mgr, db)
 
 	// Keep the store's note of each session's current conversation fresh, so a
 	// session that dies without warning (crash, host reboot) still resumes where
@@ -145,7 +146,7 @@ func run(parent context.Context) int {
 	// The workers get their own budget, so a slow Shutdown cannot leave them none.
 	workersCtx, cancelWorkers := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelWorkers()
-	if err := sync.Close(); err != nil {
+	if err := sessionSync.Close(); err != nil {
 		logger.Warn("sync_close", "error", err.Error())
 	}
 	if !convSync.wait(workersCtx) {
@@ -198,9 +199,10 @@ func auditLogger() *slog.Logger {
 	return slog.New(h)
 }
 
-// syncHandle owns the background reconciler's lifecycle. Close waits for the
-// reconciler goroutine to stop; the store it writes to is owned (and closed) by
-// run(). Safe to call on a nil handle.
+// syncHandle owns a background worker's lifecycle: the reconcilers', or the
+// conversation sync's. Close waits for all of its goroutines to stop; the
+// store they write to is owned (and closed) by run(). Safe to call on a nil
+// handle.
 type syncHandle struct {
 	done <-chan struct{}
 }
@@ -233,27 +235,51 @@ func (h *syncHandle) wait(ctx context.Context) bool {
 	}
 }
 
-// startSessionSync launches the background reconciler that polls the Anthropic
-// Sessions API and quits the screen of any session archived (or deleted)
-// server-side. The reconciler stops when ctx is cancelled; the returned handle's
-// Close waits for it. The store (db) is owned by the caller.
+// startSessionSync launches the background reconcilers that poll the Anthropic
+// Sessions API and quit the screen of any session archived (or deleted)
+// server-side: one per profile with credentials, each signed in as that
+// profile's account and seeing only that profile's sessions. They stop when
+// ctx is cancelled; the returned handle's Close waits for every one of them.
+// The store (db) is owned by the caller.
 //
-// It's enabled by default but degrades gracefully: if the OAuth credentials
-// file is absent (e.g. a headless host with no logged-in claude), it logs once
-// and does nothing. Disable explicitly with CLAUDE_REMOTE_SESSION_SYNC=off.
+// It's enabled by default but degrades gracefully: a profile whose OAuth
+// credentials file is absent (e.g. a headless host with no logged-in claude)
+// is logged once and skipped. Disable explicitly with
+// CLAUDE_REMOTE_SESSION_SYNC=off.
 func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Manager, db *store.DB) *syncHandle {
+	recs := sessionReconcilers(logger, mgr, db)
+	if len(recs) == 0 {
+		return nil
+	}
+	var wg sync.WaitGroup
+	for _, rec := range recs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runReconciler(rec, ctx)
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return &syncHandle{done: done}
+}
+
+// runReconciler runs one reconciler until ctx is done; a variable so tests can
+// hold it open.
+var runReconciler = (*cloud.Reconciler).Run
+
+// sessionReconcilers builds the reconciler of each sync target that has a
+// credentials file.
+func sessionReconcilers(logger *slog.Logger, mgr *session.Manager, db *store.DB) []*cloud.Reconciler {
 	if !envBool("CLAUDE_REMOTE_SESSION_SYNC", true) {
 		return nil
 	}
-
-	home, view, err := syncTarget(mgr)
+	targets, err := syncTargets(mgr)
 	if err != nil {
-		logger.Warn("session_sync_disabled", "reason", "no view of the default profile", "error", err.Error())
-		return nil
-	}
-	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(home, ".credentials.json"))
-	if _, err := os.Stat(credsPath); err != nil {
-		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
+		logger.Warn("session_sync_disabled", "reason", "no view of a profile", "error", err.Error())
 		return nil
 	}
 
@@ -275,34 +301,36 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 		}
 	}
 
-	client := &cloud.Client{
-		BaseURL:         envOr("CLAUDE_REMOTE_CLOUD_BASE", cloud.DefaultBaseURL),
-		CredentialsPath: credsPath,
+	var recs []*cloud.Reconciler
+	for _, t := range targets {
+		log := logger
+		if t.profile != "" {
+			log = logger.With("profile", t.profile)
+		}
+		if _, err := os.Stat(t.creds); err != nil {
+			log.Warn("session_sync_disabled", "reason", "no credentials file", "path", t.creds)
+			continue
+		}
+		rec := &cloud.Reconciler{
+			Cloud: &cloud.Client{
+				BaseURL:         envOr("CLAUDE_REMOTE_CLOUD_BASE", cloud.DefaultBaseURL),
+				CredentialsPath: t.creds,
+			},
+			Manager:    t.view,
+			Interval:   interval,
+			Grace:      grace,
+			Log:        log,
+			MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
+		}
+		// Durable session mirror + ledger (owned by run()). Best-effort: when
+		// it's absent the reconciler falls back to its in-memory grace clock.
+		if db != nil {
+			rec.Store = db
+		}
+		log.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", t.creds, "match_title", rec.MatchTitle)
+		recs = append(recs, rec)
 	}
-	rec := &cloud.Reconciler{
-		Cloud:      client,
-		Manager:    view,
-		Interval:   interval,
-		Grace:      grace,
-		Log:        logger,
-		MatchTitle: envBool("CLAUDE_REMOTE_MATCH_TITLE", false),
-	}
-
-	// Durable session mirror + ledger (owned by run()). Best-effort: when it's
-	// absent the reconciler falls back to its in-memory grace clock.
-	h := &syncHandle{}
-	if db != nil {
-		rec.Store = db
-	}
-
-	logger.Info("session_sync_enabled", "interval", interval.String(), "grace", grace.String(), "credentials", credsPath, "match_title", rec.MatchTitle)
-	done := make(chan struct{})
-	h.done = done
-	go func() {
-		defer close(done)
-		rec.Run(ctx)
-	}()
-	return h
+	return recs
 }
 
 // reconcileManager is the slice of *session.Manager the reconciler uses.
@@ -310,23 +338,36 @@ type reconcileManager interface {
 	List() ([]session.Session, error)
 	Kill(id string) (bool, error)
 	Registrations() ([]session.Registration, error)
-	LiveRegistrations() map[string]session.Registration
+	ListLive() ([]session.Session, map[string]session.Registration)
 }
 
-// syncTarget is what the reconciler works on: the claude config dir whose
-// credentials it uses, and the sessions it sees. With several profiles that is
-// the default profile and its sessions only, since another account's sessions
-// would read as deleted in this account's cloud.
-func syncTarget(mgr *session.Manager) (home string, view reconcileManager, err error) {
+// syncTarget is what one reconciler works on: the profile whose account it
+// signs in as, that account's credentials file, and the sessions it sees.
+type syncTarget struct {
+	profile string // "" in single-profile mode
+	creds   string
+	view    reconcileManager
+}
+
+// syncTargets is one target per profile. With several profiles each sees its
+// own profile's sessions only, since another account's sessions would read as
+// deleted in this account's cloud. CLAUDE_REMOTE_CREDENTIALS overrides the
+// credentials of the single profile; run refuses it with several.
+func syncTargets(mgr *session.Manager) ([]syncTarget, error) {
 	if !mgr.Profiles.Multi() {
-		return mgr.ClaudeHome, mgr, nil
+		creds := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(mgr.ClaudeHome, ".credentials.json"))
+		return []syncTarget{{creds: creds, view: mgr}}, nil
 	}
-	def := mgr.Profiles.Default()
-	v, err := mgr.ForProfile(def.Name)
-	if err != nil {
-		return "", nil, err
+	var targets []syncTarget
+	for _, name := range mgr.Profiles.Names() {
+		p, _ := mgr.Profiles.Get(name)
+		v, err := mgr.ForProfile(name)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, syncTarget{profile: name, creds: filepath.Join(p.Dir, ".credentials.json"), view: v})
 	}
-	return def.Dir, v, nil
+	return targets, nil
 }
 
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
