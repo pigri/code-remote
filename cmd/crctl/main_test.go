@@ -457,13 +457,21 @@ func TestHelpers(t *testing.T) {
 		}
 	})
 	t.Run("claudeHome", func(t *testing.T) {
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		t.Setenv("CLAUDE_HOME", "/custom/home")
 		if got := claudeHome(); got != "/custom/home" {
 			t.Errorf("claudeHome = %q, want /custom/home", got)
 		}
 		t.Setenv("CLAUDE_HOME", "")
-		if got := claudeHome(); !contains(got, ".claude") {
-			t.Errorf("claudeHome fallback = %q, want a path ending in .claude", got)
+		t.Setenv("CLAUDE_CONFIG_DIR", "/custom/config")
+		if got := claudeHome(); got != "/custom/config" {
+			t.Errorf("claudeHome with CLAUDE_CONFIG_DIR = %q, want /custom/config", got)
+		}
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		if h, err := os.UserHomeDir(); err == nil {
+			if got, want := claudeHome(), filepath.Join(h, ".claude"); got != want {
+				t.Errorf("claudeHome fallback = %q, want %q", got, want)
+			}
 		}
 	})
 	t.Run("envOr", func(t *testing.T) {

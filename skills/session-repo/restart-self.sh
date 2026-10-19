@@ -8,7 +8,7 @@
 set -euo pipefail
 
 CRCTL=${CRCTL:-crctl}
-SESSIONS_DIR=${SESSIONS_DIR:-${CLAUDE_HOME:-$HOME/.claude}/sessions}
+SESSIONS_DIR=${SESSIONS_DIR:-${CLAUDE_CONFIG_DIR:-${CLAUDE_HOME:-$HOME/.claude}}/sessions}
 IDLE_WAIT=${IDLE_WAIT:-600} # seconds to wait for the session to go idle
 uuid_re='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 

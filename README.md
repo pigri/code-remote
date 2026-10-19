@@ -83,12 +83,12 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_SESSION_PREFIX` | `pigri-dev-remote` | Screen session name prefix (ownership scope) |
 | `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
-| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) are read from |
+| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) and the process registry are read from. `CLAUDE_CONFIG_DIR` takes precedence when set, because the launched claude writes there |
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
 | `CLAUDE_REMOTE_ARCHIVE_GRACE` | `15m` | A session must stay archived this long before its screen is quit (`0` = immediate) |
-| `CLAUDE_REMOTE_CREDENTIALS` | `$CLAUDE_HOME/.credentials.json` | OAuth credentials file (token source for the Sessions API) |
+| `CLAUDE_REMOTE_CREDENTIALS` | `.credentials.json` in the claude home (`$CLAUDE_CONFIG_DIR`, `$CLAUDE_HOME` or `~/.claude`) | OAuth credentials file (token source for the Sessions API) |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 | `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
 | `CLAUDE_REMOTE_DB` | `$XDG_DATA_HOME/code-remote/code-remote.db` | SQLite session mirror + ledger path |
@@ -305,7 +305,7 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | `CLAUDE_REMOTE_API_TOKEN` | remote | bearer token (required when the URL is set) |
 | `CLAUDE_WORKSPACE_ROOT` | local | optional; limits `--dir` to paths under it (unset = any directory) |
 | `CLAUDE_REMOTE_TRUST_DIRS` | local | `1` = always behave as if `--trust` was passed |
-| `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides |
+| `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_CONFIG_DIR` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides (`CLAUDE_CONFIG_DIR` wins over `CLAUDE_HOME`) |
 | `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
 
 `crctl ls` lists **running** sessions plus **resumable** ones — sessions

@@ -18,7 +18,8 @@
 //
 //	CLAUDE_REMOTE_API_URL    if set, use the HTTP API at this base URL (remote mode)
 //	CLAUDE_REMOTE_API_TOKEN  bearer token (required in remote mode)
-//	CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_HOME  (local mode)
+//	CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_CONFIG_DIR,
+//	CLAUDE_HOME  (local mode)
 package main
 
 import (
@@ -561,15 +562,7 @@ func resolveBin(name string) string {
 	return name
 }
 
-func claudeHome() string {
-	if v := os.Getenv("CLAUDE_HOME"); v != "" {
-		return v
-	}
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".claude")
-	}
-	return ""
-}
+func claudeHome() string { return session.DefaultClaudeHome() }
 
 // isTrue reports whether an env value spells "on" (1, true, yes, ...).
 func isTrue(v string) bool {
@@ -619,6 +612,7 @@ Set CLAUDE_REMOTE_API_URL to use a remote API instead:
 Env:
   CLAUDE_REMOTE_API_URL    use the HTTP API at this base URL (remote mode)
   CLAUDE_REMOTE_API_TOKEN  bearer token (required in remote mode)
-  CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_HOME  (local mode)
+  CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_CONFIG_DIR,
+  CLAUDE_HOME  (local mode)
 `)
 }

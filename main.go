@@ -57,14 +57,7 @@ func run(ctx context.Context) int {
 		return 1
 	}
 
-	// ~/.claude holds the per-session logs we read titles from. CLAUDE_HOME
-	// overrides it (e.g. if HOME isn't the claude user's home).
-	claudeHome := envOr("CLAUDE_HOME", "")
-	if claudeHome == "" {
-		if home, herr := os.UserHomeDir(); herr == nil {
-			claudeHome = filepath.Join(home, ".claude")
-		}
-	}
+	claudeHome := session.DefaultClaudeHome()
 
 	logger := auditLogger()
 
