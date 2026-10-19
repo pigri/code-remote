@@ -239,3 +239,21 @@ func TestStartSessionSyncBadDurations(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// A worker that already finished is reported as finished even when the
+// deadline has passed too.
+func TestSyncHandleWaitPrefersDone(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h := &syncHandle{done: done}
+	for i := 0; i < 200; i++ {
+		if !h.wait(ctx) {
+			t.Fatalf("wait = false on try %d for a finished worker", i)
+		}
+	}
+	if !(*syncHandle)(nil).wait(ctx) {
+		t.Error("nil handle wait = false, want true")
+	}
+}

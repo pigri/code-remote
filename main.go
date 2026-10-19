@@ -128,10 +128,13 @@ func run(parent context.Context) int {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+	// The workers get their own budget, so a slow Shutdown cannot leave them none.
+	workersCtx, cancelWorkers := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWorkers()
 	if err := sync.Close(); err != nil {
 		logger.Warn("sync_close", "error", err.Error())
 	}
-	if !convSync.wait(shutdownCtx) {
+	if !convSync.wait(workersCtx) {
 		logger.Warn("conversation_sync_close", "error", "still running at the shutdown deadline")
 	}
 	if db != nil {
@@ -202,6 +205,11 @@ func (h *syncHandle) Close() error {
 func (h *syncHandle) wait(ctx context.Context) bool {
 	if h == nil || h.done == nil {
 		return true
+	}
+	select {
+	case <-h.done:
+		return true
+	default:
 	}
 	select {
 	case <-h.done:
