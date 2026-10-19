@@ -133,6 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
 	for _, col := range []struct{ name, def string }{
 		{"conv_id", "TEXT"},
 		{"profile", "TEXT NOT NULL DEFAULT ''"},
+		{"launch_gen", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		var n int
 		if err := d.db.QueryRow(hasColumn, col.name).Scan(&n); err != nil {
@@ -211,12 +212,13 @@ func (d *DB) SetProfile(uuid, profile string) error {
 }
 
 // UpsertSession records/updates the mirrored view, preserving the ledger columns
-// (grace clock, archived_at, resumed_at).
+// (grace clock, archived_at, resumed_at). It changes nothing once the session
+// has been launched since generation r.LaunchGen: the view is the old claude's.
 func (d *DB) UpsertSession(r cloud.SessionRecord) error {
 	const q = `
 INSERT INTO sessions
-	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, launch_gen)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(uuid) DO UPDATE SET
 	screen=excluded.screen,
 	title=excluded.title,
@@ -226,15 +228,17 @@ ON CONFLICT(uuid) DO UPDATE SET
 	connection_status=excluded.connection_status,
 	bridge_session_id=CASE WHEN excluded.bridge_session_id != '' THEN excluded.bridge_session_id ELSE sessions.bridge_session_id END,
 	created_at=CASE WHEN excluded.created_at != '' THEN excluded.created_at ELSE sessions.created_at END,
-	updated_at=excluded.updated_at;`
+	updated_at=excluded.updated_at
+WHERE sessions.launch_gen = excluded.launch_gen;`
 	_, err := d.db.Exec(q, r.UUID, r.Screen, r.Title, r.Cwd, r.LocalStatus, r.CloudStatus,
-		r.ConnectionStatus, r.BridgeSessionID, r.CreatedAt, time.Now().Unix())
+		r.ConnectionStatus, r.BridgeSessionID, r.CreatedAt, time.Now().Unix(), r.LaunchGen)
 	return err
 }
 
 // Record marks a session as live — created or resumed. It upserts the mirror
 // row and clears the archive markers, stamping resumed_at when the session had
-// previously been archived. This is what makes a session discoverable as
+// previously been archived. It increments the launch generation, so a
+// reconciler pass that read the session before cannot write back over it. This is what makes a session discoverable as
 // resumable after its screen is gone, independent of the cloud reconciler.
 // profile names the profile the session runs under; "" records none and keeps
 // the stored one.
@@ -246,8 +250,8 @@ func (d *DB) Record(uuid, screen, title, cwd, status, createdAt, profile string)
 	// the old one, once gone server-side, would read as "deleted".
 	const q = `
 INSERT INTO sessions
-	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, profile)
-VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?)
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, profile, launch_gen)
+VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, 1)
 ON CONFLICT(uuid) DO UPDATE SET
 	screen=excluded.screen,
 	profile=CASE WHEN excluded.profile != '' THEN excluded.profile ELSE sessions.profile END,
@@ -259,6 +263,7 @@ ON CONFLICT(uuid) DO UPDATE SET
 	resumed_at=CASE WHEN sessions.archived_at IS NOT NULL THEN excluded.updated_at ELSE sessions.resumed_at END,
 	archived_at=NULL,
 	first_seen_archived=NULL,
+	launch_gen=sessions.launch_gen+1,
 	updated_at=excluded.updated_at;`
 	now := time.Now().Unix()
 	if _, err := d.db.Exec(q, uuid, screen, title, cwd, status, createdAt, now, profile); err != nil {
@@ -312,8 +317,8 @@ func (d *DB) FirstSeenArchived(id string) (time.Time, bool, error) {
 	return time.Unix(sec.Int64, 0), true, nil
 }
 
-func (d *DB) SetFirstSeenArchived(id string, t time.Time) error {
-	_, err := d.db.Exec(`UPDATE sessions SET first_seen_archived=? WHERE uuid=?`, t.Unix(), id)
+func (d *DB) SetFirstSeenArchived(id string, t time.Time, gen int64) error {
+	_, err := d.db.Exec(`UPDATE sessions SET first_seen_archived=? WHERE uuid=? AND launch_gen=?`, t.Unix(), id, gen)
 	return err
 }
 
@@ -342,6 +347,25 @@ func (d *DB) LastBridge(id string) (string, error) {
 		return "", err
 	}
 	return b.String, nil
+}
+
+// LaunchGens returns every known session's launch generation.
+func (d *DB) LaunchGens() (map[string]int64, error) {
+	rows, err := d.db.Query(`SELECT uuid, launch_gen FROM sessions`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var gen int64
+		if err := rows.Scan(&id, &gen); err != nil {
+			return nil, err
+		}
+		out[id] = gen
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) logEvent(uuid, kind, detail string) error {

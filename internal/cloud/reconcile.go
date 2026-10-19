@@ -148,6 +148,14 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		cwdByID[reg.SessionID] = reg.Cwd
 	}
 
+	st := r.store()
+	// Read before the sessions: a launch after this read has a newer
+	// generation, and this pass's writes for that session are then dropped.
+	gens, err := st.LaunchGens()
+	if err != nil {
+		r.Log.Warn("session_sync", "phase", "launch_gens", "error", err.Error())
+		return
+	}
 	local, live, err := r.listLocal()
 	if err != nil {
 		r.Log.Warn("session_sync", "phase", "list_local", "error", err.Error())
@@ -164,7 +172,6 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		now = r.Now
 	}
 	nowT := now()
-	st := r.store()
 
 	for _, ls := range local {
 		cwd := cwdByID[ls.ID]
@@ -174,7 +181,10 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		bridge := live[ls.ID].BridgeSessionID
 		// A deleted session's live registry resets bridgeSessionId to null;
 		// fall back to the last-known bridge id so we can still confirm it. It
-		// is this launch's: a launch clears it, and only a live one is stored.
+		// is this launch's: a launch clears it, and a pass stores only a live
+		// one, and only if no launch has run since it read the sessions. Not
+		// yet between a new screen starting and its launch's Record: closing
+		// that window takes a lock shared with launches.
 		if bridge == "" {
 			if lb, lerr := st.LastBridge(ls.ID); lerr == nil && lb != "" {
 				bridge = lb
@@ -221,6 +231,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 			UUID: ls.ID, Screen: ls.Screen, Title: ls.Title, Cwd: cwd,
 			LocalStatus: ls.Status, CloudStatus: cloudStatus, ConnectionStatus: connStatus,
 			BridgeSessionID: bridge, CreatedAt: ls.CreatedAt, Archived: quit,
+			LaunchGen: gens[ls.ID],
 		}); err != nil {
 			r.Log.Warn("session_sync", "phase", "mirror", "id", ls.ID, "error", err.Error())
 		}
@@ -242,7 +253,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		}
 		if !ok {
 			first = nowT
-			_ = st.SetFirstSeenArchived(ls.ID, nowT)
+			_ = st.SetFirstSeenArchived(ls.ID, nowT, gens[ls.ID])
 		}
 		if waited := nowT.Sub(first); waited < r.Grace {
 			r.Log.Info("archive_pending", "id", ls.ID, "title", ls.Title, "match", match,
@@ -250,6 +261,17 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 			continue
 		}
 
+		// A launch since the read means the archived bridge was the old
+		// claude's, and the screen is now the new one's.
+		cur, gerr := st.LaunchGens()
+		if gerr != nil {
+			r.Log.Warn("session_sync", "phase", "launch_gens", "id", ls.ID, "error", gerr.Error())
+			continue
+		}
+		if cur[ls.ID] != gens[ls.ID] {
+			r.Log.Info("archive_skipped", "id", ls.ID, "title", ls.Title, "reason", "relaunched")
+			continue
+		}
 		existed, err := r.Manager.Kill(ls.ID)
 		if err != nil {
 			r.Log.Error("auto_archive", "id", ls.ID, "screen", ls.Screen, "error", err.Error())

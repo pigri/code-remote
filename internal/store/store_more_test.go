@@ -231,7 +231,7 @@ func TestSetProfile(t *testing.T) {
 	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "work"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t", LocalStatus: "Detached", BridgeSessionID: "session_b"}); err != nil {
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t", LocalStatus: "Detached", BridgeSessionID: "session_b", LaunchGen: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SetProfile(id, "private"); err != nil {
@@ -259,8 +259,11 @@ func TestProfileRoundTrip(t *testing.T) {
 	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t"}); err != nil {
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, Title: "t", BridgeSessionID: "session_p", LaunchGen: 1}); err != nil {
 		t.Fatal(err)
+	}
+	if b, err := d.LastBridge(id); err != nil || b != "session_p" {
+		t.Fatalf("LastBridge after the upsert = %q, %v, want session_p", b, err)
 	}
 
 	all, err := d.AllSessions()
@@ -399,7 +402,7 @@ func oldSchemaDB(t *testing.T, column string) string {
 // Another process (the server or crctl) can add a column between Open's check
 // and its ALTER; Open must still succeed.
 func TestMigrateColumnAddedConcurrently(t *testing.T) {
-	for _, column := range []string{"conv_id", "profile"} {
+	for _, column := range []string{"conv_id", "profile", "launch_gen"} {
 		t.Run(column, func(t *testing.T) {
 			path := oldSchemaDB(t, column)
 			added := false
@@ -670,5 +673,168 @@ func TestOpenGivesUpAfterWALSwitchTimeout(t *testing.T) {
 		other.Exec(`COMMIT`)
 		<-done
 		t.Fatalf("Open still blocked after %v with walSwitchTimeout %v", limit, walSwitchTimeout)
+	}
+}
+
+// A pass of the reconciler that read a session before its last launch writes
+// neither its view nor its archive clock; one that read it since writes both.
+func TestLaunchDropsAnEarlierPassWrites(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	gen := func() int64 {
+		t.Helper()
+		gens, err := d.LaunchGens()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gens[id]
+	}
+	if g := gen(); g != 0 {
+		t.Fatalf("generation of an unknown session = %d, want 0", g)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	read := gen()
+	if read != 1 {
+		t.Fatalf("generation after the first launch = %d, want 1", read)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if g := gen(); g != 2 {
+		t.Fatalf("generation after a relaunch = %d, want 2", g)
+	}
+
+	at := time.Unix(1000, 0)
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, BridgeSessionID: "session_old", LaunchGen: read}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetFirstSeenArchived(id, at, read); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge(id); b != "" {
+		t.Errorf("LastBridge = %q from a pass before the relaunch, want none", b)
+	}
+	if _, ok, _ := d.FirstSeenArchived(id); ok {
+		t.Error("archive clock started by a pass before the relaunch")
+	}
+
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id, BridgeSessionID: "session_new", LaunchGen: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetFirstSeenArchived(id, at, 2); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge(id); b != "session_new" {
+		t.Errorf("LastBridge = %q, want session_new", b)
+	}
+	if first, ok, _ := d.FirstSeenArchived(id); !ok || !first.Equal(at) {
+		t.Errorf("FirstSeenArchived = %v, %v, want %v", first, ok, at)
+	}
+
+	// A pass that read a session the store did not know yet is at generation
+	// 0; the first launch recorded after that read drops its writes too.
+	const fresh = "22222222-2222-2222-2222-222222222222"
+	if err := d.Record(fresh, "p-"+fresh, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: fresh, Screen: "p-" + fresh, BridgeSessionID: "session_old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetFirstSeenArchived(fresh, at, 0); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge(fresh); b != "" {
+		t.Errorf("LastBridge = %q from a pass before the first launch, want none", b)
+	}
+	if _, ok, _ := d.FirstSeenArchived(fresh); ok {
+		t.Error("archive clock started by a pass before the first launch")
+	}
+}
+
+// A database written before the launch_gen column existed gains it on Open:
+// its rows are at generation 0, the reconciler still writes them, and the
+// next launch moves a session to generation 1.
+func TestMigrateAddsLaunchGen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The schema as Open created it before the launch_gen column.
+	const oldSchema = `
+CREATE TABLE sessions (
+	uuid                TEXT PRIMARY KEY,
+	screen              TEXT,
+	title               TEXT,
+	cwd                 TEXT,
+	local_status        TEXT,
+	cloud_status        TEXT,
+	connection_status   TEXT,
+	bridge_session_id   TEXT,
+	created_at          TEXT,
+	first_seen_archived INTEGER,
+	archived_at         INTEGER,
+	resumed_at          INTEGER,
+	updated_at          INTEGER,
+	conv_id             TEXT,
+	profile             TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE events (
+	id     INTEGER PRIMARY KEY AUTOINCREMENT,
+	uuid   TEXT,
+	kind   TEXT,
+	detail TEXT,
+	at     INTEGER
+);
+CREATE INDEX idx_events_uuid ON events(uuid);
+INSERT INTO sessions
+	(uuid, screen, title, cwd, local_status, cloud_status, connection_status, bridge_session_id, created_at, updated_at, conv_id, profile)
+VALUES
+	('11111111-1111-1111-1111-111111111111', 'p-1', 'one', '/repo', 'Detached', '', '', 'session_a', 'now', 2, 'c1', 'work'),
+	('22222222-2222-2222-2222-222222222222', 'p-2', 'two', '/home', 'Detached', 'archived', '', 'session_x', 'then', 1, NULL, '');`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	const one, two = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+	for i := range 2 {
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open #%d of old db: %v", i+1, err)
+		}
+		gens, err := d.LaunchGens()
+		if err != nil || len(gens) != 2 || gens[one] != 0 || gens[two] != 0 {
+			t.Fatalf("Open #%d: LaunchGens = %v, %v, want both rows at 0", i+1, gens, err)
+		}
+		if b, _ := d.LastBridge(one); b != "session_a" {
+			t.Errorf("Open #%d: LastBridge = %q, want session_a kept", i+1, b)
+		}
+		var n int
+		if err := d.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='launch_gen' AND "notnull"=1 AND dflt_value='0'`).Scan(&n); err != nil || n != 1 {
+			t.Errorf("Open #%d: launch_gen columns = %d, %v, want one NOT NULL DEFAULT 0", i+1, n, err)
+		}
+		d.Close()
+	}
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: two, Screen: "p-2", BridgeSessionID: "session_y"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := d.LastBridge(two); b != "session_y" {
+		t.Errorf("LastBridge = %q after an upsert at generation 0, want session_y", b)
+	}
+	if err := d.Record(one, "p-1", "", "", "Detached", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if gens, _ := d.LaunchGens(); gens[one] != 1 {
+		t.Errorf("generation after a launch = %d, want 1", gens[one])
 	}
 }

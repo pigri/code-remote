@@ -19,6 +19,10 @@ type SessionRecord struct {
 	BridgeSessionID  string // server session id, when known
 	CreatedAt        string
 	Archived         bool
+	// LaunchGen is the session's launch generation (see Store.LaunchGens)
+	// when the facts above were read. The upsert is dropped if the session
+	// has been launched since.
+	LaunchGen int64
 }
 
 // Store persists the session mirror and the archive grace clock. The reconciler
@@ -29,8 +33,9 @@ type Store interface {
 	UpsertSession(rec SessionRecord) error
 	// FirstSeenArchived returns when a session was first observed archived.
 	FirstSeenArchived(id string) (t time.Time, ok bool, err error)
-	// SetFirstSeenArchived starts the grace clock for a session.
-	SetFirstSeenArchived(id string, t time.Time) error
+	// SetFirstSeenArchived starts the grace clock for a session, unless it
+	// has been launched since generation gen.
+	SetFirstSeenArchived(id string, t time.Time, gen int64) error
 	// ClearArchiveClock resets the grace clock (session no longer archived).
 	ClearArchiveClock(id string) error
 	// MarkArchived records that the session's screen was quit, clearing the clock.
@@ -39,6 +44,10 @@ type Store interface {
 	// local session, or "" if unknown. Used to confirm deletion after the live
 	// registry has reset bridgeSessionId to null.
 	LastBridge(id string) (string, error)
+	// LaunchGens returns each known session's launch generation, which every
+	// launch (create, resume, restart) increments. A session missing from the
+	// map is at generation 0.
+	LaunchGens() (map[string]int64, error)
 }
 
 // memStore is the default in-process Store: it tracks the grace clock and drops
@@ -59,7 +68,7 @@ func (m *memStore) FirstSeenArchived(id string) (time.Time, bool, error) {
 	return t, ok, nil
 }
 
-func (m *memStore) SetFirstSeenArchived(id string, t time.Time) error {
+func (m *memStore) SetFirstSeenArchived(id string, t time.Time, _ int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seen[id] = t
@@ -76,3 +85,7 @@ func (m *memStore) ClearArchiveClock(id string) error {
 func (m *memStore) MarkArchived(id string, _ time.Time) error { return m.ClearArchiveClock(id) }
 
 func (m *memStore) LastBridge(string) (string, error) { return "", nil }
+
+// LaunchGens knows no launches (Record writes only a durable store), so
+// without one a pass that overlaps a relaunch is not detected.
+func (m *memStore) LaunchGens() (map[string]int64, error) { return nil, nil }

@@ -342,8 +342,11 @@ func TestSessionSyncLeavesAGuessedSessionOut(t *testing.T) {
 	h.register(t, ".claude", sessW, sessW, 8888, "session_work")
 	h.recordProfile(t, map[string]string{sessZ: "", sessW: "work"})
 	// z's last bridge is in the private account; its guess is work.
-	if err := h.db.UpsertSession(cloud.SessionRecord{UUID: sessZ, Screen: "crtest-" + sessZ, BridgeSessionID: "session_guessed"}); err != nil {
+	if err := h.db.UpsertSession(cloud.SessionRecord{UUID: sessZ, Screen: "crtest-" + sessZ, BridgeSessionID: "session_guessed", LaunchGen: 1}); err != nil {
 		t.Fatal(err)
+	}
+	if b, err := h.db.LastBridge(sessZ); err != nil || b != "session_guessed" {
+		t.Fatalf("seeded LastBridge = %q, %v, want session_guessed", b, err)
 	}
 	h.credentials(t, ".claude", "tok-work")
 	h.credentials(t, ".claude-private", "tok-private")

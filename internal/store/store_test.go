@@ -36,7 +36,7 @@ func TestStoreUpsertAndGraceClock(t *testing.T) {
 		t.Fatal("clock should be unset initially")
 	}
 	now := time.Unix(1_000_000, 0)
-	if err := d.SetFirstSeenArchived("u1", now); err != nil {
+	if err := d.SetFirstSeenArchived("u1", now, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := d.FirstSeenArchived("u1")
