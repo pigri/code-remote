@@ -488,6 +488,10 @@ func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}
+		if errors.Is(err, session.ErrAlreadyRunning) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.log.Error("session_restart", "remote", clientIP(r), "id", id, "error", err.Error())
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

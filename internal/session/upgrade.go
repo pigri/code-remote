@@ -225,7 +225,17 @@ func (m *Manager) restartAs(s Session, info liveInfo, dir string, p profile.Prof
 	// second claude opens the same conversation.
 	pid := info.Reg.PID
 
-	if _, up := m.running(id); up {
+	// A screen of id that s was not listed with (a profile not configured
+	// here) would keep its claude running past the stop, and the relaunch
+	// could not start beside it.
+	live := m.screensOf(id)
+	for _, l := range live {
+		if !slices.Contains(s.screenTargets(), l.PID+"."+l.Screen) {
+			return Session{}, fmt.Errorf("%w: %s also runs as screen %s, which is not listed here; not restarting",
+				ErrAlreadyRunning, id, l.Screen)
+		}
+	}
+	if len(live) > 0 {
 		if err := m.kill(s, info); err != nil {
 			return Session{}, err
 		}

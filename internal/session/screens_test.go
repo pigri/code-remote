@@ -381,3 +381,79 @@ func TestTwoScreensForOneID(t *testing.T) {
 		}
 	}
 }
+
+// Kill quits each of a session's screens by its pid, tries them all, and
+// succeeds once none runs.
+func TestKillTriesEveryScreen(t *testing.T) {
+	set, _ := twoProfiles(t, "")
+	legacy, named := "test-rc-"+idA, "test-rc-work-"+idA
+	for _, tc := range []struct {
+		name    string
+		created []string
+		vanish  []string
+		killed  []string
+	}{
+		{"the first one exits before its quit", []string{legacy, named}, []string{legacy}, []string{named}},
+		{"two screens of one name", []string{named, named}, nil, []string{named, named}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeScreen{created: slices.Clone(tc.created)}
+			withFakeScreen(t, fs)
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set}
+			if _, ok, _ := m.Get(idA); !ok {
+				t.Fatal("not listed")
+			}
+			fs.vanish = tc.vanish
+			if ok, err := m.Kill(idA); !ok || err != nil {
+				t.Errorf("Kill = %v, %v; want true, nil", ok, err)
+			}
+			if !slices.Equal(fs.killed, tc.killed) || len(fs.created) != 0 {
+				t.Errorf("killed %v, still running %v; want %v quit and nothing running", fs.killed, fs.created, tc.killed)
+			}
+		})
+	}
+
+	t.Run("a screen that does not quit is an error", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{legacy, named}, failKill: true}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set}
+		if ok, err := m.Kill(idA); !ok || err == nil {
+			t.Errorf("Kill = %v, %v; want true and an error", ok, err)
+		}
+	})
+}
+
+// A session that also runs under a screen this Manager does not list is not
+// restarted: stopping the listed screen would leave the hidden claude running
+// and the restart could not relaunch next to it.
+func TestNoRestartBesideAHiddenScreen(t *testing.T) {
+	fastStop(t)
+	set, h := twoProfiles(t, "")
+	upgradeHome(t, h.work, idA, "1.0.0", "idle")
+	hidden := "test-rc-old-" + idA
+	for _, op := range []string{"restart", "upgrade"} {
+		t.Run(op, func(t *testing.T) {
+			fs := &fakeScreen{created: []string{"test-rc-" + idA, hidden}, version: "1.0.0", updateTo: "2.0.0"}
+			withFakeScreen(t, fs)
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set}
+			var err error
+			if op == "restart" {
+				_, err = m.Restart(idA)
+			} else {
+				var res UpgradeResult
+				res, err = m.Upgrade(true, false)
+				if err == nil && (len(res.Sessions) != 1 || res.Sessions[0].Action != ActionFailed ||
+					!strings.Contains(res.Sessions[0].Reason, hidden)) {
+					t.Errorf("Upgrade = %+v, want the session failed, naming %s", res.Sessions, hidden)
+				}
+				err = nil
+			}
+			if op == "restart" && (!errors.Is(err, ErrAlreadyRunning) || !strings.Contains(err.Error(), hidden)) {
+				t.Errorf("Restart err = %v, want ErrAlreadyRunning naming %s", err, hidden)
+			}
+			if len(fs.killed) != 0 || len(fs.launches) != 0 || len(fs.created) != 2 {
+				t.Errorf("killed %v, launched %v, running %v; want both screens left alone", fs.killed, fs.launches, fs.created)
+			}
+		})
+	}
+}

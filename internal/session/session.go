@@ -39,7 +39,7 @@ type Session struct {
 	unrecorded bool     // parseSessions found no profile for it in the Store
 	guessed    bool     // its profile is only a guess (see resolveProfile)
 	named      string   // the profile its screen name carries; "" for <prefix>-<id>
-	screens    []string // every screen parseScreens found for it, Screen among them
+	screens    []string // every screen parseScreens found for it, as <pid>.<name>
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -814,10 +814,27 @@ func (m *Manager) screenLS() string {
 // configured here, or a profile name with one profile): a launch next to it
 // would run a second claude in the conversation.
 func (m *Manager) running(id string) (Session, bool) {
-	return find(scanScreens(m.screenLS(), func(name string) (string, string, bool) {
+	return find(m.screensOf(id), id)
+}
+
+// screensOf is every screen running counts for session id, one per screen.
+func (m *Manager) screensOf(id string) []Session {
+	return scanScreens(m.screenLS(), func(name string) (string, string, bool) {
 		rest, ok := strings.CutPrefix(name, m.Prefix+"-")
 		return id, "", ok && (rest == id || strings.HasSuffix(rest, "-"+id))
-	}), id)
+	})
+}
+
+// screenTargets is how screen -S names each screen of s: <pid>.<name>, which
+// picks one screen even when two share a name.
+func (s Session) screenTargets() []string {
+	switch {
+	case len(s.screens) > 0:
+		return s.screens
+	case s.PID != "":
+		return []string{s.PID + "." + s.Screen}
+	}
+	return []string{s.Screen}
 }
 
 // find returns the session with id among sessions.
@@ -886,7 +903,7 @@ func (m *Manager) parseScreens(out string) []Session {
 		i, dup := at[s.ID]
 		if !dup {
 			at[s.ID] = len(sessions)
-			s.screens = []string{s.Screen}
+			s.screens = s.screenTargets()
 			sessions = append(sessions, s)
 			continue
 		}
@@ -962,22 +979,23 @@ func (m *Manager) stop(s Session, c *regCache) (bool, error) {
 }
 
 // kill quits every screen running session s was listed with, whose claude
-// liveIndex found as info. Last
+// liveIndex found as info. It tries each one, and fails only when a screen of
+// s still runs afterwards (one may exit on its own before its quit). Last
 // chance to learn which conversation and profile the session is in: once the
 // process is gone only the Store remembers, and Resume depends on both.
 func (m *Manager) kill(s Session, info liveInfo) error {
 	m.noteConv(s.ID, info.Conv)
 	m.noteProfile(s, info)
-	names := s.screens
-	if len(names) == 0 {
-		names = []string{s.Screen}
-	}
-	for _, name := range names {
-		if out, err := execCommand(m.ScreenBin, "-S", name, "-X", "quit").CombinedOutput(); err != nil {
-			return fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
+	var errs []error
+	for _, target := range s.screenTargets() {
+		if out, err := execCommand(m.ScreenBin, "-S", target, "-X", "quit").CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("quit screen session %s: %v: %s", target, err, strings.TrimSpace(string(out))))
 		}
 	}
-	return nil
+	if _, up := m.running(s.ID); !up {
+		return nil
+	}
+	return errors.Join(errs...)
 }
 
 // titleIn reads the current display name claude persists for a session. The
