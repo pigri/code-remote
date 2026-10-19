@@ -42,6 +42,30 @@ func TestRunMissingBinaries(t *testing.T) {
 	})
 }
 
+func TestRunBadProfiles(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	t.Setenv("SCREEN_BIN", os.Args[0])
+	t.Setenv("CLAUDE_BIN", os.Args[0])
+	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0")
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+	for _, tc := range []struct{ name, profiles, def string }{
+		{"bad spec", "work", ""},
+		{"unknown default", "work=/w", "private"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_REMOTE_PROFILES", tc.profiles)
+			t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", tc.def)
+			// Pre-cancelled: a run that ignored the bad config would serve and exit 0.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if code := run(ctx); code != 1 {
+				t.Errorf("run with CLAUDE_REMOTE_PROFILES=%q = %d, want 1", tc.profiles, code)
+			}
+		})
+	}
+}
+
 func TestRunServesAndShutsDown(t *testing.T) {
 	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
 	t.Setenv("SCREEN_BIN", os.Args[0]) // any existing executable resolves LookPath

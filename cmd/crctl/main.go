@@ -38,6 +38,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 	"claude-remote-api/internal/store"
 )
@@ -160,16 +161,23 @@ func pickBackend() (backend, error) {
 		}
 		return &httpBackend{base: strings.TrimRight(base, "/"), token: token}, nil
 	}
+	home := claudeHome()
+	userHome, _ := os.UserHomeDir()
+	profiles, err := profile.FromEnv(home, userHome)
+	if err != nil {
+		return nil, err
+	}
 	mgr := &session.Manager{
 		Prefix:       envOr("CLAUDE_REMOTE_SESSION_PREFIX", "pigri-dev-remote"),
 		ScreenBin:    resolveBin(envOr("SCREEN_BIN", "screen")),
 		ClaudeBin:    resolveBin(envOr("CLAUDE_BIN", "claude")),
-		ClaudeHome:   claudeHome(),
+		ClaudeHome:   home,
 		ClaudeConfig: session.DefaultClaudeConfig(),
 		// Local mode runs as the invoking user, who can already start claude
 		// anywhere; the workspace root only narrows --dir when it is set.
 		WorkspaceRoot: envOr("CLAUDE_WORKSPACE_ROOT", "/"),
 		TrustDirs:     isTrue(os.Getenv("CLAUDE_REMOTE_TRUST_DIRS")),
+		Profiles:      profiles,
 	}
 	// Share the server's SQLite mirror so `new`/`resume` record sessions and
 	// `ls` can surface resumable (stopped) ones. Best-effort: a store that won't
