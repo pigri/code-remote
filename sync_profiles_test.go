@@ -328,3 +328,41 @@ func TestReconcileReadsTheProcessTableOnce(t *testing.T) {
 		t.Errorf("ps ran %d times in one reconcile, want once", n)
 	}
 }
+
+// A session whose profile is only a guess (a legacy row, no transcript, no
+// registration) is left out of every profile's sync: no account is asked
+// about its last bridge, which may belong to another account, so it is never
+// quit as deleted. A session with a known profile in the same view still syncs.
+func TestSessionSyncLeavesAGuessedSessionOut(t *testing.T) {
+	h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "private",
+		map[string]int{sessZ: 4141, sessW: 4343})
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "on")
+	t.Setenv("CLAUDE_REMOTE_ARCHIVE_GRACE", "0s")
+	fakePS(t, "  8888  4343 claude\\n")
+	h.register(t, ".claude", sessW, sessW, 8888, "session_work")
+	h.recordProfile(t, map[string]string{sessZ: "", sessW: "work"})
+	// z's last bridge is in the private account; its guess is work.
+	if err := h.db.UpsertSession(cloud.SessionRecord{UUID: sessZ, Screen: "crtest-" + sessZ, BridgeSessionID: "session_guessed"}); err != nil {
+		t.Fatal(err)
+	}
+	h.credentials(t, ".claude", "tok-work")
+	h.credentials(t, ".claude-private", "tok-private")
+	clouds := newAccounts(t, map[string][]cloud.Session{
+		"tok-work":    {archived("session_work")},
+		"tok-private": {running("session_guessed")},
+	})
+
+	for _, rec := range sessionReconcilers(discardLogger(), h.mgr, h.db) {
+		rec.ReconcileOnce(context.Background())
+	}
+	if got, want := h.quits(), "crtest-"+sessW+"\n"; got != want {
+		t.Errorf("quit %q, want only %q", got, want)
+	}
+	for _, token := range []string{"tok-work", "tok-private"} {
+		for _, r := range clouds.requests(token) {
+			if strings.Contains(r, "session_guessed") {
+				t.Errorf("%s was asked %q about the guessed session", token, r)
+			}
+		}
+	}
+}

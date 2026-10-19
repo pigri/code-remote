@@ -313,7 +313,9 @@ msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
   per profile, signed in with that profile's `<dir>/.credentials.json`, sees
   and quits only that profile's sessions. Another account's sessions are never
   sent to its cloud, where they would read as deleted. Its log lines carry
-  `profile=<name>`.
+  `profile=<name>`. A session whose profile is only a guess (a legacy one with
+  no recorded profile, transcript or registration) is synced by none of them,
+  so it is never auto-archived.
 - It **degrades gracefully**: on a host with no credentials file (e.g. a
   headless server where you've never logged in `claude`), sync logs
   `session_sync_disabled` once and the rest of the API runs normally. With

@@ -147,8 +147,8 @@ func (m *Manager) launchProfile(id string, own profile.Profile, prof string) (pr
 }
 
 // ProfileView is the part of a Manager that one profile owns: its running
-// sessions (those whose Profile it is, see List), its registrations, and kills
-// of its own sessions only. See Manager.ForProfile.
+// sessions (those whose Profile it is and not by a guess, see List), its
+// registrations, and kills of its own sessions only. See Manager.ForProfile.
 type ProfileView struct {
 	m       *Manager
 	profile string
@@ -176,11 +176,12 @@ func (v *ProfileView) List() ([]Session, error) {
 	return v.own(all), nil
 }
 
-// own is the sessions of all that v's profile owns.
+// own is the sessions of all that v's profile owns. A session whose profile
+// is only a guess is in no view: nothing ties it to the profile's account.
 func (v *ProfileView) own(all []Session) []Session {
 	var out []Session
 	for _, s := range all {
-		if s.Profile == v.profile {
+		if s.Profile == v.profile && !s.guessed {
 			out = append(out, s)
 		}
 	}
