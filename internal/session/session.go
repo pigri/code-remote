@@ -36,9 +36,10 @@ type Session struct {
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
 
-	unrecorded bool   // parseSessions found no profile for it in the Store
-	guessed    bool   // its profile is only a guess (see resolveProfile)
-	named      string // the profile its screen name carries; "" for <prefix>-<id>
+	unrecorded bool     // parseSessions found no profile for it in the Store
+	guessed    bool     // its profile is only a guess (see resolveProfile)
+	named      string   // the profile its screen name carries; "" for <prefix>-<id>
+	screens    []string // every screen parseScreens found for it, Screen among them
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -586,10 +587,11 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 
 	// Already running? Resuming would launch a second claude against the same
 	// session id — refuse and hand back the live session so the caller can 409.
-	if _, up := m.running(id); up {
+	if r, up := m.running(id); up {
 		if s, ok, _ := m.get(id); ok {
 			return s, ErrAlreadyRunning
 		}
+		return r, ErrAlreadyRunning
 	}
 
 	// The session must exist on disk to resume. When its profile has no dir we
@@ -806,10 +808,16 @@ func (m *Manager) screenLS() string {
 	return string(out)
 }
 
-// running returns session id, with no profile, if its screen runs: it reads
-// screen names only, enough to tell whether a session runs.
+// running returns session id, with no profile, if a screen of it runs: it
+// reads screen names only, enough to tell whether a session runs. Any screen
+// <Prefix>-...-<id> counts, even one parseName rejects (a profile that is not
+// configured here, or a profile name with one profile): a launch next to it
+// would run a second claude in the conversation.
 func (m *Manager) running(id string) (Session, bool) {
-	return find(m.parseScreens(m.screenLS()), id)
+	return find(scanScreens(m.screenLS(), func(name string) (string, string, bool) {
+		rest, ok := strings.CutPrefix(name, m.Prefix+"-")
+		return id, "", ok && (rest == id || strings.HasSuffix(rest, "-"+id))
+	}), id)
 }
 
 // find returns the session with id among sessions.
@@ -868,8 +876,33 @@ func (m *Manager) parseSessions(out string) []Session {
 }
 
 // parseScreens turns `screen -ls` output into our sessions (see parseName),
-// with no profile. Pure.
+// with no profile. Pure. Several screens for one id are one session, listed
+// under a profile-named screen when there is one: a <Prefix>-<id> screen can
+// only be left from before profiles, and the name tells the profile.
 func (m *Manager) parseScreens(out string) []Session {
+	var sessions []Session
+	at := map[string]int{}
+	for _, s := range scanScreens(out, m.parseName) {
+		i, dup := at[s.ID]
+		if !dup {
+			at[s.ID] = len(sessions)
+			s.screens = []string{s.Screen}
+			sessions = append(sessions, s)
+			continue
+		}
+		d := &sessions[i]
+		d.screens = append(d.screens, s.Screen)
+		if d.named == "" && s.named != "" {
+			s.screens = d.screens
+			*d = s
+		}
+	}
+	return sessions
+}
+
+// scanScreens is the screens in `screen -ls` output whose names match
+// accepts, as sessions of the id it returns, one per screen.
+func scanScreens(out string, accepts func(name string) (id, named string, ok bool)) []Session {
 	var sessions []Session
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(raw)
@@ -878,7 +911,7 @@ func (m *Manager) parseScreens(out string) []Session {
 			continue
 		}
 		pid, name := match[1], match[2]
-		id, named, ok := m.parseName(name)
+		id, named, ok := accepts(name)
 		if !ok {
 			continue
 		}
@@ -928,15 +961,21 @@ func (m *Manager) stop(s Session, c *regCache) (bool, error) {
 	return true, m.kill(s, info)
 }
 
-// kill quits running session s, under the screen name it was listed with,
-// whose claude liveIndex found as info. Last
+// kill quits every screen running session s was listed with, whose claude
+// liveIndex found as info. Last
 // chance to learn which conversation and profile the session is in: once the
 // process is gone only the Store remembers, and Resume depends on both.
 func (m *Manager) kill(s Session, info liveInfo) error {
 	m.noteConv(s.ID, info.Conv)
 	m.noteProfile(s, info)
-	if out, err := execCommand(m.ScreenBin, "-S", s.Screen, "-X", "quit").CombinedOutput(); err != nil {
-		return fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
+	names := s.screens
+	if len(names) == 0 {
+		names = []string{s.Screen}
+	}
+	for _, name := range names {
+		if out, err := execCommand(m.ScreenBin, "-S", name, "-X", "quit").CombinedOutput(); err != nil {
+			return fmt.Errorf("quit screen session: %v: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }

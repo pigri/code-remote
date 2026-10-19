@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -294,5 +295,89 @@ func TestHyphenatedProfileNames(t *testing.T) {
 	}
 	if s.Screen != "test-rc-my-work-"+s.ID || s.Profile != "my-work" {
 		t.Errorf("Create(my-work) = %+v, want screen test-rc-my-work-<id> listed in my-work", s)
+	}
+}
+
+// A screen under the prefix whose name ends in the session's id is that
+// session running, whether or not this Manager's profiles can parse it: a
+// relaunch MUST NOT start a second claude next to it.
+func TestNoRelaunchNextToAnUnparsedScreen(t *testing.T) {
+	fastStop(t)
+	single := func(t *testing.T) *Manager {
+		t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+		set, err := profile.FromEnv("", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := t.TempDir()
+		upgradeHome(t, home, idA, "", "")
+		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
+	}
+	renamed := func(t *testing.T) *Manager {
+		set, h := twoProfiles(t, "")
+		upgradeHome(t, h.work, idA, "", "")
+		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set}
+	}
+	for _, tc := range []struct {
+		name    string
+		manager func(*testing.T) *Manager
+		screen  string
+	}{
+		{"one profile, a profile-named screen", single, "test-rc-work-" + idA},
+		{"a profile no longer configured", renamed, "test-rc-old-" + idA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, op := range []string{"resume", "restart"} {
+				fs := &fakeScreen{created: []string{tc.screen}}
+				withFakeScreen(t, fs)
+				m := tc.manager(t)
+				var err error
+				if op == "resume" {
+					_, err = m.Resume(idA)
+				} else {
+					_, err = m.Restart(idA)
+				}
+				if !errors.Is(err, ErrAlreadyRunning) || len(fs.launches) != 0 || len(fs.killed) != 0 {
+					t.Errorf("%s next to %s: err %v, launched %v, killed %v; want ErrAlreadyRunning and nothing touched",
+						op, tc.screen, err, fs.launches, fs.killed)
+				}
+			}
+		})
+	}
+
+	t.Run("other ids and foreign screens do not count", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{"test-rc-work-" + idB, "other-rc-" + idA, "test-rcx-" + idA}}
+		withFakeScreen(t, fs)
+		m := single(t)
+		if _, err := m.Resume(idA); err != nil || len(fs.launches) != 1 {
+			t.Errorf("Resume = %v, launched %v; want one launch", err, fs.launches)
+		}
+	})
+}
+
+// Two screens for one id (a legacy one and a profile-named one) are one
+// session: listed once, under the profile-named screen, and stopped whole.
+func TestTwoScreensForOneID(t *testing.T) {
+	set, _ := twoProfiles(t, "")
+	for _, order := range [][]string{
+		{"test-rc-" + idA, "test-rc-work-" + idA},
+		{"test-rc-work-" + idA, "test-rc-" + idA},
+	} {
+		fs := &fakeScreen{created: slices.Clone(order)}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set}
+		got, _ := m.List()
+		if len(got) != 1 || got[0].Screen != "test-rc-work-"+idA {
+			t.Errorf("List of %v = %+v, want one session under test-rc-work-%s", order, got, idA)
+		}
+		if ok, err := m.Kill(idA); !ok || err != nil {
+			t.Fatalf("Kill = %v, %v", ok, err)
+		}
+		if slices.Sort(fs.killed); !slices.Equal(fs.killed, []string{"test-rc-" + idA, "test-rc-work-" + idA}) {
+			t.Errorf("killed %v, want both screens", fs.killed)
+		}
+		if _, up := m.running(idA); up {
+			t.Errorf("still running after Kill: %v", fs.created)
+		}
 	}
 }

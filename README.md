@@ -37,8 +37,21 @@ session's profile: `<prefix>-<profile>-<uuid>`, for example
   or `<prefix>-<profile>-<uuid>` for a configured profile. Any other screen is
   left alone, including one named after a profile that is no longer
   configured.
-- The uuid is the fixed-length end of the name, so a `-` in the prefix or in a
-  profile name (`my-work`) is never ambiguous.
+- The uuid is the fixed-length end of the name, so within one instance a `-` in
+  the prefix or in a profile name (`my-work`) is never ambiguous.
+- Another instance on the host MUST NOT use `<prefix>-<profile>` as its prefix,
+  for any configured profile. This instance would take that instance's
+  `<prefix>-<profile>-<uuid>` screens as its own, and list, stop and restart
+  them.
+- Renaming or removing a profile while its sessions run hides them: they are
+  no longer listed, and stop and upgrade do not see them. Stop them first, or
+  quit their screens by hand.
+- Before a relaunch, any screen named `<prefix>-...-<uuid>` counts as that
+  session running, including a hidden one. A resume or restart then refuses
+  with `409` rather than start a second Claude in the conversation.
+- Two screens for one session (a `<prefix>-<uuid>` one left next to a
+  `<prefix>-<profile>-<uuid>` one) list as one session, under the
+  profile-named screen. Stopping it quits both.
 - A `<prefix>-<uuid>` screen from before profiles is still listed, stopped and
   restarted. Its next restart, resume or upgrade relaunches it under
   `<prefix>-<profile>-<uuid>`.
@@ -342,8 +355,10 @@ session is running and how to stop it.
 
 A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
 whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
-session as `default`, does not see a session whose screen carries its profile,
-and `--profile` knows no other profile.
+session as `default`, does not list, stop or upgrade a session whose screen
+carries its profile, and `--profile` knows no other profile. It still refuses
+to resume or restart such a session while its screen runs (see
+[Screen names](#screen-names)).
 
 `crctl upgrade` runs `claude update`. To also move running sessions onto the new
 version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);
@@ -563,7 +578,8 @@ absolute path in `.env` — systemd's PATH doesn't include `~/.local/bin`.
   bind `127.0.0.1`, since the bearer token rides the wire.
 - The manager only ever lists/kills `screen` sessions matching the prefix (see
   [Screen names](#screen-names)), and session ids are UUID-validated, so it
-  can't touch unrelated screens.
+  can't touch unrelated screens, as long as no other instance's prefix is
+  `<prefix>-<profile>`.
 
 ## Caveat
 
