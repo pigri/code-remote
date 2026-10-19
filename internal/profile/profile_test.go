@@ -43,6 +43,7 @@ func TestParse(t *testing.T) {
 		{name: "empty name", spec: "=/a", home: home, wantErr: "invalid profile name"},
 		{name: "upper case name", spec: "Work=/a", home: home, wantErr: "invalid profile name"},
 		{name: "dotted name", spec: "a.b=/a", home: home, wantErr: "invalid profile name"},
+		{name: "leading dash", spec: "-work=/a", home: home, wantErr: "invalid profile name"},
 		{name: "empty dir", spec: "work=", home: home, wantErr: "empty dir"},
 		{name: "duplicate name", spec: "work=/a,work=/b", home: home, wantErr: "duplicate profile name"},
 		{name: "duplicate dir after cleaning", spec: "work=/a,dev=/a/", home: home, wantErr: "duplicate profile dir"},
@@ -434,6 +435,19 @@ func TestForConfigDir(t *testing.T) {
 	} {
 		if p, ok := s.ForConfigDir(tc.dir); ok != tc.ok || p.Name != tc.want {
 			t.Errorf("ForConfigDir(%q) = %q, %v; want %q, %v", tc.dir, p.Name, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// ValidName is the rule Parse applies, for callers that check a name before
+// asking for it.
+func TestValidName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"work": true, "a_b-9": true, "_x": true, "9": true, "w-": true,
+		"": false, "-work": false, "-": false, "Work": false, "a.b": false, "a b": false,
+	} {
+		if got := ValidName(name); got != want {
+			t.Errorf("ValidName(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

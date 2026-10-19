@@ -114,7 +114,8 @@ type stubMgr struct {
 	gotIDs      []string
 }
 
-func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the manager
+func (s *stubMgr) ValidID(string) bool              { return true } // let requests reach the manager
+func (s *stubMgr) ProfileList() session.ProfileList { return session.ProfileList{} }
 func (s *stubMgr) Create(_, prof string) (session.Session, error) {
 	s.gotProfile = prof
 	return s.createSess, s.createErr

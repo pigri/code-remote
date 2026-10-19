@@ -8,6 +8,7 @@
 //	crctl ls                 # list sessions with their profile (default)
 //	crctl new                # start a new session (--profile P picks the account)
 //	crctl rm <id>            # stop a session
+//	crctl profiles           # list the profiles, marking the default
 //	crctl resume <id>        # relaunch a stopped session (--dir D to move it)
 //	crctl resume all         # relaunch every stopped session
 //	crctl restart <id>       # stop + resume a session under the same id (--dir D to move it)
@@ -58,6 +59,7 @@ type backend interface {
 	restart(id, dir, prof string) (session.Session, error)
 	upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	remove(id string) error
+	profiles() (session.ProfileList, error)
 }
 
 func main() {
@@ -111,6 +113,8 @@ func run(args []string) error {
 		return restart(be, args[1:])
 	case "upgrade", "update":
 		return upgrade(be, args[1:])
+	case "profiles":
+		return profiles(be, args[1:])
 	case "rm", "stop", "delete":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: crctl rm <id>")
@@ -121,7 +125,7 @@ func run(args []string) error {
 		fmt.Printf("%s stopped\n", args[1])
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (try: ls, new, resume, restart, upgrade, rm)", cmd)
+		return fmt.Errorf("unknown command %q (try: ls, new, resume, restart, upgrade, rm, profiles)", cmd)
 	}
 }
 
@@ -211,6 +215,8 @@ func (b *localBackend) remove(id string) error {
 	return nil
 }
 
+func (b *localBackend) profiles() (session.ProfileList, error) { return b.mgr.ProfileList(), nil }
+
 // ---- remote backend (HTTP API) ----
 
 type httpBackend struct{ base, token string }
@@ -257,12 +263,17 @@ func gotProfile(s session.Session, prof, done string) error {
 	if prof == "" || s.Profile == prof {
 		return nil
 	}
-	stop := fmt.Sprintf("stop it with `crctl rm %s` if that is the wrong account", s.ID)
+	advice := fmt.Sprintf("stop it with `crctl rm %s` if that is the wrong account", s.ID)
+	if done != "started" {
+		// A resumed or restarted session is the one it was; stopping it moves
+		// it to no other account.
+		advice = "it is the same session as before, and stopping it would not move it; leave out --profile with this API server"
+	}
 	if s.Profile == "" {
 		return fmt.Errorf("the API server does not support profiles: it ignored --profile %q and %s session %s "+
-			"under its own account; %s", prof, done, s.ID, stop)
+			"under its own account; %s", prof, done, s.ID, advice)
 	}
-	return fmt.Errorf("the API server %s session %s under profile %q, not %q; %s", done, s.ID, s.Profile, prof, stop)
+	return fmt.Errorf("the API server %s session %s under profile %q, not %q; %s", done, s.ID, s.Profile, prof, advice)
 }
 
 // launchBody is the optional {"dir": ..., "profile": ...} request body of
@@ -294,6 +305,16 @@ func (b *httpBackend) upgrade(restart, force bool, ids ...string) (session.Upgra
 
 func (b *httpBackend) remove(id string) error {
 	return b.do(http.MethodDelete, "/sessions/"+id, nil, nil)
+}
+
+// profiles reads GET /profiles. A server from before it answers 404.
+func (b *httpBackend) profiles() (session.ProfileList, error) {
+	var l session.ProfileList
+	err := b.do(http.MethodGet, "/profiles", nil, &l)
+	if httpStatus(err) == http.StatusNotFound {
+		return l, errors.New("the API server does not support profiles (it has no GET /profiles); upgrade it to list them")
+	}
+	return l, err
 }
 
 // upgradeTimeout is the client-side cap on a remote `crctl upgrade`.
@@ -334,7 +355,7 @@ func (b *httpBackend) doTimeout(timeout time.Duration, method, path string, in, 
 		if e.Error != "" {
 			return &apiError{status: resp.StatusCode, msg: e.Error}
 		}
-		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
+		return &statusError{status: resp.StatusCode, msg: fmt.Sprintf("%s %s: %s", method, path, resp.Status)}
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
@@ -349,6 +370,27 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string { return fmt.Sprintf("%s (%d)", e.msg, e.status) }
+
+// statusError is a non-2xx reply with no {"error": msg} body.
+type statusError struct {
+	status int
+	msg    string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// httpStatus is the status of a non-2xx reply behind err, else 0.
+func httpStatus(err error) int {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return ae.status
+	}
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.status
+	}
+	return 0
+}
 
 // apiSentinels are the session errors the API reports with a status of their
 // own. The server writes the wrapped error's text, which starts with the
@@ -443,16 +485,20 @@ func launchFlags(args []string) (dir, prof string, rest []string, err error) {
 			i++
 		case strings.HasPrefix(args[i], "--dir="):
 			dir = strings.TrimPrefix(args[i], "--dir=")
-		case args[i] == "--profile":
-			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
-				return "", "", nil, fmt.Errorf("--profile needs a profile name")
+		case args[i] == "--profile" || strings.HasPrefix(args[i], "--profile="):
+			if args[i] == "--profile" {
+				if i+1 < len(args) {
+					prof = args[i+1]
+				}
+				i++
+			} else {
+				prof = strings.TrimPrefix(args[i], "--profile=")
 			}
-			prof = args[i+1]
-			i++
-		case strings.HasPrefix(args[i], "--profile="):
-			prof = strings.TrimPrefix(args[i], "--profile=")
 			if prof == "" {
 				return "", "", nil, fmt.Errorf("--profile needs a profile name")
+			}
+			if !profile.ValidName(prof) {
+				return "", "", nil, fmt.Errorf("invalid profile name %q: %s", prof, profile.NameRule)
 			}
 		default:
 			rest = append(rest, args[i])
@@ -640,6 +686,26 @@ func upgrade(be backend, args []string) error {
 	return nil
 }
 
+// profiles lists the profile names in their configured order, marking the
+// default with "*".
+func profiles(be backend, args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: crctl profiles")
+	}
+	l, err := be.profiles()
+	if err != nil {
+		return err
+	}
+	for _, p := range l.Profiles {
+		mark := "  "
+		if p.Default {
+			mark = "* "
+		}
+		fmt.Println(mark + p.Name)
+	}
+	return nil
+}
+
 // ---- helpers ----
 
 // humanizeAge renders an RFC3339 timestamp as a compact relative age ("3m ago",
@@ -716,6 +782,7 @@ Usage:
                       --force restarts non-idle ones too. With neither --all
                       nor ids, only claude is updated.
   crctl rm <id>       stop a session
+  crctl profiles      list the profiles (Claude accounts); * marks the default
   --profile P         with new/resume/restart: the profile (Claude account) to
                       run under, one of CLAUDE_REMOTE_PROFILES. resume and
                       restart default to the session's own profile; another

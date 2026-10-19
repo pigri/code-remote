@@ -84,7 +84,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
 | `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) and the process registry are read from. `CLAUDE_CONFIG_DIR` takes precedence when set, because the launched claude writes there. Ignored when `CLAUDE_REMOTE_PROFILES` is set |
-| `CLAUDE_REMOTE_PROFILES` | unset | Several Claude accounts on one server, as `name=dir` pairs: `work=~/.claude,private=~/.claude-private`. Names match `[a-z0-9_-]+`; a repeated name or dir is a startup error. Each session runs under one profile, with its logs, registry and trust file in that dir. Unset: one profile, `default`, at `CLAUDE_HOME` as above |
+| `CLAUDE_REMOTE_PROFILES` | unset | Several Claude accounts on one server, as `name=dir` pairs: `work=~/.claude,private=~/.claude-private`. Names match `[a-z0-9_-]+` and do not start with `-`; a repeated name or dir is a startup error. Each session runs under one profile, with its logs, registry and trust file in that dir. Unset: one profile, `default`, at `CLAUDE_HOME` as above |
 | `CLAUDE_REMOTE_DEFAULT_PROFILE` | the first listed | Profile for a request that names none |
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
@@ -109,6 +109,7 @@ All routes except `/healthz` require `Authorization: Bearer <token>`.
 | `GET` | `/sessions` | List running + resumable (stopped) sessions |
 | `GET` | `/sessions/{id}` | One session (`404` if gone) |
 | `DELETE` | `/sessions/{id}` | Stop a session (`screen -X quit`) |
+| `GET` | `/profiles` | The profile names, and which is the default |
 
 `POST /sessions/{id}/resume` relaunches an existing session whose `screen` was
 stopped but whose on-disk Claude log still exists — it runs `claude --resume
@@ -132,6 +133,15 @@ listed at `~/.claude` launches Claude with `CLAUDE_CONFIG_DIR` unset, so it
 keeps its config in `~/.claude.json`; any other profile launches it with
 `CLAUDE_CONFIG_DIR=<dir>`. Without `CLAUDE_REMOTE_PROFILES`, Claude inherits the
 server's environment as it is.
+
+`GET /profiles` lists the profiles by name, in the order of
+`CLAUDE_REMOTE_PROFILES`, and marks the default. It never returns a dir:
+
+```json
+{"profiles":[{"name":"work","default":true},{"name":"private","default":false}],"default":"work"}
+```
+
+Without `CLAUDE_REMOTE_PROFILES` it lists the one profile, `default`.
 
 A session's profile is the one recorded when it was launched. For a session
 recorded before profiles existed, it is the first profile whose dir holds the
@@ -303,6 +313,7 @@ crctl restart <id> --profile work  # ...naming its profile (it must be its own)
 crctl upgrade --all # update claude, restart running sessions onto the new version
 crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
+crctl profiles      # list the profiles; * marks the default
 ```
 
 `new`, `resume` and `restart` take `--profile <name>`, one of
@@ -315,7 +326,13 @@ too. Without `CLAUDE_REMOTE_PROFILES` the only profile is `default`.
 
 An API server that predates profiles ignores `--profile` and launches the
 session under its only account. `crctl` then fails with an error that says the
-session is running and how to stop it.
+session is running. After `new` it says how to stop it. After `resume` or
+`restart` it says to leave out `--profile`: the session is the one it was, and
+stopping it would move it nowhere.
+
+`crctl profiles` lists the profile names, the default marked with `*`. In
+remote mode it reads `GET /profiles`; against a server from before that route,
+it fails with an error that says to upgrade the server.
 
 A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
 whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
