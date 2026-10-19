@@ -227,20 +227,42 @@ func (b *httpBackend) list() ([]session.Session, error) {
 
 func (b *httpBackend) create(dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions", launchBody(dir, prof), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "started")
 }
 
 func (b *httpBackend) resume(id, dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/resume", launchBody(dir, prof), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions/"+id+"/resume", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "resumed")
 }
 
 func (b *httpBackend) restart(id, dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/restart", launchBody(dir, prof), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions/"+id+"/restart", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "restarted")
+}
+
+// gotProfile checks that a session launched with --profile prof runs under
+// it. An API server that predates profiles ignores the field, launches the
+// session under its only account and reports no profile. done says what it
+// did with the session, which by then is running.
+func gotProfile(s session.Session, prof, done string) error {
+	if prof == "" || s.Profile == prof {
+		return nil
+	}
+	stop := fmt.Sprintf("stop it with `crctl rm %s` if that is the wrong account", s.ID)
+	if s.Profile == "" {
+		return fmt.Errorf("the API server does not support profiles: it ignored --profile %q and %s session %s "+
+			"under its own account; %s", prof, done, s.ID, stop)
+	}
+	return fmt.Errorf("the API server %s session %s under profile %q, not %q; %s", done, s.ID, s.Profile, prof, stop)
 }
 
 // launchBody is the optional {"dir": ..., "profile": ...} request body of
@@ -350,8 +372,7 @@ func (e *apiError) Is(target error) bool {
 func profileErr(err error) error {
 	switch {
 	case errors.Is(err, session.ErrOtherProfile):
-		return fmt.Errorf("%w\n  moving a session between profiles is not supported yet; "+
-			"leave out --profile to keep it in its own profile", err)
+		return fmt.Errorf("%w\n  leave out --profile to keep it in its own profile", err)
 	case errors.Is(err, session.ErrInvalidProfile):
 		return fmt.Errorf("%w\n  the profiles are the names in CLAUDE_REMOTE_PROFILES (the API server's, "+
 			"in remote mode); without it the only one is \"default\"", err)
@@ -423,7 +444,7 @@ func launchFlags(args []string) (dir, prof string, rest []string, err error) {
 		case strings.HasPrefix(args[i], "--dir="):
 			dir = strings.TrimPrefix(args[i], "--dir=")
 		case args[i] == "--profile":
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
 				return "", "", nil, fmt.Errorf("--profile needs a profile name")
 			}
 			prof = args[i+1]
@@ -441,9 +462,12 @@ func launchFlags(args []string) (dir, prof string, rest []string, err error) {
 }
 
 func create(be backend, args []string) error {
-	dir, prof, _, err := launchFlags(args)
+	dir, prof, rest, err := launchFlags(args)
 	if err != nil {
 		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("usage: crctl new [--dir D] [--profile P]")
 	}
 	s, err := be.create(dir, prof)
 	if err != nil {

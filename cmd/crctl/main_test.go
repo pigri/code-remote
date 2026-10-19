@@ -838,6 +838,12 @@ func TestProfileFlag(t *testing.T) {
 	for _, args := range [][]string{
 		{"new", "--profile"},
 		{"new", "--profile="},
+		{"new", "--profile", ""},
+		{"new", "--profile", "--dir", "/x"},
+		{"resume", "s1", "--profile", "-d"},
+		{"restart", "s1", "--profile", ""},
+		{"new", "private"},
+		{"new", "--dir", "/w", "extra"},
 		{"resume", "s1", "--profile"},
 		{"restart", "s1", "--profile="},
 		{"resume", "all", "--profile", "work"},
@@ -961,12 +967,17 @@ func TestLocalBackendPassesProfile(t *testing.T) {
 
 const (
 	unknownHint = "CLAUDE_REMOTE_PROFILES"
-	moveHint    = "moving a session between profiles is not supported yet"
+	moveHint    = "leave out --profile"
 )
+
+// saysOnce reports whether a profile-move error says "not supported" once:
+// the Manager's text says it, so the hint MUST NOT repeat it.
+func saysOnce(err error) bool { return strings.Count(err.Error(), "not supported") == 1 }
 
 func TestProfileErrors(t *testing.T) {
 	unknown := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
-	other := fmt.Errorf("%w: s1 is in profile %q, not %q", session.ErrOtherProfile, "work", "private")
+	other := fmt.Errorf("%w: s1 is in profile %q, not %q, and moving it is not supported",
+		session.ErrOtherProfile, "work", "private")
 	for _, c := range []struct {
 		name     string
 		be       *fakeBackend
@@ -987,6 +998,9 @@ func TestProfileErrors(t *testing.T) {
 		if err == nil || (c.want != nil && !errors.Is(err, c.want)) || !contains(err.Error(), c.hint) {
 			t.Errorf("%s: err = %v, want %v with %q", c.name, err, c.want, c.hint)
 			continue
+		}
+		if c.want == session.ErrOtherProfile && !saysOnce(err) {
+			t.Errorf("%s: err = %v, want \"not supported\" said once", c.name, err)
 		}
 		for _, h := range c.notHints {
 			if contains(err.Error(), h) {
@@ -1025,10 +1039,14 @@ func TestProfileErrorsHTTP(t *testing.T) {
 		{"restart other", []string{"restart", "s1", "--profile", "private"}, 409,
 			`session is in another profile: s1 is in profile "work", not "private", and moving it is not supported`,
 			session.ErrOtherProfile, "(409)", []string{unknownHint}},
-		{"already running is no move", []string{"resume", "s1"}, 409, "session already running",
-			nil, "session already running (409)", []string{unknownHint, moveHint}},
-		{"bad dir is no profile", []string{"new", "--dir", "/x"}, 400, "invalid directory: /x",
-			nil, "invalid directory", []string{unknownHint, moveHint}},
+		{"already running is no move", []string{"resume", "s1"}, 409, session.ErrAlreadyRunning.Error(),
+			nil, session.ErrAlreadyRunning.Error() + " (409)", []string{unknownHint, moveHint}},
+		{"bad dir is no profile", []string{"new", "--dir", "/x"}, 400, session.ErrInvalidDir.Error() + ": /x",
+			nil, session.ErrInvalidDir.Error(), []string{unknownHint, moveHint}},
+		{"other-profile text on a 400 is no move", []string{"restart", "s1", "--profile", "private"}, 400,
+			session.ErrOtherProfile.Error() + ": s1", nil, "(400)", []string{unknownHint, moveHint}},
+		{"unknown-profile text on a 409 is no unknown profile", []string{"resume", "s1", "--profile", "nope"}, 409,
+			session.ErrInvalidProfile.Error() + `: "nope"`, nil, "(409)", []string{unknownHint, moveHint}},
 		{"unknown session", []string{"restart", "s1", "--profile", "work"}, 404, "session not resumable: no session s1",
 			nil, "no session s1 (404)", []string{unknownHint, moveHint}},
 	} {
@@ -1042,10 +1060,54 @@ func TestProfileErrorsHTTP(t *testing.T) {
 		if c.want == nil && (errors.Is(err, session.ErrInvalidProfile) || errors.Is(err, session.ErrOtherProfile)) {
 			t.Errorf("%s: err = %v reads as a profile error", c.name, err)
 		}
+		if c.want == session.ErrOtherProfile && !saysOnce(err) {
+			t.Errorf("%s: err = %v, want \"not supported\" said once", c.name, err)
+		}
 		for _, h := range c.notHints {
 			if contains(err.Error(), h) {
 				t.Errorf("%s: err = %v, should not say %q", c.name, err, h)
 			}
 		}
+	}
+}
+
+// An API server that predates profiles ignores "profile" and launches the
+// session under its only account. crctl MUST NOT report that as success.
+func TestHTTPBackendDroppedProfile(t *testing.T) {
+	var reply string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(reply))
+	}))
+	defer srv.Close()
+	be := &httpBackend{base: srv.URL, token: "t"}
+	calls := map[string]func(prof string) (session.Session, error){
+		"create":  func(prof string) (session.Session, error) { return be.create("", prof) },
+		"resume":  func(prof string) (session.Session, error) { return be.resume("s2", "", prof) },
+		"restart": func(prof string) (session.Session, error) { return be.restart("s2", "", prof) },
+	}
+	for name, call := range calls {
+		reply = `{"id":"s2","screen":"p-s2"}`
+		_, err := call("private")
+		if err == nil || !contains(err.Error(), "does not support profiles") || !contains(err.Error(), "crctl rm s2") {
+			t.Errorf("%s with the profile omitted: err = %v, want a refusal naming crctl rm s2", name, err)
+		}
+		reply = `{"id":"s2","screen":"p-s2","profile":"default"}`
+		_, err = call("private")
+		if err == nil || !contains(err.Error(), `"default"`) || !contains(err.Error(), "crctl rm s2") {
+			t.Errorf("%s under another profile: err = %v, want a refusal naming default and crctl rm s2", name, err)
+		}
+		reply = `{"id":"s2","screen":"p-s2"}`
+		if _, err := call(""); err != nil {
+			t.Errorf("%s without --profile on an old server: err = %v, want none", name, err)
+		}
+	}
+
+	t.Setenv("CLAUDE_REMOTE_API_URL", srv.URL)
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	reply = `{"id":"s2","screen":"p-s2"}`
+	var err error
+	out := captureStdout(t, func() { err = run([]string{"new", "--profile", "private"}) })
+	if err == nil || contains(out, "started") || !contains(err.Error(), "started") {
+		t.Errorf("run new --profile on an old server: err = %v, out = %q; want the error to say it started", err, out)
 	}
 }

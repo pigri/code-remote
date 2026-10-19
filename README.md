@@ -307,11 +307,19 @@ crctl rm <id>       # stop a session
 
 `new`, `resume` and `restart` take `--profile <name>`, one of
 `CLAUDE_REMOTE_PROFILES` (the API server's, in remote mode). On `new` it picks
-the account, and it defaults to `CLAUDE_REMOTE_DEFAULT_PROFILE`. On `resume` and
-`restart` it defaults to the session's own profile. Naming another one is
-refused: moving a session between profiles is not supported yet. An unknown
-profile is an error too. Without `CLAUDE_REMOTE_PROFILES` the only profile is
-`default`.
+the account. It defaults to `CLAUDE_REMOTE_DEFAULT_PROFILE`, else the first
+profile listed in `CLAUDE_REMOTE_PROFILES`. On `resume` and `restart` it
+defaults to the session's own profile. Naming another one is refused: moving a
+session between profiles is not supported yet. An unknown profile is an error
+too. Without `CLAUDE_REMOTE_PROFILES` the only profile is `default`.
+
+An API server that predates profiles ignores `--profile` and launches the
+session under its only account. `crctl` then fails with an error that says the
+session is running and how to stop it.
+
+A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
+whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
+session as `default`, and `--profile` knows no other profile.
 
 `crctl upgrade` runs `claude update`. To also move running sessions onto the new
 version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);

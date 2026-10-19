@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -440,6 +441,35 @@ func TestHandlersProfileErrors(t *testing.T) {
 		rr := send(t, stubHandler(tc.mgr), http.MethodPost, tc.path, `{"profile":"x"}`)
 		if rr.Code != tc.want || !strings.Contains(rr.Body.String(), "profile") {
 			t.Errorf("POST %s with %v = %d %s, want %d naming the profile", tc.path, tc.mgr, rr.Code, rr.Body, tc.want)
+		}
+	}
+}
+
+// crctl tells the profile errors apart by the start of the error text, so
+// the handlers MUST write them unwrapped.
+func TestHandlersProfileErrorText(t *testing.T) {
+	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
+	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)
+	for _, tc := range []struct {
+		path string
+		mgr  *stubMgr
+		want error
+	}{
+		{"/sessions", &stubMgr{createErr: invalid}, session.ErrInvalidProfile},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: invalid}, session.ErrInvalidProfile},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: invalid}, session.ErrInvalidProfile},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: other}, session.ErrOtherProfile},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: other}, session.ErrOtherProfile},
+	} {
+		rr := send(t, stubHandler(tc.mgr), http.MethodPost, tc.path, `{"profile":"x"}`)
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("POST %s: body %s: %v", tc.path, rr.Body, err)
+		}
+		if !strings.HasPrefix(body.Error, tc.want.Error()) {
+			t.Errorf("POST %s: error %q, want it to start with %q", tc.path, body.Error, tc.want.Error())
 		}
 	}
 }
