@@ -394,7 +394,7 @@ func TestKillTriesEveryScreen(t *testing.T) {
 		killed  []string
 	}{
 		{"the first one exits before its quit", []string{legacy, named}, []string{legacy}, []string{named}},
-		{"two screens of one name", []string{named, named}, nil, []string{named, named}},
+		{"three screens of one name", []string{named, named, named}, nil, []string{named, named, named}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &fakeScreen{created: slices.Clone(tc.created)}
@@ -455,5 +455,38 @@ func TestNoRestartBesideAHiddenScreen(t *testing.T) {
 				t.Errorf("killed %v, launched %v, running %v; want both screens left alone", fs.killed, fs.launches, fs.created)
 			}
 		})
+	}
+}
+
+// A session listed with two screens restarts as one: both quit, one relaunch
+// under its profile's name.
+func TestRestartOfTwoScreens(t *testing.T) {
+	fastStop(t)
+	set, h := twoProfiles(t, "")
+	legacy, named := "test-rc-"+idA, "test-rc-work-"+idA
+	for _, op := range []string{"restart", "upgrade"} {
+		for _, order := range [][]string{{legacy, named}, {named, legacy}} {
+			t.Run(op+" "+strings.Join(order, ","), func(t *testing.T) {
+				upgradeHome(t, h.work, idA, "1.0.0", "idle")
+				fs := &fakeScreen{created: slices.Clone(order), version: "1.0.0", updateTo: "2.0.0"}
+				withFakeScreen(t, fs)
+				m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set}
+				if op == "restart" {
+					if _, err := m.Restart(idA); err != nil {
+						t.Fatalf("Restart: %v", err)
+					}
+				} else {
+					res, err := m.Upgrade(true, false)
+					if err != nil || len(res.Sessions) != 1 || res.Sessions[0].Action != ActionRestarted {
+						t.Fatalf("Upgrade = %+v, %v; want the session restarted", res.Sessions, err)
+					}
+				}
+				killed := slices.Sorted(slices.Values(fs.killed))
+				if !slices.Equal(killed, []string{legacy, named}) || len(fs.launches) != 1 ||
+					launchedName(fs.launches[0]) != named || !slices.Equal(fs.created, []string{named}) {
+					t.Errorf("killed %v, launched %v, running %v; want both quit and %s relaunched", fs.killed, fs.launches, fs.created, named)
+				}
+			})
+		}
 	}
 }

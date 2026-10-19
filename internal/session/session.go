@@ -908,7 +908,7 @@ func (m *Manager) parseScreens(out string) []Session {
 			continue
 		}
 		d := &sessions[i]
-		d.screens = append(d.screens, s.Screen)
+		d.screens = append(d.screens, s.screenTargets()...)
 		if d.named == "" && s.named != "" {
 			s.screens = d.screens
 			*d = s
