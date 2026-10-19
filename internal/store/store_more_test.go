@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -415,5 +416,45 @@ func TestMigrateAlterErrorWithoutColumn(t *testing.T) {
 	if d, err := Open(path); err == nil {
 		d.Close()
 		t.Fatal("Open succeeded although the ALTER failed and conv_id is missing")
+	}
+}
+
+// The server and crctl open the same database. Opens that overlap must wait
+// for each other's locks rather than fail with "database is locked". Each
+// round starts with no connection open, as after a restart, so the opens
+// race again.
+func TestConcurrentOpens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	const rounds, n = 30, 8
+	for round := range rounds {
+		start := make(chan struct{})
+		errs := make(chan error, n)
+		var wg sync.WaitGroup
+		for range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				d, err := Open(path)
+				if err == nil {
+					err = d.Close()
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent Open: %v", round, err)
+			}
+		}
 	}
 }

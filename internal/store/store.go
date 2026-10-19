@@ -47,7 +47,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1) // serialize writers; avoids SQLITE_BUSY
-	if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
+	if _, err := sqlDB.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("set pragmas: %w", err)
 	}
