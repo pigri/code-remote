@@ -369,9 +369,9 @@ func (c *regCache) index() regIndex {
 // regIndex reads every profile's registry and the process table once. An
 // entry counts only while its pid is alive, and only from the process that
 // wrote it: a crashed claude leaves its file behind, and another claude can
-// get its pid.
+// get its pid. When ps cannot be read, signal 0 tells which pids are alive.
 func (m *Manager) regIndex() regIndex {
-	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
+	out, psErr := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
 	var procs [][2]string // ppid, pid
 	args := map[string]string{}
 	for _, line := range strings.Split(string(out), "\n") {
@@ -399,9 +399,16 @@ func (m *Manager) regIndex() regIndex {
 			return o
 		}
 	}
+	alive := func(pid int) bool {
+		if psErr != nil {
+			return m.procAlive(pid)
+		}
+		_, listed := args[strconv.Itoa(pid)]
+		return listed || len(procs) == 0
+	}
 	for _, r := range regs {
 		pid := strconv.Itoa(r.PID)
-		if _, alive := args[pid]; r.PID > 0 && (len(procs) > 0 && !alive || !wroteBy(r, pid)) {
+		if r.PID > 0 && (!alive(r.PID) || !wroteBy(r, pid)) {
 			continue // its process is gone, or another one has its pid
 		}
 		ix.byID[r.SessionID] = append(ix.byID[r.SessionID], r)
@@ -509,4 +516,12 @@ func pidAlive(pid int) bool {
 	}
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// procAlive is pidAlive, or m's ProcAlive when set.
+func (m *Manager) procAlive(pid int) bool {
+	if m.ProcAlive != nil {
+		return m.ProcAlive(pid)
+	}
+	return pidAlive(pid)
 }

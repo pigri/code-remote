@@ -87,6 +87,10 @@ type Manager struct {
 	// when nil. A seam for tests.
 	ProcEnviron func(pid string) ([]string, error)
 
+	// ProcAlive reports whether process pid exists; optional, signal 0 when
+	// nil. A seam for tests.
+	ProcAlive func(pid int) bool
+
 	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
 
 	convMu   sync.Mutex

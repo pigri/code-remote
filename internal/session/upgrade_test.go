@@ -340,6 +340,18 @@ func TestPidAlive(t *testing.T) {
 	}
 }
 
+// procAlive is signal 0 unless the Manager sets ProcAlive.
+func TestProcAlive(t *testing.T) {
+	m := &Manager{}
+	if !m.procAlive(os.Getpid()) || m.procAlive(0) {
+		t.Error("procAlive without ProcAlive is not pidAlive")
+	}
+	m.ProcAlive = func(int) bool { return false }
+	if m.procAlive(os.Getpid()) {
+		t.Error("procAlive ignored ProcAlive")
+	}
+}
+
 func TestListAllAnnotatesVersion(t *testing.T) {
 	const (
 		oldID  = "11111111-1111-4111-8111-111111111111"
