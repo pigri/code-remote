@@ -2,9 +2,12 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -415,5 +418,209 @@ func TestMigrateAlterErrorWithoutColumn(t *testing.T) {
 	if d, err := Open(path); err == nil {
 		d.Close()
 		t.Fatal("Open succeeded although the ALTER failed and conv_id is missing")
+	}
+}
+
+// The server and crctl open the same database. Opens that overlap must wait
+// for each other's locks rather than fail with "database is locked". Each
+// round starts with no connection open, as after a restart, so the opens
+// race again.
+func TestConcurrentOpens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const rounds, n = 30, 8
+	for round := range rounds {
+		start := make(chan struct{})
+		errs := make(chan error, n)
+		var wg sync.WaitGroup
+		for range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				db, err := Open(path)
+				if err == nil {
+					err = db.Close()
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent Open: %v", round, err)
+			}
+		}
+	}
+}
+
+// openWhileLocked runs lock on another connection to path, then Open in the
+// background. The lock is released after 200 ms; Open must wait for it and
+// then succeed.
+func openWhileLocked(t *testing.T, path string, lock ...string) {
+	t.Helper()
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	other.SetMaxOpenConns(1) // the lock and its COMMIT share one connection
+	// The COMMIT waits out the shared lock Open's retries take.
+	for _, q := range append([]string{`PRAGMA busy_timeout=5000`}, lock...) {
+		if _, err := other.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		db, err := Open(path)
+		if err == nil {
+			err = db.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("Open returned while another connection held %q: %v", lock, err)
+	default:
+	}
+	if _, err := other.Exec(`COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Open while another connection held %q: %v", lock, err)
+	}
+}
+
+// rollbackLock leaves a database in rollback-journal mode, as an older
+// release left it, and takes a write lock on it with begin.
+func rollbackLock(begin string) []string {
+	return []string{`PRAGMA journal_mode=DELETE`, `CREATE TABLE t (x)`, begin, `INSERT INTO t VALUES (1)`}
+}
+
+// Every statement of Open, the WAL switch included, waits for an exclusive
+// lock held by another process.
+func TestOpenWaitsForExclusiveLock(t *testing.T) {
+	openWhileLocked(t, filepath.Join(t.TempDir(), "code-remote.db"), rollbackLock(`BEGIN EXCLUSIVE`)...)
+}
+
+// The WAL switch upgrades a read transaction to a write transaction, and
+// SQLite does not call the busy handler for that upgrade. Open must still wait
+// for a reserved lock held by another process.
+func TestOpenWaitsForReservedLock(t *testing.T) {
+	openWhileLocked(t, filepath.Join(t.TempDir(), "code-remote.db"), rollbackLock(`BEGIN IMMEDIATE`)...)
+}
+
+// On a database already in WAL mode, the migration waits through busy_timeout
+// for another process's write transaction.
+func TestOpenWaitsForWALWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE sessions DROP COLUMN conv_id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	openWhileLocked(t, path, `BEGIN IMMEDIATE`, `INSERT INTO events (kind) VALUES ('lock')`)
+}
+
+type codedErr int
+
+func (c codedErr) Error() string { return fmt.Sprintf("sqlite code %d", int(c)) }
+func (c codedErr) Code() int     { return int(c) }
+
+func TestIsBusy(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{codedErr(5), true},   // SQLITE_BUSY
+		{codedErr(261), true}, // SQLITE_BUSY_RECOVERY
+		{codedErr(517), true}, // SQLITE_BUSY_SNAPSHOT
+		{fmt.Errorf("set pragmas: %w", codedErr(5)), true},
+		{codedErr(6), false},  // SQLITE_LOCKED
+		{codedErr(26), false}, // SQLITE_NOTADB
+		{errors.New("database is locked"), false},
+		{nil, false},
+	} {
+		if got := isBusy(tc.err); got != tc.want {
+			t.Errorf("isBusy(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// Only SQLITE_BUSY is retried: Open of a file that is not a database fails at
+// once.
+func TestOpenNotADatabaseFailsAtOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	if err := os.WriteFile(path, []byte(strings.Repeat("not a database\n", 512)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	d, err := Open(path)
+	if err == nil {
+		d.Close()
+		t.Fatal("Open of a file that is not a database succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Open took %v to fail (%v), want well under the %v busy timeout", elapsed, err, busyTimeout)
+	}
+}
+
+// With another connection's write lock never released, the WAL switch gives
+// up after walSwitchTimeout and Open returns SQLITE_BUSY.
+func TestOpenGivesUpAfterWALSwitchTimeout(t *testing.T) {
+	walSwitchTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { walSwitchTimeout = busyTimeout })
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	other.SetMaxOpenConns(1)
+	for _, q := range append([]string{`PRAGMA busy_timeout=5000`}, rollbackLock(`BEGIN IMMEDIATE`)...) {
+		if _, err := other.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	limit := walSwitchTimeout + time.Second
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		db, err := Open(path)
+		if err == nil {
+			err = db.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !isBusy(err) {
+			t.Errorf("Open with the lock held = %v, want SQLITE_BUSY", err)
+		}
+		if elapsed := time.Since(start); elapsed > limit {
+			t.Errorf("Open gave up after %v, want under %v", elapsed, limit)
+		}
+	case <-time.After(limit):
+		other.Exec(`COMMIT`)
+		<-done
+		t.Fatalf("Open still blocked after %v with walSwitchTimeout %v", limit, walSwitchTimeout)
 	}
 }
