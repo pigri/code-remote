@@ -462,6 +462,11 @@ func TestHelpers(t *testing.T) {
 			t.Errorf("claudeHome = %q, want /custom/home", got)
 		}
 		t.Setenv("CLAUDE_HOME", "")
+		t.Setenv("CLAUDE_CONFIG_DIR", "/custom/config")
+		if got := claudeHome(); got != "/custom/config" {
+			t.Errorf("claudeHome with CLAUDE_CONFIG_DIR = %q, want /custom/config", got)
+		}
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
 		if got := claudeHome(); !contains(got, ".claude") {
 			t.Errorf("claudeHome fallback = %q, want a path ending in .claude", got)
 		}

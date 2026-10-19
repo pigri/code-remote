@@ -83,7 +83,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_SESSION_PREFIX` | `pigri-dev-remote` | Screen session name prefix (ownership scope) |
 | `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
-| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) are read from |
+| `CLAUDE_HOME` | `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Where session logs (titles) and the process registry are read from |
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |

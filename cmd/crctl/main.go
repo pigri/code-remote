@@ -560,15 +560,7 @@ func resolveBin(name string) string {
 	return name
 }
 
-func claudeHome() string {
-	if v := os.Getenv("CLAUDE_HOME"); v != "" {
-		return v
-	}
-	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".claude")
-	}
-	return ""
-}
+func claudeHome() string { return session.DefaultClaudeHome() }
 
 // isTrue reports whether an env value spells "on" (1, true, yes, ...).
 func isTrue(v string) bool {
