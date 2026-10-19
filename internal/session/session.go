@@ -112,10 +112,10 @@ var ErrNotResumable = errors.New("session not resumable")
 // is not configured. Callers can errors.Is to surface it as a 400.
 var ErrInvalidProfile = errors.New("unknown profile")
 
-// ErrOtherProfile is returned (wrapped) by ResumeIn and RestartIn when asked
-// to launch a session under a profile other than its own: a move between
-// profiles, which is not supported. Callers can errors.Is to surface it as a
-// 409.
+// ErrOtherProfile is returned (wrapped) by ProfileView.Kill for a session
+// another profile owns. API servers from before moves between profiles also
+// answer a resume or restart into another profile with it. Callers can
+// errors.Is to surface it as a 409.
 var ErrOtherProfile = errors.New("session is in another profile")
 
 // execCommand is the seam for shelling out to screen; overridden in tests.
@@ -547,9 +547,10 @@ func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "",
 // (validated against WorkspaceRoot, like Create's). Empty dir = where it last
 // ran. A bad dir is reported as ErrInvalidDir.
 //
-// prof names the profile to launch under; "" is the session's own. Another
-// profile than its own is refused (ErrOtherProfile), and an unknown one is
-// ErrInvalidProfile.
+// prof names the profile to launch under; "" is the session's own, and an
+// unknown one is ErrInvalidProfile. Another profile moves the session there:
+// its conversation is copied into that profile (see planCopy) and resumed
+// there as a fork. A different copy already there is ErrMoveConflict.
 //
 // A move forks the conversation (`--fork-session`): the history carries over,
 // under a new conversation id. That is what makes the move count server-side —
@@ -569,11 +570,11 @@ func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
 		}
 	}
-	p, err := m.launchProfile(id, own, prof)
+	p, err := m.launchProfile(own, prof)
 	if err != nil {
 		return Session{}, err
 	}
-	return m.resume(id, m.storedConv(p.Dir, id), dir, p)
+	return m.resume(id, m.storedConv(own.Dir, id), dir, own, p)
 }
 
 // storedCwd returns the working directory the Store last recorded for a
@@ -590,9 +591,11 @@ func (m *Manager) storedCwd(id string) string {
 // resume relaunches session id's screen, resuming conversation conv. The two
 // differ only when claude moved the session onto a new conversation id while it
 // ran (see Restart); the screen and Remote Control names always stay on id.
-// A non-empty dir moves the session to that working directory. p is the
-// session's profile.
-func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, error) {
+// A non-empty dir moves the session to that working directory. from is the
+// session's profile and p the one it launches under; when they differ, the
+// conversation is copied from one into the other first, and the Store
+// records p only once the launch has started.
+func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session, error) {
 	if !m.ValidID(id) || !m.ValidID(conv) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
@@ -608,9 +611,17 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 
 	// The session must exist on disk to resume. When its profile has no dir we
 	// can't look, so cwd stays empty and we let claude report a missing session.
-	logPath, cwd := sessionLog(p.Dir, conv)
-	if p.Dir != "" && logPath == "" {
+	logPath, cwd := sessionLog(from.Dir, conv)
+	if from.Dir != "" && logPath == "" {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, conv)
+	}
+	move := from.Name != p.Name
+	var cp *convCopy
+	if move {
+		var err error
+		if cp, err = m.planMove(from, p, conv); err != nil {
+			return Session{}, err
+		}
 	}
 	// Where to run: an explicit dir wins, then the directory the session was
 	// last launched in (it may have been moved since the log was started), then
@@ -629,14 +640,22 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 	// screen -dmS <screen> claude --resume <conv> [--fork-session] --remote-control <id>
 	args := []string{"-dmS", name, m.ClaudeBin, "--resume", conv}
 	rc := []string{"--remote-control", id}
-	if dir != "" {
+	fork := dir != "" || move
+	if fork {
 		args = append(args, "--fork-session") // a move: see ResumeIn
 		// The fork's new Remote Control session is titled after its name, and
 		// the title set on the old one doesn't follow. Name it after the
 		// session's title so it keeps showing under that. ("=" keeps a title
 		// that starts with "-" from being read as a flag.)
-		if t := convTitle(p.Dir, id, conv); t != "" {
+		if t := convTitle(from.Dir, id, conv); t != "" {
 			rc = []string{"--remote-control=" + t}
+		}
+	}
+	undo := func() {}
+	if move {
+		var err error
+		if undo, err = cp.run(); err != nil {
+			return Session{}, fmt.Errorf("copy the conversation to profile %q: %w", p.Name, err)
 		}
 	}
 	cmd := execCommand(m.ScreenBin, append(args, rc...)...)
@@ -650,6 +669,7 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 	}
 	needsTrust := m.prepareDir(p, cmd.Dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		undo()
 		return Session{}, fmt.Errorf("resume screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
@@ -658,7 +678,7 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 	// process registry. Until then the Store keeps the pre-fork conversation,
 	// which is still a valid place to resume from.
 	noteConv := func() {
-		if dir == "" {
+		if !fork {
 			m.noteConv(id, conv)
 		}
 	}

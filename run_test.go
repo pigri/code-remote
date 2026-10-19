@@ -429,11 +429,14 @@ func TestHandlersPassProfile(t *testing.T) {
 func TestHandlersProfileErrors(t *testing.T) {
 	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
 	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)
+	conflict := fmt.Errorf("%w: projects/p/x.jsonl differs there", session.ErrMoveConflict)
 	for _, tc := range []struct {
 		path string
 		mgr  *stubMgr
 		want int
 	}{
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: conflict}, http.StatusConflict},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: conflict}, http.StatusConflict},
 		{"/sessions", &stubMgr{createErr: invalid}, http.StatusBadRequest},
 		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: invalid}, http.StatusBadRequest},
 		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: invalid}, http.StatusBadRequest},
@@ -452,11 +455,14 @@ func TestHandlersProfileErrors(t *testing.T) {
 func TestHandlersProfileErrorText(t *testing.T) {
 	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
 	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)
+	conflict := fmt.Errorf("%w: projects/p/x.jsonl differs there", session.ErrMoveConflict)
 	for _, tc := range []struct {
 		path string
 		mgr  *stubMgr
 		want error
 	}{
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: conflict}, session.ErrMoveConflict},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: conflict}, session.ErrMoveConflict},
 		{"/sessions", &stubMgr{createErr: invalid}, session.ErrInvalidProfile},
 		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: invalid}, session.ErrInvalidProfile},
 		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: invalid}, session.ErrInvalidProfile},

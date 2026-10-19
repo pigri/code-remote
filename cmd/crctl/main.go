@@ -16,8 +16,8 @@
 //	crctl upgrade <id>...    # update claude, restart just these sessions
 //
 // new, resume and restart take --profile P, one of CLAUDE_REMOTE_PROFILES. On
-// resume and restart it defaults to the session's own profile; another one is
-// refused, because moving a session between profiles is not supported yet.
+// resume and restart it defaults to the session's own profile; another one
+// moves the session there (crctl restart <id> --profile P [--dir D]).
 //
 // Env:
 //
@@ -398,6 +398,7 @@ func httpStatus(err error) int {
 var apiSentinels = map[error]int{
 	session.ErrInvalidProfile: http.StatusBadRequest,
 	session.ErrOtherProfile:   http.StatusConflict,
+	session.ErrMoveConflict:   http.StatusConflict,
 }
 
 // Is makes errors.Is see the session error behind an API error, as it would in
@@ -414,7 +415,12 @@ func (e *apiError) Is(target error) bool {
 func profileErr(err error) error {
 	switch {
 	case errors.Is(err, session.ErrOtherProfile):
-		return fmt.Errorf("%w\n  leave out --profile to keep it in its own profile", err)
+		// Only an API server from before moves between profiles says this.
+		return fmt.Errorf("%w\n  this API server cannot move a session to another profile; upgrade the API server "+
+			"to move it, or leave out --profile to keep it in its own profile", err)
+	case errors.Is(err, session.ErrMoveConflict):
+		return fmt.Errorf("%w\n  nothing was overwritten; move that copy aside in the target profile's "+
+			"projects dir, then run this again", err)
 	case errors.Is(err, session.ErrInvalidProfile):
 		return fmt.Errorf("%w\n  the profiles are the names in CLAUDE_REMOTE_PROFILES (the API server's, "+
 			"in remote mode); without it the only one is \"default\"", err)
@@ -786,9 +792,12 @@ Usage:
   crctl profiles      list the profiles (Claude accounts); * marks the default
   --profile P         with new/resume/restart: the profile (Claude account) to
                       run under, one of CLAUDE_REMOTE_PROFILES. resume and
-                      restart default to the session's own profile; another
-                      one is refused, as moving a session between profiles is
-                      not supported yet
+                      restart default to the session's own profile. Another
+                      one moves the session there: its conversation is copied
+                      into that profile and the session comes back under the
+                      other account, as a new Remote Control session. The old
+                      one in the first account is archived by that account's
+                      sync once its grace period has passed
   --trust             with new/resume/restart: mark the session's directory as a
                       trusted folder for claude first, so a detached session
                       doesn't wait at the trust prompt (or CLAUDE_REMOTE_TRUST_DIRS=1)

@@ -951,6 +951,13 @@ func TestLocalBackendPassesProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A different copy in private makes a move refuse before it launches.
+	if err := os.MkdirAll(filepath.Join(private, "projects", "p"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(private, "projects", "p", id+".jsonl"), []byte("other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	missing := filepath.Join(t.TempDir(), "missing")
 	be := &localBackend{mgr: &session.Manager{
 		Prefix: "p", ScreenBin: missing, ClaudeBin: missing,
@@ -963,8 +970,8 @@ func TestLocalBackendPassesProfile(t *testing.T) {
 	}{
 		{"create unknown", func() (session.Session, error) { return be.create("", "nope") }, session.ErrInvalidProfile},
 		{"resume unknown", func() (session.Session, error) { return be.resume(id, "", "nope") }, session.ErrInvalidProfile},
-		{"resume other", func() (session.Session, error) { return be.resume(id, "", "private") }, session.ErrOtherProfile},
-		{"restart other", func() (session.Session, error) { return be.restart(id, "", "private") }, session.ErrOtherProfile},
+		{"resume other", func() (session.Session, error) { return be.resume(id, "", "private") }, session.ErrMoveConflict},
+		{"restart other", func() (session.Session, error) { return be.restart(id, "", "private") }, session.ErrMoveConflict},
 	} {
 		if _, err := c.call(); !errors.Is(err, c.want) {
 			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
@@ -973,8 +980,10 @@ func TestLocalBackendPassesProfile(t *testing.T) {
 }
 
 const (
-	unknownHint = "CLAUDE_REMOTE_PROFILES"
-	moveHint    = "leave out --profile"
+	unknownHint   = "CLAUDE_REMOTE_PROFILES"
+	moveHint      = "leave out --profile"
+	oldServerHint = "upgrade the API server to move it"
+	conflictHint  = "move that copy aside"
 )
 
 // saysOnce reports whether a profile-move error says "not supported" once:
@@ -985,6 +994,7 @@ func TestProfileErrors(t *testing.T) {
 	unknown := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
 	other := fmt.Errorf("%w: s1 is in profile %q, not %q, and moving it is not supported",
 		session.ErrOtherProfile, "work", "private")
+	conflict := fmt.Errorf("%w: projects/p/s1.jsonl differs there; not overwriting it", session.ErrMoveConflict)
 	for _, c := range []struct {
 		name     string
 		be       *fakeBackend
@@ -997,8 +1007,9 @@ func TestProfileErrors(t *testing.T) {
 		{"new unknown", &fakeBackend{createErr: unknown}, create, []string{"--profile", "nope"}, session.ErrInvalidProfile, unknownHint, []string{moveHint}},
 		{"resume unknown", &fakeBackend{resumeErr: unknown}, resume, []string{"s1", "--profile", "nope"}, session.ErrInvalidProfile, unknownHint, []string{moveHint}},
 		{"resume other", &fakeBackend{resumeErr: other}, resume, []string{"s1", "--profile", "private"}, session.ErrOtherProfile, moveHint, []string{unknownHint}},
-		{"restart other", &fakeBackend{restartErr: other}, restart, []string{"s1", "--profile", "private"}, session.ErrOtherProfile, moveHint, []string{unknownHint}},
-		{"other error unchanged", &fakeBackend{restartErr: errors.New("boom")}, restart, []string{"s1"}, nil, "boom", []string{unknownHint, moveHint}},
+		{"restart other", &fakeBackend{restartErr: other}, restart, []string{"s1", "--profile", "private"}, session.ErrOtherProfile, oldServerHint, []string{unknownHint}},
+		{"restart conflict", &fakeBackend{restartErr: conflict}, restart, []string{"s1", "--profile", "private"}, session.ErrMoveConflict, conflictHint, []string{unknownHint, moveHint, oldServerHint}},
+		{"other error unchanged", &fakeBackend{restartErr: errors.New("boom")}, restart, []string{"s1"}, nil, "boom", []string{unknownHint, moveHint, conflictHint}},
 	} {
 		var err error
 		_ = captureStdout(t, func() { err = c.cmd(c.be, c.args) })
@@ -1045,7 +1056,12 @@ func TestProfileErrorsHTTP(t *testing.T) {
 			session.ErrOtherProfile, moveHint, []string{unknownHint}},
 		{"restart other", []string{"restart", "s1", "--profile", "private"}, 409,
 			`session is in another profile: s1 is in profile "work", not "private", and moving it is not supported`,
-			session.ErrOtherProfile, "(409)", []string{unknownHint}},
+			session.ErrOtherProfile, oldServerHint, []string{unknownHint, conflictHint}},
+		{"restart conflict", []string{"restart", "s1", "--profile", "private"}, 409,
+			session.ErrMoveConflict.Error() + ": projects/p/s1.jsonl differs there; not overwriting it (moving to profile \"private\")",
+			session.ErrMoveConflict, conflictHint, []string{unknownHint, oldServerHint}},
+		{"conflict text on a 400 is no conflict", []string{"restart", "s1", "--profile", "private"}, 400,
+			session.ErrMoveConflict.Error(), nil, "(400)", []string{unknownHint, oldServerHint, conflictHint}},
 		{"already running is no move", []string{"resume", "s1"}, 409, session.ErrAlreadyRunning.Error(),
 			nil, session.ErrAlreadyRunning.Error() + " (409)", []string{unknownHint, moveHint}},
 		{"bad dir is no profile", []string{"new", "--dir", "/x"}, 400, session.ErrInvalidDir.Error() + ": /x",
@@ -1064,7 +1080,8 @@ func TestProfileErrorsHTTP(t *testing.T) {
 			t.Errorf("%s: err = %v, want %v with %q", c.name, err, c.want, c.hint)
 			continue
 		}
-		if c.want == nil && (errors.Is(err, session.ErrInvalidProfile) || errors.Is(err, session.ErrOtherProfile)) {
+		if c.want == nil && (errors.Is(err, session.ErrInvalidProfile) || errors.Is(err, session.ErrOtherProfile) ||
+			errors.Is(err, session.ErrMoveConflict)) {
 			t.Errorf("%s: err = %v reads as a profile error", c.name, err)
 		}
 		if c.want == session.ErrOtherProfile && !saysOnce(err) {

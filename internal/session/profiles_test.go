@@ -331,40 +331,6 @@ func TestUnknownProfileLaunchesNothing(t *testing.T) {
 	}
 }
 
-func TestOtherProfileIsRefused(t *testing.T) {
-	fastStop(t)
-	set, h := twoProfiles(t, "")
-	writeTitledLog(t, h.private, idA, "t")
-	fst := &fakeStore{stored: map[string]string{idA: "private"}}
-
-	t.Run("resume", func(t *testing.T) {
-		fs := &fakeScreen{}
-		withFakeScreen(t, fs)
-		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
-		if _, err := m.ResumeIn(idA, "", "work"); !errors.Is(err, ErrOtherProfile) {
-			t.Fatalf("ResumeIn(work) err = %v, want ErrOtherProfile", err)
-		}
-		if len(fs.launches) != 0 {
-			t.Errorf("launches = %v, want none", fs.launches)
-		}
-		if _, err := m.ResumeIn(idA, "", "private"); err != nil {
-			t.Errorf("ResumeIn(its own profile) err = %v", err)
-		}
-	})
-
-	t.Run("restart", func(t *testing.T) {
-		fs := &fakeScreen{created: []string{"test-rc-" + idA}}
-		withFakeScreen(t, fs)
-		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
-		if _, err := m.RestartIn(idA, "", "work"); !errors.Is(err, ErrOtherProfile) {
-			t.Fatalf("RestartIn(work) err = %v, want ErrOtherProfile", err)
-		}
-		if len(fs.killed) != 0 || len(fs.launches) != 0 {
-			t.Errorf("killed %v, launched %v; want the session left alone", fs.killed, fs.launches)
-		}
-	})
-}
-
 func TestListAllResolvesStoppedProfiles(t *testing.T) {
 	set, h := twoProfiles(t, "")
 	writeTitledLog(t, h.private, idA, "private title")

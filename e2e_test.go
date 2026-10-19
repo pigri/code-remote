@@ -256,8 +256,8 @@ func TestE2EProfilesLifecycle(t *testing.T) {
 		t.Errorf("stopped session = %+v, want Stopped in private with its title", s)
 	}
 
-	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+p.ID+"/resume", `{"profile":"work"}`, nil); code != http.StatusConflict {
-		t.Errorf("resume into another profile = %d, want 409", code)
+	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+p.ID+"/resume", `{"profile":"nope"}`, nil); code != http.StatusBadRequest {
+		t.Errorf("resume into an unknown profile = %d, want 400", code)
 	}
 	var r session.Session
 	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+p.ID+"/resume", "", &r); code != http.StatusCreated || r.Profile != "private" {
@@ -399,6 +399,135 @@ func TestE2EProfileScreenNames(t *testing.T) {
 		t.Fatalf("DELETE = %d", code)
 	}
 	waitFor([]string{wName}, []string{pName})
+}
+
+// TestE2EMoveBetweenProfiles moves a running private session to work over
+// the API, with real screens, then stops it and resumes it in work.
+func TestE2EMoveBetweenProfiles(t *testing.T) {
+	screenBin, err := exec.LookPath("screen")
+	if err != nil {
+		t.Skip("screen not installed; skipping e2e")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home) // inherited by screen -> stub
+	work, private := filepath.Join(home, ".claude"), filepath.Join(home, ".claude-private")
+	for _, d := range []string{work, private} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The server's own CLAUDE_CONFIG_DIR must reach no child.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "parent"))
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	set, err := profile.FromEnv("", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(home, "claude")
+	if err := os.WriteFile(stub, []byte(stubProfileClaude), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(home, "mirror.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	prefix := fmt.Sprintf("crapi-e2e-move-%d", os.Getpid())
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: stub, ScreenBin: screenBin, Profiles: set, Store: db}
+	ts := httptest.NewServer(newHandler(e2eToken, mgr, nil, db))
+	defer ts.Close()
+
+	// running is this test's screen names: every screen under prefix.
+	running := func() map[string]bool {
+		out, _ := exec.Command(screenBin, "-ls").CombinedOutput()
+		names := map[string]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if f := strings.Fields(line); len(f) > 0 {
+				if _, name, ok := strings.Cut(f[0], "."); ok && strings.HasPrefix(name, prefix+"-") {
+					names[name] = true
+				}
+			}
+		}
+		return names
+	}
+	t.Cleanup(func() {
+		for name := range running() {
+			_ = exec.Command(screenBin, "-S", name, "-X", "quit").Run()
+		}
+	})
+	// lines waits for the log of id under dir to hold n lines, and returns it.
+	lines := func(dir, id string, n int) []string {
+		t.Helper()
+		log := filepath.Join(dir, "projects", "e2e", id+".jsonl")
+		var data []byte
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if data, _ = os.ReadFile(log); strings.Count(string(data), "\n") == n {
+				break
+			}
+		}
+		got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+		if strings.Count(string(data), "\n") != n {
+			t.Fatalf("%s:\n%s\nwant %d lines", log, data, n)
+		}
+		return got
+	}
+
+	var p session.Session
+	if code := reqBody(t, ts, http.MethodPost, "/sessions", `{"profile":"private"}`, &p); code != http.StatusCreated {
+		t.Fatalf("POST /sessions private = %d", code)
+	}
+	lines(private, p.ID, 1)
+	side := filepath.Join("projects", "e2e", p.ID, "tool-results", "r.txt")
+	if err := os.MkdirAll(filepath.Join(private, filepath.Dir(side)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(private, side), []byte("result\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var moved session.Session
+	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+p.ID+"/restart", `{"profile":"work"}`, &moved); code != http.StatusOK {
+		t.Fatalf("move to work = %d", code)
+	}
+	wName := prefix + "-work-" + p.ID
+	if moved.Profile != "work" || moved.Screen != wName {
+		t.Errorf("moved = %+v, want profile work, screen %s", moved, wName)
+	}
+	// The copy carries the history; the work child appends to it under
+	// ~/.claude, so it ran without the server's CLAUDE_CONFIG_DIR.
+	got := lines(work, p.ID, 2)
+	if !strings.Contains(got[0], "in .claude-private") || !strings.Contains(got[1], "in .claude\"") {
+		t.Errorf("work log = %q, want the private history, then a launch in .claude", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(work, side)); err != nil || string(data) != "result\n" {
+		t.Errorf("work sidecar = %q, %v; want the private one copied", data, err)
+	}
+	if got := lines(private, p.ID, 1); !strings.Contains(got[0], "in .claude-private") {
+		t.Errorf("private log = %q, want it intact", got)
+	}
+	if rec, err := db.Profile(p.ID); err != nil || rec != "work" {
+		t.Errorf("stored profile = %q, %v; want work", rec, err)
+	}
+	if r := running(); !r[wName] || r[prefix+"-private-"+p.ID] {
+		t.Errorf("screens = %v, want only %s", r, wName)
+	}
+
+	// Stopped, it resumes in work by default.
+	if code := reqBody(t, ts, http.MethodDelete, "/sessions/"+p.ID, "", nil); code != http.StatusOK {
+		t.Fatalf("DELETE = %d", code)
+	}
+	for deadline := time.Now().Add(3 * time.Second); running()[wName] && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+	}
+	var r session.Session
+	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+p.ID+"/resume", "", &r); code != http.StatusCreated || r.Profile != "work" || r.Screen != wName {
+		t.Fatalf("resume = %d %+v, want 201 in work as %s", code, r, wName)
+	}
+	if got := lines(work, p.ID, 3); !strings.Contains(got[2], "in .claude\"") {
+		t.Errorf("work log = %q, want the resume appended in work", got)
+	}
+	lines(private, p.ID, 1)
 }
 
 func req(t *testing.T, ts *httptest.Server, method, path string, out any) int {
