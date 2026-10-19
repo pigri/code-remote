@@ -104,9 +104,9 @@ func (f *fakeManager) Kill(id string) (bool, error) {
 func TestReconcilerWithSQLiteStorePersistsGrace(t *testing.T) {
 	d := openTemp(t)
 	cl := &fakeCloud{sessions: []cloud.Session{{ID: "session_X", SessionStatus: "archived", Title: "t"}}}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "u1", Screen: "p-u1", Title: "t"}},
-		regs:     []session.Registration{{SessionID: "u1", Cwd: "/repo", BridgeSessionID: "session_X"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "u1", Screen: "p-u1", Title: "t"}}},
+		live:        map[string]session.Registration{"u1": {SessionID: "u1", Cwd: "/repo", BridgeSessionID: "session_X"}},
 	}
 	clk := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
