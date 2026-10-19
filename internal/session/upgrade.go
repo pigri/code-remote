@@ -71,7 +71,8 @@ func (m *Manager) Version() string {
 // Upgrade runs `claude update` and then, when restart is set, restarts the
 // running sessions so they pick up the new binary. Each restart resumes the
 // ORIGINAL session id (see Restart), so the conversation, screen name, and
-// Remote Control name all carry over.
+// Remote Control name all carry over (a screen still named <prefix>-<id> is
+// renamed after its profile, see launchName).
 //
 // Only sessions that need it are restarted: one already running the installed
 // version is skipped, and so is one that isn't idle (restarting would cut off
@@ -160,7 +161,8 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 }
 
 // Restart stops a running session and relaunches it under the same screen and
-// Remote Control name, resuming its conversation (`claude --resume`) in the
+// Remote Control name (a screen still named <prefix>-<id> is renamed after its
+// profile, see launchName), resuming its conversation (`claude --resume`) in the
 // working directory it was running in. A session that is already stopped is
 // simply resumed.
 //

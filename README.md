@@ -26,6 +26,28 @@ screen -dmS <prefix>-<uuid> claude --session-id <uuid> --remote-control <uuid>
 - Stopping/restarting the API does **not** kill running sessions (the systemd
   unit uses `KillMode=process`); they're rediscovered via `screen -ls`.
 
+### Screen names
+
+`<prefix>` is `CLAUDE_REMOTE_SESSION_PREFIX`. Without `CLAUDE_REMOTE_PROFILES`
+a session's screen is `<prefix>-<uuid>`. With it, the screen also carries the
+session's profile: `<prefix>-<profile>-<uuid>`, for example
+`pigri-dev-remote-private-<uuid>`.
+
+- The listing takes a screen as a session when its name is `<prefix>-<uuid>`,
+  or `<prefix>-<profile>-<uuid>` for a configured profile. Any other screen is
+  left alone, including one named after a profile that is no longer
+  configured.
+- The uuid is the fixed-length end of the name, so a `-` in the prefix or in a
+  profile name (`my-work`) is never ambiguous.
+- A `<prefix>-<uuid>` screen from before profiles is still listed, stopped and
+  restarted. Its next restart, resume or upgrade relaunches it under
+  `<prefix>-<profile>-<uuid>`.
+- The profile in a name is a hint. A profile the database recorded for the
+  session wins over it, and the name wins over a guess from where the
+  session's log is. A `<prefix>-<uuid>` name hints nothing.
+- Stop, restart and upgrade find a session's screen by its uuid, whatever name
+  it runs under.
+
 ## Requirements
 
 - Go 1.26+
@@ -134,7 +156,8 @@ keeps its config in `~/.claude.json`; any other profile launches it with
 server's environment as it is.
 
 A session's profile is the one recorded when it was launched. For a session
-recorded before profiles existed, it is the first profile whose dir holds the
+recorded before profiles existed, it is the profile its screen name carries
+(see [Screen names](#screen-names)), then the first profile whose dir holds the
 session's log, then the profile at `~/.claude`, then the default.
 
 A move forks the conversation (`claude --resume <id> --fork-session`): the
@@ -319,7 +342,8 @@ session is running and how to stop it.
 
 A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
 whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
-session as `default`, and `--profile` knows no other profile.
+session as `default`, does not see a session whose screen carries its profile,
+and `--profile` knows no other profile.
 
 `crctl upgrade` runs `claude update`. To also move running sessions onto the new
 version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);
@@ -537,8 +561,9 @@ absolute path in `.env` — systemd's PATH doesn't include `~/.local/bin`.
   without a token).
 - The default bind is `:8080` — put it behind TLS (reverse proxy / tunnel), or
   bind `127.0.0.1`, since the bearer token rides the wire.
-- The manager only ever lists/kills `screen` sessions matching the prefix, and
-  session ids are UUID-validated, so it can't touch unrelated screens.
+- The manager only ever lists/kills `screen` sessions matching the prefix (see
+  [Screen names](#screen-names)), and session ids are UUID-validated, so it
+  can't touch unrelated screens.
 
 ## Caveat
 

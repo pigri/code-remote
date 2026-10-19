@@ -277,6 +277,130 @@ func TestE2EProfilesLifecycle(t *testing.T) {
 	}
 }
 
+// TestE2EProfileScreenNames runs real screens: each session is named after its
+// profile, a session started under the legacy <prefix>-<id> is still listed,
+// stopped and restarted, and its restart renames it.
+func TestE2EProfileScreenNames(t *testing.T) {
+	screenBin, err := exec.LookPath("screen")
+	if err != nil {
+		t.Skip("screen not installed; skipping e2e")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home) // inherited by screen -> stub
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	work, private := filepath.Join(home, ".claude"), filepath.Join(home, ".claude-my-private")
+	for _, d := range []string{work, private} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,my-private=~/.claude-my-private")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	set, err := profile.FromEnv("", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(home, "claude")
+	if err := os.WriteFile(stub, []byte(stubProfileClaude), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	prefix := fmt.Sprintf("crapi-e2e-names-%d", os.Getpid())
+	mgr := &session.Manager{Prefix: prefix, ClaudeBin: stub, ScreenBin: screenBin, Profiles: set}
+	ts := httptest.NewServer(newHandler(e2eToken, mgr, nil, nil))
+	defer ts.Close()
+
+	// running is the set of this test's screen names, as screen lists them.
+	var running func() map[string]bool
+	// Every screen under prefix is this test's, and the cleanup does not rely
+	// on the naming it tests to find them.
+	t.Cleanup(func() {
+		for name := range running() {
+			_ = exec.Command(screenBin, "-S", name, "-X", "quit").Run()
+		}
+	})
+	running = func() map[string]bool {
+		out, _ := exec.Command(screenBin, "-ls").CombinedOutput()
+		names := map[string]bool{}
+		for _, line := range strings.Split(string(out), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
+			}
+			if _, name, ok := strings.Cut(f[0], "."); ok && strings.HasPrefix(name, prefix+"-") {
+				names[name] = true
+			}
+		}
+		return names
+	}
+	// waitFor waits until screen lists every name in want and none in gone.
+	waitFor := func(want, gone []string) {
+		t.Helper()
+		var got map[string]bool
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			got = running()
+			ok := true
+			for _, n := range want {
+				ok = ok && got[n]
+			}
+			for _, n := range gone {
+				ok = ok && !got[n]
+			}
+			if ok {
+				return
+			}
+		}
+		t.Fatalf("screens = %v, want %v and not %v", got, want, gone)
+	}
+
+	// A session started before screens carried their profile.
+	legacyID := "4f1a2b3c-5d6e-4f70-8a91-b2c3d4e5f607"
+	legacy := prefix + "-" + legacyID
+	start := exec.Command(screenBin, "-dmS", legacy, stub, "--session-id", legacyID, "--remote-control", legacyID)
+	if out, err := start.CombinedOutput(); err != nil {
+		t.Fatalf("start legacy screen: %v: %s", err, out)
+	}
+
+	var w, p session.Session
+	if code := reqBody(t, ts, http.MethodPost, "/sessions", "", &w); code != http.StatusCreated {
+		t.Fatalf("POST /sessions = %d", code)
+	}
+	if code := reqBody(t, ts, http.MethodPost, "/sessions", `{"profile":"my-private"}`, &p); code != http.StatusCreated {
+		t.Fatalf("POST /sessions my-private = %d", code)
+	}
+	wName, pName := prefix+"-work-"+w.ID, prefix+"-my-private-"+p.ID
+	if w.Screen != wName || p.Screen != pName {
+		t.Errorf("screens = %q, %q; want %q, %q", w.Screen, p.Screen, wName, pName)
+	}
+	waitFor([]string{wName, pName, legacy}, nil)
+
+	var l struct {
+		Sessions []session.Session `json:"sessions"`
+	}
+	if code := reqBody(t, ts, http.MethodGet, "/sessions", "", &l); code != http.StatusOK {
+		t.Fatalf("GET /sessions = %d", code)
+	}
+	got := map[string]session.Session{}
+	for _, s := range l.Sessions {
+		got[s.ID] = s
+	}
+	for id, want := range map[string][2]string{w.ID: {"work", wName}, p.ID: {"my-private", pName}, legacyID: {"work", legacy}} {
+		if s := got[id]; s.Profile != want[0] || s.Screen != want[1] {
+			t.Errorf("listed %s = %+v, want profile %s, screen %s", id, s, want[0], want[1])
+		}
+	}
+
+	if code := reqBody(t, ts, http.MethodPost, "/sessions/"+legacyID+"/restart", "", nil); code != http.StatusOK {
+		t.Fatalf("restart legacy = %d", code)
+	}
+	waitFor([]string{prefix + "-work-" + legacyID}, []string{legacy})
+
+	if code := reqBody(t, ts, http.MethodDelete, "/sessions/"+p.ID, "", nil); code != http.StatusOK {
+		t.Fatalf("DELETE = %d", code)
+	}
+	waitFor([]string{wName}, []string{pName})
+}
+
 func req(t *testing.T, ts *httptest.Server, method, path string, out any) int {
 	t.Helper()
 	return reqBody(t, ts, method, path, "", out)
