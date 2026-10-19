@@ -550,8 +550,16 @@ func TestHelpers(t *testing.T) {
 		}
 	})
 	t.Run("usage", func(t *testing.T) {
-		if out := captureStdout(t, usage); !contains(out, "crctl") {
+		out := captureStdout(t, usage)
+		if !contains(out, "crctl") {
 			t.Error("usage output missing program name")
+		}
+		// skills/session-repo/restart-self.sh greps `crctl help` for these,
+		// each on one line, to tell whether this crctl can do what it asks.
+		for _, marker := range []string{"--trust", "moves the session there"} {
+			if !contains(out, marker) {
+				t.Errorf("usage output lacks %q, which restart-self.sh looks for", marker)
+			}
 		}
 	})
 }

@@ -33,6 +33,9 @@ jobs:
       - name: unit tests
         run: go test -race ./...
 
+      - name: session-repo skill tests
+        run: shellcheck skills/session-repo/*.sh && bash skills/session-repo/restart-self_test.sh
+
       - name: install screen (for e2e)
         run: sudo apt-get update && sudo apt-get install -y screen
 

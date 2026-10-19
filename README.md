@@ -489,7 +489,9 @@ it goes idle. The conversation's history carries over; the Claude apps list
 the moved session as a new entry (see the note on moving under [API](#api)).
 
 Install it for the user the sessions run as (skills are per-user, read from
-`~/.claude/skills`):
+`~/.claude/skills`). With `CLAUDE_REMOTE_PROFILES` set, `make install-skill`
+also installs it into the `skills/` dir of each profile whose dir exists; it
+never creates a profile dir. `SKILLDIRS="dir1 dir2"` overrides the list.
 
 ```sh
 # from a checkout
@@ -501,19 +503,27 @@ cp -r /usr/share/code-remote/skills/session-repo ~/.claude/skills/
 ```
 
 It needs a `crctl` with `restart --dir --trust` on the session's `PATH`, running
-in local mode. Sessions that are already running pick the skill up after their
-next restart (`crctl restart <id>`).
+in local mode. Under profiles it needs a `crctl` that moves sessions between
+them (`crctl restart <id> --profile P`). Sessions that are already running
+pick the skill up after their next restart (`crctl restart <id>`).
 
 Then, inside a session, ask for it in plain words — "restart yourself in the
 api repo", or "PRs aren't showing up for this session" — or run
 `/session-repo`. The session confirms the target repo, wraps up what it is
 doing, and restarts; it is back with the same history a few seconds later.
 
+With profiles, "move this session to my private profile" moves it to that
+Claude account: the session comes back there with the same history, as a new
+session. Its old entry stays in the first account's Claude apps until you
+archive it there by hand.
+
 Notes:
 
 - The move marks the repo as a trusted folder for Claude (a detached session
   can't answer the trust prompt), so the skill only moves into a repo you named
-  or the session has been working in.
+  or the session has been working in. A move to another profile without a repo
+  marks the session's current dir instead, in that profile; the skill refuses
+  it when that dir is your home dir or `/`.
 - Background shells started by the session don't survive the restart;
   uncommitted changes in the working tree do.
 - If a session doesn't come back, the helper's output is in
