@@ -28,7 +28,8 @@ func run(m *testing.M) int {
 	return m.Run()
 }
 
-// Isolate sets the environment so that nothing resolves outside dir.
+// Isolate sets the environment so that nothing resolves outside dir, and no
+// profile or session setting of the caller's reaches the tests.
 func Isolate(dir string) error {
 	set := map[string]string{
 		"HOME":             dir,
@@ -40,7 +41,8 @@ func Isolate(dir string) error {
 			return err
 		}
 	}
-	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CLAUDE_HOME"} {
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CLAUDE_HOME", "CLAUDE_REMOTE_PROFILES",
+		"CLAUDE_REMOTE_DEFAULT_PROFILE", "CLAUDE_REMOTE_CREDENTIALS", "CLAUDE_REMOTE_SESSION_PREFIX"} {
 		if err := os.Unsetenv(k); err != nil {
 			return err
 		}

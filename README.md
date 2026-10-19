@@ -83,12 +83,14 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_SESSION_PREFIX` | `pigri-dev-remote` | Screen session name prefix (ownership scope) |
 | `CLAUDE_BIN` | `claude` | Path/name of the claude binary |
 | `SCREEN_BIN` | `screen` | Path/name of the screen binary |
-| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) and the process registry are read from. `CLAUDE_CONFIG_DIR` takes precedence when set, because the launched claude writes there |
+| `CLAUDE_HOME` | `~/.claude` | Where session logs (titles) and the process registry are read from. `CLAUDE_CONFIG_DIR` takes precedence when set, because the launched claude writes there. Ignored when `CLAUDE_REMOTE_PROFILES` is set |
+| `CLAUDE_REMOTE_PROFILES` | unset | Several Claude accounts on one server, as `name=dir` pairs: `work=~/.claude,private=~/.claude-private`. Names match `[a-z0-9_-]+`; a repeated name or dir is a startup error. Each session runs under one profile, with its logs, registry and trust file in that dir. Unset: one profile, `default`, at `CLAUDE_HOME` as above |
+| `CLAUDE_REMOTE_DEFAULT_PROFILE` | the first listed | Profile for a request that names none |
 | `CLAUDE_REMOTE_LOG_FORMAT` | `text` | Audit log format: `text` (key=value) or `json` |
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
 | `CLAUDE_REMOTE_ARCHIVE_GRACE` | `15m` | A session must stay archived this long before its screen is quit (`0` = immediate) |
-| `CLAUDE_REMOTE_CREDENTIALS` | `.credentials.json` in the claude home (`$CLAUDE_CONFIG_DIR`, `$CLAUDE_HOME` or `~/.claude`) | OAuth credentials file (token source for the Sessions API) |
+| `CLAUDE_REMOTE_CREDENTIALS` | `.credentials.json` in the claude home (`$CLAUDE_CONFIG_DIR`, `$CLAUDE_HOME` or `~/.claude`), or in the default profile's dir with `CLAUDE_REMOTE_PROFILES` | OAuth credentials file (token source for the Sessions API). With several profiles, session sync covers only the default profile's sessions |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 | `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
 | `CLAUDE_REMOTE_DB` | `$XDG_DATA_HOME/code-remote/code-remote.db` | SQLite session mirror + ledger path |
@@ -120,6 +122,20 @@ resumes/restarts/upgrades keep it there. Use it to put a session inside its git
 repository — a session started somewhere that isn't one (e.g. `$HOME`) registers
 with no repository, so the Claude apps can't show its branch, diff, or pull
 requests.
+
+`POST /sessions`, `resume` and `restart` also take `"profile": "<name>"`, one
+of `CLAUDE_REMOTE_PROFILES`. On create it picks the account, and it defaults to
+`CLAUDE_REMOTE_DEFAULT_PROFILE`. On resume and restart it defaults to the
+session's own profile, and naming another one is refused with `409`: a session
+cannot move between profiles yet. An unknown profile is `400`. A profile
+listed at `~/.claude` launches Claude with `CLAUDE_CONFIG_DIR` unset, so it
+keeps its config in `~/.claude.json`; any other profile launches it with
+`CLAUDE_CONFIG_DIR=<dir>`. Without `CLAUDE_REMOTE_PROFILES`, Claude inherits the
+server's environment as it is.
+
+A session's profile is the one recorded when it was launched. For a session
+recorded before profiles existed, it is the first profile whose dir holds the
+session's log, then the profile at `~/.claude`, then the default.
 
 A move forks the conversation (`claude --resume <id> --fork-session`): the
 history carries over, under a new conversation id. That is deliberate — a
@@ -178,7 +194,8 @@ is restarted and the response is `500` with the updater's output.
   "title": "Synapse - platform - k8s",
   "pid": "3993347",
   "status": "Detached",
-  "created_at": "06/15/2026 08:41:26 AM"
+  "created_at": "06/15/2026 08:41:26 AM",
+  "profile": "work"
 }
 ```
 

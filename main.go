@@ -69,6 +69,12 @@ func run(parent context.Context) int {
 		log.Print(err)
 		return 1
 	}
+	// One credentials file would sign every profile's sync into one account.
+	if profiles.Multi() && os.Getenv("CLAUDE_REMOTE_CREDENTIALS") != "" {
+		log.Print("CLAUDE_REMOTE_CREDENTIALS cannot be used with CLAUDE_REMOTE_PROFILES: " +
+			"the session sync uses the default profile's own credentials")
+		return 1
+	}
 
 	logger := auditLogger()
 
@@ -240,7 +246,12 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 		return nil
 	}
 
-	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(mgr.ClaudeHome, ".credentials.json"))
+	home, view, err := syncTarget(mgr)
+	if err != nil {
+		logger.Warn("session_sync_disabled", "reason", "no view of the default profile", "error", err.Error())
+		return nil
+	}
+	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(home, ".credentials.json"))
 	if _, err := os.Stat(credsPath); err != nil {
 		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
 		return nil
@@ -270,7 +281,7 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 	}
 	rec := &cloud.Reconciler{
 		Cloud:      client,
-		Manager:    mgr,
+		Manager:    view,
 		Interval:   interval,
 		Grace:      grace,
 		Log:        logger,
@@ -294,6 +305,30 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 	return h
 }
 
+// reconcileManager is the slice of *session.Manager the reconciler uses.
+type reconcileManager interface {
+	List() ([]session.Session, error)
+	Kill(id string) (bool, error)
+	Registrations() ([]session.Registration, error)
+	LiveRegistrations() map[string]session.Registration
+}
+
+// syncTarget is what the reconciler works on: the claude config dir whose
+// credentials it uses, and the sessions it sees. With several profiles that is
+// the default profile and its sessions only, since another account's sessions
+// would read as deleted in this account's cloud.
+func syncTarget(mgr *session.Manager) (home string, view reconcileManager, err error) {
+	if !mgr.Profiles.Multi() {
+		return mgr.ClaudeHome, mgr, nil
+	}
+	def := mgr.Profiles.Default()
+	v, err := mgr.ForProfile(def.Name)
+	if err != nil {
+		return "", nil, err
+	}
+	return def.Dir, v, nil
+}
+
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
 // /code-remote.db. Shared with crctl via store.DefaultPath.
 func defaultDBPath() string { return store.DefaultPath() }
@@ -301,9 +336,9 @@ func defaultDBPath() string { return store.DefaultPath() }
 // sessionManager is the slice of *session.Manager the HTTP handlers depend on.
 // Narrowing to an interface lets tests inject failures to exercise error paths.
 type sessionManager interface {
-	Create(dir string) (session.Session, error)
-	ResumeIn(id, dir string) (session.Session, error)
-	RestartIn(id, dir string) (session.Session, error)
+	Create(dir, profile string) (session.Session, error)
+	ResumeIn(id, dir, profile string) (session.Session, error)
+	RestartIn(id, dir, profile string) (session.Session, error)
 	Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	List() ([]session.Session, error)
 	ListAll(store session.StoppedLister) ([]session.Session, error)
@@ -340,55 +375,74 @@ type server struct {
 }
 
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
-	dir, ok := dirBody(w, r)
+	body, ok := readLaunchBody(w, r)
 	if !ok {
 		return
 	}
-	sess, err := s.mgr.Create(dir)
+	sess, err := s.mgr.Create(body.Dir, body.Profile)
 	if err != nil {
-		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error(), "dir", dir)
-		if errors.Is(err, session.ErrInvalidDir) {
+		s.log.Error("session_create", "remote", clientIP(r), "error", err.Error(), "dir", body.Dir, "profile", body.Profile)
+		if errors.Is(err, session.ErrInvalidDir) || errors.Is(err, session.ErrInvalidProfile) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
+	s.log.Info("session_create", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", body.Dir, "profile", sess.Profile)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
-// dirBody reads the optional JSON body {"dir": "<path under
-// CLAUDE_WORKSPACE_ROOT>"} shared by create, resume and restart. ok is false
-// (and a 400 already written) when the body isn't valid JSON.
-func dirBody(w http.ResponseWriter, r *http.Request) (dir string, ok bool) {
-	var body struct {
-		Dir string `json:"dir"`
-	}
+// launchBody is the optional JSON body shared by create, resume and restart:
+// {"dir": "<path under CLAUDE_WORKSPACE_ROOT>", "profile": "<name>"}.
+type launchBody struct {
+	Dir     string `json:"dir"`
+	Profile string `json:"profile"`
+}
+
+// readLaunchBody reads a launchBody. ok is false (and a 400 already written)
+// when the body isn't valid JSON.
+func readLaunchBody(w http.ResponseWriter, r *http.Request) (body launchBody, ok bool) {
 	if r.Body != nil {
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			writeErr(w, http.StatusBadRequest, "invalid JSON body")
-			return "", false
+			return launchBody{}, false
 		}
 	}
-	return body.Dir, true
+	return body, true
+}
+
+// profileStatus maps the profile errors of ResumeIn and RestartIn to a
+// status: an unknown profile is a bad request, and another profile than the
+// session's own conflicts with where it is. 0 for any other error.
+func profileStatus(err error) int {
+	switch {
+	case errors.Is(err, session.ErrInvalidProfile):
+		return http.StatusBadRequest
+	case errors.Is(err, session.ErrOtherProfile):
+		return http.StatusConflict
+	}
+	return 0
 }
 
 // resume relaunches a stopped session by its id (POST /sessions/{id}/resume).
-// Optional JSON body: {"dir": "..."} to move the session to that directory.
+// Optional JSON body: {"dir": "..."} to move the session to that directory,
+// {"profile": "..."} naming its profile.
 func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
 		writeErr(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
-	dir, ok := dirBody(w, r)
+	body, ok := readLaunchBody(w, r)
 	if !ok {
 		return
 	}
-	sess, err := s.mgr.ResumeIn(id, dir)
+	sess, err := s.mgr.ResumeIn(id, body.Dir, body.Profile)
 	if err != nil {
 		switch {
+		case profileStatus(err) != 0:
+			writeErr(w, profileStatus(err), err.Error())
 		case errors.Is(err, session.ErrInvalidDir):
 			writeErr(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, session.ErrAlreadyRunning):
@@ -402,25 +456,30 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
+	s.log.Info("session_resume", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", body.Dir, "profile", sess.Profile)
 	writeJSON(w, http.StatusCreated, sess)
 }
 
 // restart stops a session and resumes it under the same id
 // (POST /sessions/{id}/restart). A stopped session is simply resumed.
-// Optional JSON body: {"dir": "..."} to move the session to that directory.
+// Optional JSON body: {"dir": "..."} to move the session to that directory,
+// {"profile": "..."} naming its profile.
 func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.mgr.ValidID(id) {
 		writeErr(w, http.StatusBadRequest, "invalid session id")
 		return
 	}
-	dir, ok := dirBody(w, r)
+	body, ok := readLaunchBody(w, r)
 	if !ok {
 		return
 	}
-	sess, err := s.mgr.RestartIn(id, dir)
+	sess, err := s.mgr.RestartIn(id, body.Dir, body.Profile)
 	if err != nil {
+		if code := profileStatus(err); code != 0 {
+			writeErr(w, code, err.Error())
+			return
+		}
 		if errors.Is(err, session.ErrInvalidDir) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -433,7 +492,7 @@ func (s *server) restart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.log.Info("session_restart", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", dir)
+	s.log.Info("session_restart", "remote", clientIP(r), "id", sess.ID, "screen", sess.Screen, "dir", body.Dir, "profile", sess.Profile)
 	writeJSON(w, http.StatusOK, sess)
 }
 

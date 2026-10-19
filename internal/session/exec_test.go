@@ -29,10 +29,16 @@ type fakeScreen struct {
 	ps         string   // canned `ps -o pid=,ppid=` output ("<pid> <ppid>" lines)
 	killed     []string // screen names quit via -S <name> -X quit
 	launches   []string // full argv of each -dmS launch, space-joined
+
+	// cmds holds each -dmS command, whose Env the launch sets after this seam
+	// returns it. With parentEnv it starts from this process's environment, as
+	// a real launch's does.
+	cmds      []*exec.Cmd
+	parentEnv bool
 }
 
 func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
-	out, exit := "", 0
+	out, exit, launch := "", 0, false
 	switch {
 	case len(args) > 0 && args[0] == "-ls":
 		var b strings.Builder
@@ -48,6 +54,7 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 		} else {
 			f.created = append(f.created, args[1]) // args[1] is <prefix>-<id>
 			f.launches = append(f.launches, strings.Join(args, " "))
+			launch = true
 		}
 	case len(args) > 0 && args[0] == "-S": // kill: -S <name> -X quit
 		if f.failKill {
@@ -74,7 +81,14 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 			out = "Successfully updated\n"
 		}
 	}
-	return helperCmd(out, exit)
+	cmd := helperCmd(out, exit)
+	if launch {
+		if f.parentEnv {
+			cmd.Env = append(os.Environ(), cmd.Env...)
+		}
+		f.cmds = append(f.cmds, cmd)
+	}
+	return cmd
 }
 
 // helperCmd builds a command that re-execs this test binary as a stub process
@@ -144,7 +158,7 @@ func TestCreateViaScreen(t *testing.T) {
 
 	// Success: create launches screen, then Get finds the freshly-listed session
 	// (fakeScreen echoes the -dmS name back through -ls) -> enriched return.
-	s, err := m.Create("")
+	s, err := m.Create("", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -160,7 +174,7 @@ func TestCreateScreenFails(t *testing.T) {
 	fs := &fakeScreen{failCreate: true}
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen"}
-	if _, err := m.Create(""); err == nil {
+	if _, err := m.Create("", ""); err == nil {
 		t.Fatal("Create with failing screen = nil error, want error")
 	}
 }
@@ -170,10 +184,10 @@ func TestCreateWithDir(t *testing.T) {
 	withFakeScreen(t, fs)
 	root := t.TempDir()
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", WorkspaceRoot: root}
-	if _, err := m.Create("."); err != nil { // "." resolves to the workspace root
+	if _, err := m.Create(".", ""); err != nil { // "." resolves to the workspace root
 		t.Fatalf("Create with valid dir: %v", err)
 	}
-	if _, err := m.Create("../escape"); err == nil {
+	if _, err := m.Create("../escape", ""); err == nil {
 		t.Fatal("Create with escaping dir = nil, want ErrInvalidDir")
 	}
 }
@@ -285,7 +299,10 @@ func TestResumeViaScreen(t *testing.T) {
 
 // fakeStore captures Record calls and serves canned StoppedSessions.
 type fakeStore struct {
-	recorded []string // uuids passed to Record
+	recorded []string          // uuids passed to Record
+	profiles []string          // profile passed to each Record
+	stored   map[string]string // uuid -> profile, served by Profile
+	lookups  map[string]int    // uuid -> calls to Profile
 	lastCwd  string
 	stopped  []Session
 	convs    map[string]string // uuid -> conversation id
@@ -304,10 +321,25 @@ func (f *fakeStore) SetConversation(uuid, conv string) error {
 
 func (f *fakeStore) Conversation(uuid string) (string, error) { return f.convs[uuid], nil }
 
-func (f *fakeStore) Record(uuid, _, _, cwd, _, _, _ string) error {
+func (f *fakeStore) Record(uuid, _, _, cwd, _, _, profile string) error {
 	f.recorded = append(f.recorded, uuid)
+	f.profiles = append(f.profiles, profile)
 	f.lastCwd = cwd
+	if profile != "" { // like the DB, "" keeps the stored profile
+		if f.stored == nil {
+			f.stored = map[string]string{}
+		}
+		f.stored[uuid] = profile
+	}
 	return nil
+}
+
+func (f *fakeStore) Profile(uuid string) (string, error) {
+	if f.lookups == nil {
+		f.lookups = map[string]int{}
+	}
+	f.lookups[uuid]++
+	return f.stored[uuid], nil
 }
 
 func (f *fakeStore) StoppedSessions(running []Session, keep func(string) bool) ([]Session, error) {
@@ -328,7 +360,7 @@ func TestCreateRecordsToStore(t *testing.T) {
 	root := t.TempDir()
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", WorkspaceRoot: root, Store: fst}
 
-	s, err := m.Create(".") // "." resolves to the workspace root
+	s, err := m.Create(".", "") // "." resolves to the workspace root
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -347,7 +379,7 @@ func TestListAll(t *testing.T) {
 	fs := &fakeScreen{created: []string{"test-rc-" + runningID}}
 	withFakeScreen(t, fs)
 
-	// Session log on disk for the stopped id, so HasSessionLog keeps it.
+	// Session log on disk for the stopped id, so it stays resumable.
 	home := t.TempDir()
 	proj := filepath.Join(home, "projects", "repo")
 	if err := os.MkdirAll(proj, 0o755); err != nil {
@@ -425,7 +457,7 @@ func TestListPopulatesLastActive(t *testing.T) {
 	}
 
 	// No ClaudeHome -> no log lookup -> empty LastActive (not a crash).
-	if la := (&Manager{Prefix: "test-rc", ScreenBin: "screen"}).lastActive(id); la != "" {
+	if la := lastActiveIn("", id); la != "" {
 		t.Errorf("lastActive(no home) = %q, want empty", la)
 	}
 }
@@ -442,14 +474,13 @@ func TestTitleReadsFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := &Manager{Prefix: "test-rc", ClaudeHome: home}
-	if got := m.title(id); got != "my title" {
+	if got := titleIn(home, id); got != "my title" {
 		t.Errorf("title = %q, want %q", got, "my title")
 	}
-	if got := m.title("a9c1cf1e-ce20-4833-9eeb-7acf5c327506"); got != "" {
+	if got := titleIn(home, "a9c1cf1e-ce20-4833-9eeb-7acf5c327506"); got != "" {
 		t.Errorf("title(no file) = %q, want empty", got)
 	}
-	if got := (&Manager{}).title(id); got != "" { // ClaudeHome empty -> ""
+	if got := titleIn("", id); got != "" { // no home -> ""
 		t.Errorf("title(no home) = %q, want empty", got)
 	}
 }
@@ -518,7 +549,7 @@ func TestResumeInMovesSession(t *testing.T) {
 		withFakeScreen(t, fs)
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root, Store: fst}
 
-		if _, err := m.ResumeIn(id, "repo"); err != nil {
+		if _, err := m.ResumeIn(id, "repo", ""); err != nil {
 			t.Fatalf("ResumeIn: %v", err)
 		}
 		if fst.lastCwd != repo {
@@ -551,7 +582,7 @@ func TestResumeInMovesSession(t *testing.T) {
 		withFakeScreen(t, fs)
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root}
 
-		if _, err := m.ResumeIn(id, root); err != nil {
+		if _, err := m.ResumeIn(id, root, ""); err != nil {
 			t.Fatalf("ResumeIn: %v", err)
 		}
 		// The fork's Remote Control session is titled after its name.
@@ -585,7 +616,7 @@ func TestResumeInMovesSession(t *testing.T) {
 		withFakeScreen(t, fs)
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: t.TempDir()}
 
-		if _, err := m.ResumeIn(id, "/etc"); !errors.Is(err, ErrInvalidDir) {
+		if _, err := m.ResumeIn(id, "/etc", ""); !errors.Is(err, ErrInvalidDir) {
 			t.Fatalf("ResumeIn(outside root) err = %v, want ErrInvalidDir", err)
 		}
 		if len(fs.launches) != 0 {
@@ -603,14 +634,14 @@ func TestRestartInValidatesDirBeforeStopping(t *testing.T) {
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, WorkspaceRoot: root, Store: fst}
 
-	if _, err := m.RestartIn(id, "/etc"); !errors.Is(err, ErrInvalidDir) {
+	if _, err := m.RestartIn(id, "/etc", ""); !errors.Is(err, ErrInvalidDir) {
 		t.Fatalf("RestartIn(outside root) err = %v, want ErrInvalidDir", err)
 	}
 	if len(fs.killed) != 0 {
 		t.Fatalf("killed = %v, want the session left running", fs.killed)
 	}
 
-	if _, err := m.RestartIn(id, root); err != nil {
+	if _, err := m.RestartIn(id, root, ""); err != nil {
 		t.Fatalf("RestartIn: %v", err)
 	}
 	if len(fs.killed) != 1 || len(fs.launches) != 1 || fst.lastCwd != root {

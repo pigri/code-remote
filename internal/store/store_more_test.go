@@ -203,6 +203,26 @@ func TestCwd(t *testing.T) {
 	}
 }
 
+func TestProfile(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	if got, err := d.Profile(id); err != nil || got != "" {
+		t.Fatalf("Profile(unknown) = %q, %v, want empty", got, err)
+	}
+	if err := d.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "p-" + id}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Profile(id); err != nil || got != "" {
+		t.Fatalf("Profile(reconciler row) = %q, %v, want empty", got, err)
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.Profile(id); err != nil || got != "private" {
+		t.Fatalf("Profile = %q, %v, want private", got, err)
+	}
+}
+
 // A session's profile survives every read path, and the reconciler's upserts
 // leave it alone.
 func TestProfileRoundTrip(t *testing.T) {

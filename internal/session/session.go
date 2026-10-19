@@ -34,7 +34,7 @@ type Session struct {
 	Version    string `json:"version,omitempty"`     // claude version the session is running
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
-	Profile    string `json:"-"`                     // the profile it was recorded under; "" when none was
+	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -70,12 +70,12 @@ type Manager struct {
 	Prefix        string      // e.g. "pigri-dev-remote"
 	ClaudeBin     string      // path to the claude binary
 	ScreenBin     string      // path to the screen binary
-	ClaudeHome    string      // ~/.claude (for reading session titles)
+	ClaudeHome    string      // ~/.claude: the single profile's dir when Profiles is not Multi
 	WorkspaceRoot string      // optional; when set, Create's dir must resolve under it
 	Store         Recorder    // optional; records sessions for resumable tracking
-	ClaudeConfig  string      // optional; claude's config file (default: see configPath)
+	ClaudeConfig  string      // optional; claude's config file outside CLAUDE_REMOTE_PROFILES (see configPath)
 	TrustDirs     bool        // mark a session's directory as trusted before launching into it
-	Profiles      profile.Set // the configured claude config dirs; not yet consulted
+	Profiles      profile.Set // the configured claude config dirs
 
 	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
 
@@ -97,6 +97,16 @@ var ErrAlreadyRunning = errors.New("session already running")
 // disk for the id, so there is nothing to resume. Callers can errors.Is to
 // surface it as a 404.
 var ErrNotResumable = errors.New("session not resumable")
+
+// ErrInvalidProfile is returned (wrapped) when a request names a profile that
+// is not configured. Callers can errors.Is to surface it as a 400.
+var ErrInvalidProfile = errors.New("unknown profile")
+
+// ErrOtherProfile is returned (wrapped) by ResumeIn and RestartIn when asked
+// to launch a session under a profile other than its own: a move between
+// profiles, which is not supported. Callers can errors.Is to surface it as a
+// 409.
+var ErrOtherProfile = errors.New("session is in another profile")
 
 // execCommand is the seam for shelling out to screen; overridden in tests.
 var execCommand = exec.Command
@@ -171,7 +181,11 @@ func (m *Manager) resolveDir(dir string) (string, error) {
 // the session (best-effort enriched with PID/status/title once it registers).
 // If dir is non-empty the claude process is started with that working
 // directory (validated against WorkspaceRoot); empty dir = process default.
-func (m *Manager) Create(dir string) (Session, error) {
+func (m *Manager) Create(dir, prof string) (Session, error) {
+	p, err := m.lookupProfile(prof)
+	if err != nil {
+		return Session{}, err
+	}
 	id, err := genUUID()
 	if err != nil {
 		return Session{}, err
@@ -183,7 +197,7 @@ func (m *Manager) Create(dir string) (Session, error) {
 	// the on-disk session id (~/.claude/.../<id>.jsonl) all the same value.
 	cmd := execCommand(m.ScreenBin, "-dmS", name,
 		m.ClaudeBin, "--session-id", id, "--remote-control", id)
-	scrubEnv(cmd)
+	scrubEnv(cmd, p)
 	cwd := ""
 	if dir != "" {
 		resolved, err := m.resolveDir(dir)
@@ -192,35 +206,37 @@ func (m *Manager) Create(dir string) (Session, error) {
 		}
 		cmd.Dir, cwd = resolved, resolved
 	}
-	needsTrust := m.prepareDir(cwd)
+	needsTrust := m.prepareDir(p, cwd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("start screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
-			m.record(s, cwd)
+			m.record(&s, cwd, p)
 			s.NeedsTrust = needsTrust
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	s := Session{ID: id, Screen: name, Status: "Detached"}
-	m.record(s, cwd)
+	m.record(&s, cwd, p)
 	s.NeedsTrust = needsTrust
 	return s, nil
 }
 
-// record best-effort notes a live session in the Store so it stays resumable
-// after its screen is gone. No-op when no Store is wired; when cwd is unknown
-// it's recovered from the session's on-disk log. Errors are swallowed — the
-// mirror is a convenience, not a correctness dependency.
-func (m *Manager) record(s Session, cwd string) {
+// record sets s's profile to p, the one it was launched under, and
+// best-effort notes it in the Store so it stays resumable after its screen is
+// gone. No Store, no note; when cwd is unknown it's recovered from the
+// session's on-disk log. Errors are swallowed — the mirror is a convenience,
+// not a correctness dependency.
+func (m *Manager) record(s *Session, cwd string, p profile.Profile) {
+	s.Profile = p.Name
 	if m.Store == nil {
 		return
 	}
 	if cwd == "" {
-		if _, c := m.sessionLog(s.ID); c != "" {
+		if _, c := sessionLog(p.Dir, s.ID); c != "" {
 			cwd = c
 		}
 	}
@@ -228,20 +244,20 @@ func (m *Manager) record(s Session, cwd string) {
 	if status == "" {
 		status = "Detached"
 	}
-	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt, "")
+	// One profile records none: its name would not resolve once profiles are
+	// configured, and "" keeps a profile an earlier run recorded.
+	name := ""
+	if m.Profiles.Multi() {
+		name = p.Name
+	}
+	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt, name)
 }
 
-// HasSessionLog reports whether an on-disk claude log exists for id (i.e. the
-// session can actually be resumed). Always false when ClaudeHome is unset.
-func (m *Manager) HasSessionLog(id string) bool {
-	return m.sessionLogPath(id) != ""
-}
-
-// lastActive returns the session log's modification time — a proxy for when the
-// conversation was last active (claude appends to the log as it runs). Formatted
-// RFC3339; empty when there's no log or ClaudeHome is unset.
-func (m *Manager) lastActive(id string) string {
-	p := m.sessionLogPath(id)
+// lastActiveIn returns the modification time of id's log under home — a proxy
+// for when the conversation was last active (claude appends to the log as it
+// runs). Formatted RFC3339; empty when there's no log or home is "".
+func lastActiveIn(home, id string) string {
+	p := logIn(home, id)
 	if p == "" {
 		return ""
 	}
@@ -265,19 +281,34 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 	if store == nil {
 		return running, nil
 	}
+	// Each stopped session's profile is resolved once, here or below.
+	resolved := map[string]profile.Profile{}
+	profileOf := func(id string) profile.Profile {
+		p, ok := resolved[id]
+		if !ok {
+			p = m.profileOf(id)
+			resolved[id] = p
+		}
+		return p
+	}
 	// A stopped session is resumable when the conversation it was last in
 	// (storedConv; the session id itself unless it drifted) still has a log.
-	resumable := func(id string) bool { return m.HasSessionLog(m.storedConv(id)) }
+	resumable := func(id string) bool {
+		home := profileOf(id).Dir
+		return logIn(home, m.storedConv(home, id)) != ""
+	}
 	stopped, err := store.StoppedSessions(running, resumable)
 	if err != nil {
 		return running, nil // best-effort: still surface the running set
 	}
 	for i := range stopped {
 		id := stopped[i].ID
-		conv := m.storedConv(id)
+		p := profileOf(id)
+		conv := m.storedConv(p.Dir, id)
 		stopped[i].Status = "Stopped"
-		stopped[i].LastActive = m.lastActive(conv)
-		if t := m.convTitle(id, conv); t != "" {
+		stopped[i].Profile = p.Name
+		stopped[i].LastActive = lastActiveIn(p.Dir, conv)
+		if t := convTitle(p.Dir, id, conv); t != "" {
 			stopped[i].Title = t
 		}
 	}
@@ -304,10 +335,11 @@ func (m *Manager) annotateLive(running []Session) {
 			s.Outdated = installed != "" && s.Version != "" && s.Version != installed
 		}
 		if info.Conv != s.ID {
-			if t := m.lastActive(info.Conv); t != "" {
+			home := m.sessionProfile(*s).Dir
+			if t := lastActiveIn(home, info.Conv); t != "" {
 				s.LastActive = t
 			}
-			if t := m.convTitle(s.ID, info.Conv); t != "" {
+			if t := convTitle(home, s.ID, info.Conv); t != "" {
 				s.Title = t
 			}
 		}
@@ -370,27 +402,29 @@ func (m *Manager) noteConv(id, conv string) {
 }
 
 // storedConv returns the conversation a session was last recorded in, or id
-// itself when none was recorded or that conversation's log is gone.
-func (m *Manager) storedConv(id string) string {
+// itself when none was recorded or that conversation's log is gone from home,
+// the session's profile dir.
+func (m *Manager) storedConv(home, id string) string {
 	if m.Store == nil {
 		return id
 	}
-	if c, err := m.Store.Conversation(id); err == nil && c != id && m.ValidID(c) && m.HasSessionLog(c) {
+	if c, err := m.Store.Conversation(id); err == nil && c != id && m.ValidID(c) && logIn(home, c) != "" {
 		return c
 	}
 	return id
 }
 
 // convTitle is the display title for session id while it is in conversation
-// conv: the conversation's own title, falling back to the one set under the
-// original session id (a fresh conversation has none until it is renamed).
-func (m *Manager) convTitle(id, conv string) string {
+// conv, both logged under home: the conversation's own title, falling back to
+// the one set under the original session id (a fresh conversation has none
+// until it is renamed).
+func convTitle(home, id, conv string) string {
 	if conv != id {
-		if t := m.title(conv); t != "" {
+		if t := titleIn(home, conv); t != "" {
 			return t
 		}
 	}
-	return m.title(id)
+	return titleIn(home, id)
 }
 
 // Resume relaunches a detached claude bound to an EXISTING session id whose
@@ -403,13 +437,17 @@ func (m *Manager) convTitle(id, conv string) string {
 // it ran (see liveIndex).
 //
 // Errors: ErrAlreadyRunning if the screen is still live (nothing to do);
-// ErrNotResumable if no session log exists on disk (when ClaudeHome is set —
+// ErrNotResumable if no session log exists on disk (when its profile has a dir —
 // without it we can't check, so we attempt the resume and let claude decide).
-func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "") }
+func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "", "") }
 
 // ResumeIn is Resume with the session moved to working directory dir
 // (validated against WorkspaceRoot, like Create's). Empty dir = where it last
 // ran. A bad dir is reported as ErrInvalidDir.
+//
+// prof names the profile to launch under; "" is the session's own. Another
+// profile than its own is refused (ErrOtherProfile), and an unknown one is
+// ErrInvalidProfile.
 //
 // A move forks the conversation (`--fork-session`): the history carries over,
 // under a new conversation id. That is what makes the move count server-side —
@@ -418,11 +456,24 @@ func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "")
 // attached to one that knows nothing of the new directory (no repository, hence
 // no PR or diff tracking). The fork registers a fresh one from dir; the session
 // id, screen and Remote Control name stay the same.
-func (m *Manager) ResumeIn(id, dir string) (Session, error) {
+func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	return m.resume(id, m.storedConv(id), dir)
+	own := m.profileOf(id)
+	if prof != "" && !m.hasConv(own, id) {
+		// Not found comes before any check of prof, as it would without one.
+		if _, running, err := m.Get(id); err != nil {
+			return Session{}, err
+		} else if !running {
+			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
+		}
+	}
+	p, err := m.launchProfile(id, own, prof)
+	if err != nil {
+		return Session{}, err
+	}
+	return m.resume(id, m.storedConv(p.Dir, id), dir, p)
 }
 
 // storedCwd returns the working directory the Store last recorded for a
@@ -439,8 +490,9 @@ func (m *Manager) storedCwd(id string) string {
 // resume relaunches session id's screen, resuming conversation conv. The two
 // differ only when claude moved the session onto a new conversation id while it
 // ran (see Restart); the screen and Remote Control names always stay on id.
-// A non-empty dir moves the session to that working directory.
-func (m *Manager) resume(id, conv, dir string) (Session, error) {
+// A non-empty dir moves the session to that working directory. p is the
+// session's profile.
+func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, error) {
 	if !m.ValidID(id) || !m.ValidID(conv) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
@@ -453,10 +505,10 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 		return s, ErrAlreadyRunning
 	}
 
-	// The session must exist on disk to resume. When ClaudeHome is unset we
+	// The session must exist on disk to resume. When its profile has no dir we
 	// can't look, so cwd stays empty and we let claude report a missing session.
-	logPath, cwd := m.sessionLog(conv)
-	if m.ClaudeHome != "" && logPath == "" {
+	logPath, cwd := sessionLog(p.Dir, conv)
+	if p.Dir != "" && logPath == "" {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s", ErrNotResumable, conv)
 	}
 	// Where to run: an explicit dir wins, then the directory the session was
@@ -482,12 +534,12 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 		// the title set on the old one doesn't follow. Name it after the
 		// session's title so it keeps showing under that. ("=" keeps a title
 		// that starts with "-" from being read as a flag.)
-		if t := m.convTitle(id, conv); t != "" {
+		if t := convTitle(p.Dir, id, conv); t != "" {
 			rc = []string{"--remote-control=" + t}
 		}
 	}
 	cmd := execCommand(m.ScreenBin, append(args, rc...)...)
-	scrubEnv(cmd)
+	scrubEnv(cmd, p)
 	// Restore the project dir if it still exists; otherwise fall back
 	// to claude's default rather than failing the spawn on a stale path.
 	if cwd != "" {
@@ -495,7 +547,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 			cmd.Dir = cwd
 		}
 	}
-	needsTrust := m.prepareDir(cmd.Dir)
+	needsTrust := m.prepareDir(p, cmd.Dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Session{}, fmt.Errorf("resume screen session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -512,7 +564,7 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 
 	for i := 0; i < 10; i++ {
 		if s, ok, _ := m.Get(id); ok {
-			m.record(s, cwd)
+			m.record(&s, cwd, p)
 			noteConv()
 			s.NeedsTrust = needsTrust
 			return s, nil
@@ -520,30 +572,31 @@ func (m *Manager) resume(id, conv, dir string) (Session, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	s := Session{ID: id, Screen: name, Status: "Detached"}
-	m.record(s, cwd)
+	m.record(&s, cwd, p)
 	noteConv()
 	s.NeedsTrust = needsTrust
 	return s, nil
 }
 
-// sessionLogPath returns the path to claude's on-disk log for id, or "" when no
-// log exists or ClaudeHome is unset. Cheap: a glob with no file read.
-func (m *Manager) sessionLogPath(id string) string {
-	if m.ClaudeHome == "" {
+// logIn returns the path to claude's on-disk log for id under the claude config
+// dir home, or "" when no log exists or home is "". Cheap: a glob with no file
+// read.
+func logIn(home, id string) string {
+	if home == "" {
 		return ""
 	}
-	matches, _ := filepath.Glob(filepath.Join(m.ClaudeHome, "projects", "*", id+".jsonl"))
+	matches, _ := filepath.Glob(filepath.Join(home, "projects", "*", id+".jsonl"))
 	if len(matches) == 0 {
 		return ""
 	}
 	return matches[0]
 }
 
-// sessionLog returns the path to claude's on-disk log for id and the working
-// directory recorded inside it. Both are "" when no log exists or ClaudeHome is
-// unset. The cwd is read from the first record that carries one.
-func (m *Manager) sessionLog(id string) (path, cwd string) {
-	path = m.sessionLogPath(id)
+// sessionLog returns the path to claude's on-disk log for id under home and the
+// working directory recorded inside it. Both are "" when no log exists or home
+// is "". The cwd is read from the first record that carries one.
+func sessionLog(home, id string) (path, cwd string) {
+	path = logIn(home, id)
 	if path == "" {
 		return "", ""
 	}
@@ -626,25 +679,53 @@ func sessionEnv(env []string) []string {
 }
 
 // scrubEnv applies sessionEnv to a launch command's environment (the process
-// environment unless the command already carries its own).
-func scrubEnv(cmd *exec.Cmd) {
+// environment unless the command already carries its own), then points claude
+// at profile p (see profile.Profile.Env).
+func scrubEnv(cmd *exec.Cmd, p profile.Profile) {
 	env := cmd.Env
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = sessionEnv(env)
+	cmd.Env = p.Env(sessionEnv(env))
 }
 
-// List returns all running sessions owned by this manager.
+// List returns all running sessions owned by this manager, each in its
+// profile: the one its claude registered in, else its resolved one.
 func (m *Manager) List() ([]Session, error) {
 	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
 	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
-	return m.parseSessions(string(out)), nil
+	sessions := m.parseSessions(string(out))
+	m.registeredProfiles(sessions)
+	return sessions, nil
+}
+
+// registeredProfiles puts each running session whose claude has a
+// registration (see regIndex) in the profile it registered in, so every
+// caller sees one profile for it. With one profile there is nothing to move.
+func (m *Manager) registeredProfiles(sessions []Session) {
+	if !m.Profiles.Multi() || len(sessions) == 0 {
+		return
+	}
+	ix := m.regIndex()
+	for i := range sessions {
+		s := &sessions[i]
+		r, ok, _, _ := ix.lookup(*s, s.Profile)
+		if !ok || r.Profile == "" || r.Profile == s.Profile {
+			continue
+		}
+		p, err := m.lookupProfile(r.Profile)
+		if err != nil {
+			continue
+		}
+		s.Profile = p.Name
+		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
+	}
 }
 
 // parseSessions turns `screen -ls` output into our sessions (prefix-scoped,
-// UUID-validated). Pure except for the per-session title read, which is skipped
-// when ClaudeHome is empty.
+// UUID-validated), each with its resolved profile. Pure except for the
+// per-session profile, title and last-active reads, which find nothing when
+// the profile has no dir.
 func (m *Manager) parseSessions(out string) []Session {
 	var sessions []Session
 	for _, raw := range strings.Split(out, "\n") {
@@ -658,7 +739,8 @@ func (m *Manager) parseSessions(out string) []Session {
 		if !ok || !m.ValidID(id) {
 			continue
 		}
-		s := Session{ID: id, Screen: name, PID: pid, Title: m.title(id), LastActive: m.lastActive(id)}
+		p := m.profileOf(id)
+		s := Session{ID: id, Screen: name, PID: pid, Title: titleIn(p.Dir, id), LastActive: lastActiveIn(p.Dir, id), Profile: p.Name}
 		switch {
 		case strings.Contains(line, "(Detached)"):
 			s.Status = "Detached"
@@ -704,21 +786,18 @@ func (m *Manager) Kill(id string) (bool, error) {
 	return true, nil
 }
 
-// title reads the current display name claude persists for a session. The file
-// is ~/.claude/projects/<cwd>/<id>.jsonl (named by id); the latest
+// titleIn reads the current display name claude persists for a session. The
+// file is <home>/projects/<cwd>/<id>.jsonl (named by id); the latest
 // {"type":"custom-title",...} record wins. Best-effort: returns "" on any miss.
 //
 // NOTE: this reads claude's internal on-disk format, which is not a stable
 // public API and could change across claude versions.
-func (m *Manager) title(id string) string {
-	if m.ClaudeHome == "" {
+func titleIn(home, id string) string {
+	path := logIn(home, id)
+	if path == "" {
 		return ""
 	}
-	matches, _ := filepath.Glob(filepath.Join(m.ClaudeHome, "projects", "*", id+".jsonl"))
-	if len(matches) == 0 {
-		return ""
-	}
-	data, err := os.ReadFile(matches[0])
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -753,21 +832,32 @@ type Registration struct {
 	Cwd             string
 	BridgeSessionID string // server session id; "" when not bridged
 	Status          string // idle | busy | shell | waiting | ...
+	Profile         string // the profile whose registry holds the entry
 }
 
-// Registrations reads claude's process registry under
-// <ClaudeHome>/sessions/*.json. Best-effort: unreadable/!malformed files are
-// skipped. Used to join local sessions to server-side state (cwd + bridge id).
+// Registrations reads claude's process registry under <dir>/sessions/*.json of
+// every profile. Best-effort: unreadable/!malformed files are skipped. Used to
+// join local sessions to server-side state (cwd + bridge id).
 func (m *Manager) Registrations() ([]Registration, error) {
-	if m.ClaudeHome == "" {
-		return nil, nil
-	}
-	matches, err := filepath.Glob(filepath.Join(m.ClaudeHome, "sessions", "*.json"))
-	if err != nil {
-		return nil, err
-	}
 	var regs []Registration
-	for _, p := range matches {
+	for _, prof := range m.profiles() {
+		if prof.Dir == "" {
+			continue
+		}
+		matches, err := filepath.Glob(filepath.Join(prof.Dir, "sessions", "*.json"))
+		if err != nil {
+			return nil, err
+		}
+		regs = append(regs, readRegistrations(matches, prof.Name)...)
+	}
+	return regs, nil
+}
+
+// readRegistrations parses the registry files at paths, tagging each entry
+// with profile.
+func readRegistrations(paths []string, profile string) []Registration {
+	var regs []Registration
+	for _, p := range paths {
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {
 			continue
@@ -783,13 +873,13 @@ func (m *Manager) Registrations() ([]Registration, error) {
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
 			continue
 		}
-		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status}
+		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}
 		regs = append(regs, reg)
 	}
-	return regs, nil
+	return regs
 }
 
 func genUUID() (string, error) {

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"claude-remote-api/internal/profile"
 )
 
 // Claude asks "do you trust this folder?" the first time it starts in a
@@ -35,22 +37,26 @@ func DefaultClaudeConfig() string {
 	return ""
 }
 
-// configPath is claude's config file: ClaudeConfig when set, otherwise the one
-// beside ClaudeHome (~/.claude.json).
-func (m *Manager) configPath() string {
+// configPath is claude's config file for profile p: the profile's own (see
+// profile.Profile.ConfigFile) when it is listed in CLAUDE_REMOTE_PROFILES;
+// otherwise ClaudeConfig when set, else the one beside the profile's dir
+// (~/.claude.json).
+func (m *Manager) configPath(p profile.Profile) string {
+	if f := p.ConfigFile(); f != "" {
+		return f
+	}
 	if m.ClaudeConfig != "" {
 		return m.ClaudeConfig
 	}
-	if m.ClaudeHome == "" {
+	if p.Dir == "" {
 		return ""
 	}
-	return m.ClaudeHome + ".json"
+	return p.Dir + ".json"
 }
 
-// DirTrusted reports whether claude has dir recorded as a trusted folder. It
-// is false when that can't be determined.
-func (m *Manager) DirTrusted(dir string) bool {
-	path := m.configPath()
+// dirTrusted reports whether the claude config file at path has dir recorded
+// as a trusted folder. It is false when that can't be determined.
+func dirTrusted(path, dir string) bool {
 	if path == "" {
 		return false
 	}
@@ -66,11 +72,10 @@ func (m *Manager) DirTrusted(dir string) bool {
 	return json.Unmarshal(data, &cfg) == nil && cfg.Projects[dir].Trusted
 }
 
-// TrustDir records dir as a trusted folder in claude's config, leaving every
-// other setting as it is. It is the same answer as accepting the prompt, so
-// callers only do it for a directory the operator asked for.
-func (m *Manager) TrustDir(dir string) error {
-	path := m.configPath()
+// trustDir records dir as a trusted folder in the claude config file at path,
+// leaving every other setting as it is. It is the same answer as accepting the
+// prompt, so callers only do it for a directory the operator asked for.
+func trustDir(path, dir string) error {
 	if path == "" {
 		return fmt.Errorf("trust %s: claude config location unknown", dir)
 	}
@@ -179,13 +184,15 @@ func lockConfig(path string) (unlock func(), err error) {
 }
 
 // prepareDir is called with the directory a session is about to be launched
-// in. With TrustDirs it records the directory as trusted; otherwise it reports
-// whether the session will be left waiting at the trust prompt.
-func (m *Manager) prepareDir(dir string) (needsTrust bool) {
-	if dir == "" || m.configPath() == "" || m.DirTrusted(dir) {
+// in under profile p. With TrustDirs it records the directory as trusted in
+// p's config; otherwise it reports whether the session will be left waiting
+// at the trust prompt.
+func (m *Manager) prepareDir(p profile.Profile, dir string) (needsTrust bool) {
+	path := m.configPath(p)
+	if dir == "" || path == "" || dirTrusted(path, dir) {
 		return false
 	}
-	if m.TrustDirs && m.TrustDir(dir) == nil {
+	if m.TrustDirs && trustDir(path, dir) == nil {
 		return false
 	}
 	return true

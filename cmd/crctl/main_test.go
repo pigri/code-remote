@@ -353,7 +353,7 @@ func TestPickBackend(t *testing.T) {
 		if d := ps.Default(); d.Name != "default" || d.Dir != home || ps.Multi() {
 			t.Errorf("Profiles default = %v multi=%v, want default at %s, single", d, ps.Multi(), home)
 		}
-		if cf := ps.Default().ConfigFile(home); cf != "" {
+		if cf := ps.Default().ConfigFile(); cf != "" {
 			t.Errorf("single default ConfigFile = %q, want \"\" (inherit the Manager's rule)", cf)
 		}
 		if lb.mgr.ClaudeHome != home {

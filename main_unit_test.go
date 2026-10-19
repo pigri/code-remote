@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"claude-remote-api/internal/cloud"
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 	"claude-remote-api/internal/store"
 )
@@ -255,5 +260,228 @@ func TestSyncHandleWaitPrefersDone(t *testing.T) {
 	}
 	if !(*syncHandle)(nil).wait(ctx) {
 		t.Error("nil handle wait = false, want true")
+	}
+}
+
+func TestSyncTarget(t *testing.T) {
+	t.Run("single profile: the manager and its home", func(t *testing.T) {
+		mgr := &session.Manager{ClaudeHome: "/h/.claude"}
+		home, view, err := syncTarget(mgr)
+		if err != nil || home != "/h/.claude" || view != reconcileManager(mgr) {
+			t.Errorf("syncTarget = %q, %T; want the claude home and the manager itself", home, view)
+		}
+	})
+	t.Run("several profiles: the default's dir and sessions", func(t *testing.T) {
+		user := t.TempDir()
+		t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+		t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "private")
+		set, err := profile.FromEnv("", user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		home, view, err := syncTarget(&session.Manager{ClaudeHome: filepath.Join(user, ".claude"), Profiles: set})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(user, ".claude-private"); home != want {
+			t.Errorf("home = %q, want the default profile's %q", home, want)
+		}
+		if v, ok := view.(*session.ProfileView); !ok || v.Profile() != "private" {
+			t.Errorf("view = %#v, want the view of private", view)
+		}
+	})
+}
+
+// notFoundCloud is an account whose cloud knows no session.
+type notFoundCloud struct{}
+
+func (notFoundCloud) List(context.Context) ([]cloud.Session, error) { return nil, nil }
+func (notFoundCloud) Get(context.Context, string) (cloud.Session, bool, error) {
+	return cloud.Session{}, false, nil
+}
+
+// profileHost is a temp HOME with configured profiles, a store, and a script
+// screen running some sessions, which logs each session it quits.
+type profileHost struct {
+	user, killed string
+	db           *store.DB
+	mgr          *session.Manager
+}
+
+// newProfileHost configures spec as CLAUDE_REMOTE_PROFILES with def as the
+// default, and runs a screen per entry of screens (session id -> screen pid).
+func newProfileHost(t *testing.T, spec, def string, screens map[string]int) *profileHost {
+	t.Helper()
+	user := t.TempDir()
+	t.Setenv("HOME", user)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", spec)
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", def)
+	set, err := profile.FromEnv("", user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "mirror.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	dir := t.TempDir()
+	h := &profileHost{user: user, killed: filepath.Join(dir, "killed"), db: db}
+	ls := "There are screens on:\\n"
+	for id, pid := range screens {
+		ls += "\\t" + strconv.Itoa(pid) + ".crtest-" + id + "\\t(Detached)\\n"
+	}
+	script := "#!/bin/sh\ncase \"$1\" in\n-ls) printf '" + ls + "' ;;\n" +
+		"-S) echo \"$2\" >> '" + h.killed + "' ;;\nesac\nexit 0\n"
+	screen := filepath.Join(dir, "screen")
+	if err := os.WriteFile(screen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.mgr = &session.Manager{Prefix: "crtest", ScreenBin: screen, ClaudeHome: filepath.Join(user, ".claude"),
+		Profiles: set, Store: db}
+	return h
+}
+
+// register writes a registry entry for session id, as claude process pid,
+// under the profile dir dir (relative to HOME). An empty bridge is null.
+func (h *profileHost) register(t *testing.T, dir, file, id string, pid int, bridge string) {
+	t.Helper()
+	sdir := filepath.Join(h.user, dir, "sessions")
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b := "null"
+	if bridge != "" {
+		b = `"` + bridge + `"`
+	}
+	reg := `{"sessionId":"` + id + `","pid":` + strconv.Itoa(pid) + `,"bridgeSessionId":` + b + `}`
+	if err := os.WriteFile(filepath.Join(sdir, file+".json"), []byte(reg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reconcile runs one pass of the session sync on the default profile's view,
+// against a cloud that knows no session, and returns the screens it quit.
+func (h *profileHost) reconcile(t *testing.T) string {
+	t.Helper()
+	_, view, err := syncTarget(h.mgr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &cloud.Reconciler{Cloud: notFoundCloud{}, Manager: view, Store: h.db, Grace: 0, Log: discardLogger()}
+	rec.ReconcileOnce(context.Background())
+	got, _ := os.ReadFile(h.killed)
+	return string(got)
+}
+
+// fakePS puts a ps on PATH that prints out, as `ps -e -o pid=,ppid=,args=`.
+func fakePS(t *testing.T, out string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\nprintf '"+out+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+const (
+	sessX = "6fd0b321-a454-4b40-9aed-131afe120d36"
+	sessW = "a9c1cf1e-ce20-4833-9eeb-7acf5c327506"
+	sessZ = "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e"
+)
+
+// A session whose claude registered in another profile's registry stays out
+// of the sync's view, even when its own profile resolves to the default: its
+// last bridge belongs to the other account, where the default's cloud would
+// read it as deleted.
+func TestReconcilerLeavesAnotherProfilesSession(t *testing.T) {
+	h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "",
+		map[string]int{sessX: 99999998, sessW: 99999999})
+	// Both registries have reset their bridge, so the store's last one is all
+	// the reconciler has.
+	h.register(t, ".claude-private", sessX, sessX, 0, "")
+	h.register(t, ".claude", sessW, sessW, 0, "")
+	for id, bridge := range map[string]string{sessX: "session_private", sessW: "session_work"} {
+		// x's row says work, yet its claude runs in private.
+		if err := h.db.Record(id, "crtest-"+id, "", "", "Detached", "", "work"); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.db.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "crtest-" + id, BridgeSessionID: bridge}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := h.reconcile(t), "crtest-"+sessW+"\n"; got != want {
+		t.Errorf("killed = %q, want only %q, the work session gone from the work cloud", got, want)
+	}
+}
+
+// A stale registry entry in the default profile, left by a crashed claude
+// whose pid a private session's claude now has, does not pull that session
+// into the default's sync, where its stale bridge would read as deleted.
+func TestReconcilerIgnoresAStaleEntryWithAReusedPID(t *testing.T) {
+	// work is listed last, so a merge that lets the later profile win picks
+	// the stale entry.
+	h := newProfileHost(t, "private=~/.claude-private,work=~/.claude", "work", map[string]int{sessX: 4242})
+	fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+	h.register(t, ".claude-private", sessX, sessX, 7777, "")
+	h.register(t, ".claude", sessZ, sessZ, 7777, "session_stale")
+	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", "private"); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.reconcile(t); got != "" {
+		t.Errorf("killed = %q, want nothing: the session runs in private", got)
+	}
+}
+
+// With an unambiguous live registration, a session's profile is the one it
+// registered in, everywhere: in the listing and in each profile's view.
+func TestListShowsTheRegisteredProfile(t *testing.T) {
+	h := newProfileHost(t, "work=~/.claude,private=~/.claude-private", "", map[string]int{sessX: 4242})
+	h.register(t, ".claude-private", sessX, sessX, 0, "")
+	// A legacy row: no profile recorded, and no transcript to find one by.
+	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := send(t, newHandler(testToken, h.mgr, nil, h.db), http.MethodGet, "/sessions", "")
+	var body struct{ Sessions []session.Session }
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("GET /sessions = %d %s: %v", rr.Code, rr.Body, err)
+	}
+	if l := body.Sessions; len(l) != 1 || l[0].Profile != "private" {
+		t.Errorf("GET /sessions = %+v, want the session in private", l)
+	}
+	for name, want := range map[string]int{"private": 1, "work": 0} {
+		v, err := h.mgr.ForProfile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l, _ := v.List(); len(l) != want {
+			t.Errorf("%s view List = %+v, want %d sessions", name, l, want)
+		}
+	}
+}
+
+func TestRunRefusesCredentialsWithProfiles(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	t.Setenv("SCREEN_BIN", os.Args[0])
+	t.Setenv("CLAUDE_BIN", os.Args[0])
+	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0")
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=/w,private=/p")
+	t.Setenv("CLAUDE_REMOTE_CREDENTIALS", "/creds.json")
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	// Pre-cancelled: a run that ignored the setting would serve and exit 0.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := run(ctx); code != 1 {
+		t.Errorf("run = %d, want 1", code)
+	}
+	if !strings.Contains(buf.String(), "CLAUDE_REMOTE_CREDENTIALS") || !strings.Contains(buf.String(), "CLAUDE_REMOTE_PROFILES") {
+		t.Errorf("log = %q, want it to name CLAUDE_REMOTE_CREDENTIALS and CLAUDE_REMOTE_PROFILES", buf.String())
 	}
 }

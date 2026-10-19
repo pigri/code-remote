@@ -199,13 +199,13 @@ type localBackend struct {
 
 func (b *localBackend) list() ([]session.Session, error) { return b.mgr.ListAll(b.stopped) }
 func (b *localBackend) create(dir string) (session.Session, error) {
-	return b.mgr.Create(localDir(dir))
+	return b.mgr.Create(localDir(dir), "")
 }
 func (b *localBackend) resume(id, dir string) (session.Session, error) {
-	return b.mgr.ResumeIn(id, localDir(dir))
+	return b.mgr.ResumeIn(id, localDir(dir), "")
 }
 func (b *localBackend) restart(id, dir string) (session.Session, error) {
-	return b.mgr.RestartIn(id, localDir(dir))
+	return b.mgr.RestartIn(id, localDir(dir), "")
 }
 
 // localDir makes a --dir given on the command line absolute, so a relative one

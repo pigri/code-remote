@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 )
 
@@ -103,6 +105,7 @@ type stubMgr struct {
 	restartSess session.Session
 	restartErr  error
 	gotDir      string // dir passed to ResumeIn / RestartIn
+	gotProfile  string // profile passed to Create / ResumeIn / RestartIn
 	upgradeRes  session.UpgradeResult
 	upgradeErr  error
 	gotRestart  bool // restart flag passed to Upgrade
@@ -111,15 +114,16 @@ type stubMgr struct {
 }
 
 func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the manager
-func (s *stubMgr) Create(string) (session.Session, error) {
+func (s *stubMgr) Create(_, prof string) (session.Session, error) {
+	s.gotProfile = prof
 	return s.createSess, s.createErr
 }
-func (s *stubMgr) ResumeIn(_, dir string) (session.Session, error) {
-	s.gotDir = dir
+func (s *stubMgr) ResumeIn(_, dir, prof string) (session.Session, error) {
+	s.gotDir, s.gotProfile = dir, prof
 	return s.resumeSess, s.resumeErr
 }
-func (s *stubMgr) RestartIn(_, dir string) (session.Session, error) {
-	s.gotDir = dir
+func (s *stubMgr) RestartIn(_, dir, prof string) (session.Session, error) {
+	s.gotDir, s.gotProfile = dir, prof
 	return s.restartSess, s.restartErr
 }
 func (s *stubMgr) Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
@@ -406,5 +410,69 @@ func TestRunExitsWhenServerFails(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second): // under run's 5s shutdown deadline
 		t.Fatal("run did not return promptly after the server failed")
+	}
+}
+
+func TestHandlersPassProfile(t *testing.T) {
+	for _, path := range []string{"/sessions", "/sessions/" + stubID + "/resume", "/sessions/" + stubID + "/restart"} {
+		m := &stubMgr{}
+		rr := send(t, stubHandler(m), http.MethodPost, path, `{"dir":"repo","profile":"private"}`)
+		if rr.Code >= 300 || m.gotProfile != "private" {
+			t.Errorf("POST %s = %d, profile %q; want 2xx with profile private (%s)", path, rr.Code, m.gotProfile, rr.Body)
+		}
+	}
+}
+
+func TestHandlersProfileErrors(t *testing.T) {
+	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
+	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)
+	for _, tc := range []struct {
+		path string
+		mgr  *stubMgr
+		want int
+	}{
+		{"/sessions", &stubMgr{createErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: other}, http.StatusConflict},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: other}, http.StatusConflict},
+	} {
+		rr := send(t, stubHandler(tc.mgr), http.MethodPost, tc.path, `{"profile":"x"}`)
+		if rr.Code != tc.want || !strings.Contains(rr.Body.String(), "profile") {
+			t.Errorf("POST %s with %v = %d %s, want %d naming the profile", tc.path, tc.mgr, rr.Code, rr.Body, tc.want)
+		}
+	}
+}
+
+// Resuming or restarting a session that does not exist is 404, whichever
+// profile the request names, and launches nothing.
+func TestHandlersUnknownSessionWithProfile(t *testing.T) {
+	user := t.TempDir()
+	t.Setenv("HOME", user)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+	set, err := profile.FromEnv("", user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	launched := filepath.Join(dir, "launched")
+	screen := filepath.Join(dir, "screen")
+	script := "#!/bin/sh\nif [ \"$1\" = -dmS ]; then echo \"$2\" >> '" + launched + "'; fi\nexit 0\n"
+	if err := os.WriteFile(screen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &session.Manager{Prefix: "crtest", ScreenBin: screen, ClaudeBin: "claude",
+		ClaudeHome: filepath.Join(user, ".claude"), Profiles: set}
+	for _, action := range []string{"resume", "restart"} {
+		for _, prof := range []string{"work", "private", "nope"} {
+			path := "/sessions/" + stubID + "/" + action
+			rr := send(t, stubHandler(mgr), http.MethodPost, path, `{"profile":"`+prof+`"}`)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("POST %s with profile %s = %d %s, want 404", path, prof, rr.Code, rr.Body)
+			}
+		}
+	}
+	if _, err := os.Stat(launched); !os.IsNotExist(err) {
+		t.Errorf("a launch was attempted: stat err = %v", err)
 	}
 }

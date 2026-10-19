@@ -17,21 +17,19 @@ func TestTrustDir(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(orig), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m := &Manager{ClaudeConfig: cfg}
-
-	if m.DirTrusted("/repo") || m.DirTrusted("/new") {
-		t.Fatal("DirTrusted = true before trusting")
+	if dirTrusted(cfg, "/repo") || dirTrusted(cfg, "/new") {
+		t.Fatal("dirTrusted = true before trusting")
 	}
 	for _, dir := range []string{"/repo", "/new"} {
-		if err := m.TrustDir(dir); err != nil {
-			t.Fatalf("TrustDir(%s): %v", dir, err)
+		if err := trustDir(cfg, dir); err != nil {
+			t.Fatalf("trustDir(%s): %v", dir, err)
 		}
-		if !m.DirTrusted(dir) {
-			t.Errorf("DirTrusted(%s) = false after TrustDir", dir)
+		if !dirTrusted(cfg, dir) {
+			t.Errorf("dirTrusted(%s) = false after trustDir", dir)
 		}
 	}
-	if m.DirTrusted("/other") {
-		t.Error("TrustDir trusted a directory it wasn't asked to")
+	if dirTrusted(cfg, "/other") {
+		t.Error("trustDir trusted a directory it wasn't asked to")
 	}
 
 	data, _ := os.ReadFile(cfg)
@@ -62,9 +60,9 @@ func TestTrustDir(t *testing.T) {
 
 func TestTrustDirCreatesAndRefuses(t *testing.T) {
 	dir := t.TempDir()
-	m := &Manager{ClaudeConfig: filepath.Join(dir, "new.json")}
-	if err := m.TrustDir("/repo"); err != nil || !m.DirTrusted("/repo") {
-		t.Fatalf("TrustDir on a missing config: %v", err)
+	cfg := filepath.Join(dir, "new.json")
+	if err := trustDir(cfg, "/repo"); err != nil || !dirTrusted(cfg, "/repo") {
+		t.Fatalf("trustDir on a missing config: %v", err)
 	}
 
 	// A config that doesn't parse is left exactly as it was.
@@ -72,15 +70,15 @@ func TestTrustDirCreatesAndRefuses(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&Manager{ClaudeConfig: bad}).TrustDir("/repo"); err == nil {
-		t.Error("TrustDir(unparseable config) = nil error")
+	if err := trustDir(bad, "/repo"); err == nil {
+		t.Error("trustDir(unparseable config) = nil error")
 	}
 	if data, _ := os.ReadFile(bad); string(data) != "{not json" {
 		t.Errorf("unparseable config was rewritten: %q", data)
 	}
 
-	if err := (&Manager{}).TrustDir("/repo"); err == nil {
-		t.Error("TrustDir with no config location = nil error")
+	if err := trustDir("", "/repo"); err == nil {
+		t.Error("trustDir with no config location = nil error")
 	}
 }
 
@@ -90,18 +88,17 @@ func TestTrustDirLock(t *testing.T) {
 	trustLockWait = 150 * time.Millisecond
 
 	cfg := filepath.Join(t.TempDir(), ".claude.json")
-	m := &Manager{ClaudeConfig: cfg}
 	if err := os.Mkdir(cfg+".lock", 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// Held by someone else: give up rather than write over them.
-	if err := m.TrustDir("/repo"); err == nil || m.DirTrusted("/repo") {
-		t.Fatalf("TrustDir under a held lock = %v, want error and no write", err)
+	if err := trustDir(cfg, "/repo"); err == nil || dirTrusted(cfg, "/repo") {
+		t.Fatalf("trustDir under a held lock = %v, want error and no write", err)
 	}
 	// Abandoned: taken over.
 	trustLockStale = 0
-	if err := m.TrustDir("/repo"); err != nil || !m.DirTrusted("/repo") {
-		t.Fatalf("TrustDir under a stale lock: %v", err)
+	if err := trustDir(cfg, "/repo"); err != nil || !dirTrusted(cfg, "/repo") {
+		t.Fatalf("trustDir under a stale lock: %v", err)
 	}
 }
 
@@ -114,15 +111,15 @@ func TestLaunchTrustsOrFlagsDir(t *testing.T) {
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home,
 			WorkspaceRoot: root, ClaudeConfig: filepath.Join(home, "config.json"), TrustDirs: trust}
 
-		s, err := m.ResumeIn(id, root)
+		s, err := m.ResumeIn(id, root, "")
 		if err != nil {
 			t.Fatalf("ResumeIn: %v", err)
 		}
-		if s.NeedsTrust == trust || m.DirTrusted(root) != trust {
-			t.Errorf("TrustDirs=%v: NeedsTrust=%v trusted=%v", trust, s.NeedsTrust, m.DirTrusted(root))
+		if trusted := dirTrusted(m.ClaudeConfig, root); s.NeedsTrust == trust || trusted != trust {
+			t.Errorf("TrustDirs=%v: NeedsTrust=%v trusted=%v", trust, s.NeedsTrust, trusted)
 		}
 
-		c, err := m.Create(root)
+		c, err := m.Create(root, "")
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -137,7 +134,9 @@ func TestLaunchTrustsOrFlagsDir(t *testing.T) {
 func TestTrustDirIgnoresCallerConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	if err := (&Manager{}).TrustDir("/repo"); err == nil {
+	m := &Manager{}
+	p, _ := m.lookupProfile("")
+	if err := trustDir(m.configPath(p), "/repo"); err == nil {
 		t.Error("TrustDir with no configured location = nil error")
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".claude.json")); !os.IsNotExist(err) {
