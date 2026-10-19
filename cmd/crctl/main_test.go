@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 )
 
@@ -351,8 +350,11 @@ func TestPickBackend(t *testing.T) {
 			t.Cleanup(func() { c.Close() })
 		}
 		ps := lb.mgr.Profiles
-		if want := (profile.Profile{Name: "default", Dir: home}); ps.Default() != want || ps.Multi() {
-			t.Errorf("Profiles default = %v multi=%v, want %v single", ps.Default(), ps.Multi(), want)
+		if d := ps.Default(); d.Name != "default" || d.Dir != home || ps.Multi() {
+			t.Errorf("Profiles default = %v multi=%v, want default at %s, single", d, ps.Multi(), home)
+		}
+		if cf := ps.Default().ConfigFile(home); cf != "" {
+			t.Errorf("single default ConfigFile = %q, want \"\" (inherit the Manager's rule)", cf)
 		}
 		if lb.mgr.ClaudeHome != home {
 			t.Errorf("ClaudeHome = %q, want %q", lb.mgr.ClaudeHome, home)

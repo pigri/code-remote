@@ -10,11 +10,9 @@ import (
 
 const home = "/home/u"
 
+func pr(name, dir string) Profile { return Profile{Name: name, Dir: dir} }
+
 func TestParse(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	tests := []struct {
 		name    string
 		spec    string
@@ -22,17 +20,15 @@ func TestParse(t *testing.T) {
 		want    []Profile
 		wantErr string
 	}{
-		{name: "one", spec: "work=/a", home: home, want: []Profile{{"work", "/a"}}},
+		{name: "one", spec: "work=/a", home: home, want: []Profile{pr("work", "/a")}},
 		{name: "ordered", spec: "work=/a,private=/b", home: home,
-			want: []Profile{{"work", "/a"}, {"private", "/b"}}},
+			want: []Profile{pr("work", "/a"), pr("private", "/b")}},
 		{name: "tilde", spec: "work=~,dev=~/.claude-dev", home: home,
-			want: []Profile{{"work", home}, {"dev", home + "/.claude-dev"}}},
-		{name: "cleaned", spec: "work=/a/./b/../c/", home: home, want: []Profile{{"work", "/a/c"}}},
-		{name: "relative made absolute", spec: "work=rel", home: home,
-			want: []Profile{{"work", filepath.Join(cwd, "rel")}}},
+			want: []Profile{pr("work", home), pr("dev", home+"/.claude-dev")}},
+		{name: "cleaned", spec: "work=/a/./b/../c/", home: home, want: []Profile{pr("work", "/a/c")}},
 		{name: "spaces trimmed", spec: " work = /a , dev=/b ", home: home,
-			want: []Profile{{"work", "/a"}, {"dev", "/b"}}},
-		{name: "name charset", spec: "a_b-9=/a", home: home, want: []Profile{{"a_b-9", "/a"}}},
+			want: []Profile{pr("work", "/a"), pr("dev", "/b")}},
+		{name: "name charset", spec: "a_b-9=/a", home: home, want: []Profile{pr("a_b-9", "/a")}},
 		{name: "empty spec", spec: "", home: home, wantErr: "empty entry"},
 		{name: "empty entry", spec: "work=/a,,dev=/b", home: home, wantErr: "empty entry"},
 		{name: "trailing comma", spec: "work=/a,", home: home, wantErr: "empty entry"},
@@ -45,8 +41,12 @@ func TestParse(t *testing.T) {
 		{name: "duplicate dir after cleaning", spec: "work=/a,dev=/a/", home: home, wantErr: "duplicate profile dir"},
 		{name: "duplicate dir via tilde", spec: "work=~/.claude,dev=/home/u/.claude", home: home, wantErr: "duplicate profile dir"},
 		{name: "tilde without home", spec: "work=~/.claude", home: "", wantErr: "home"},
-		{name: "tilde user form not expanded", spec: "work=~bob", home: home,
-			want: []Profile{{"work", filepath.Join(cwd, "~bob")}}},
+		{name: "tilde user form is relative", spec: "work=~bob", home: home,
+			wantErr: `profile "work": dir "~bob" is not absolute`},
+		{name: "dot dir is relative", spec: "work=.claude-private", home: home,
+			wantErr: `profile "work": dir ".claude-private" is not absolute`},
+		{name: "nested relative", spec: "work=/a,dev=foo/bar", home: home,
+			wantErr: `profile "dev": dir "foo/bar" is not absolute`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,17 +79,17 @@ func TestFromEnv(t *testing.T) {
 		wantErr   string
 	}{
 		{name: "unset is a single default", fallback: "/x/.claude",
-			wantNames: []string{"default"}, wantDef: Profile{"default", "/x/.claude"}},
+			wantNames: []string{"default"}, wantDef: pr("default", "/x/.claude")},
 		{name: "unset keeps an empty fallback", fallback: "",
-			wantNames: []string{"default"}, wantDef: Profile{"default", ""}},
+			wantNames: []string{"default"}, wantDef: pr("default", "")},
 		{name: "default profile ignored when profiles unset", def: "nope", fallback: "/x",
-			wantNames: []string{"default"}, wantDef: Profile{"default", "/x"}},
+			wantNames: []string{"default"}, wantDef: pr("default", "/x")},
 		{name: "first listed is the default", profiles: "work=~/.claude,private=/p", fallback: "/ignored",
-			wantNames: []string{"work", "private"}, wantDef: Profile{"work", home + "/.claude"}, wantMulti: true},
+			wantNames: []string{"work", "private"}, wantDef: pr("work", home+"/.claude"), wantMulti: true},
 		{name: "default picked by name", profiles: "work=/w,private=/p", def: "private",
-			wantNames: []string{"work", "private"}, wantDef: Profile{"private", "/p"}, wantMulti: true},
+			wantNames: []string{"work", "private"}, wantDef: pr("private", "/p"), wantMulti: true},
 		{name: "one listed profile is still multi", profiles: "work=/w",
-			wantNames: []string{"work"}, wantDef: Profile{"work", "/w"}, wantMulti: true},
+			wantNames: []string{"work"}, wantDef: pr("work", "/w"), wantMulti: true},
 		{name: "unknown default", profiles: "work=/w", def: "private", wantErr: `"private"`},
 		{name: "bad spec", profiles: "work", wantErr: "CLAUDE_REMOTE_PROFILES"},
 	}
@@ -110,7 +110,7 @@ func TestFromEnv(t *testing.T) {
 			if got := s.Names(); !reflect.DeepEqual(got, tt.wantNames) {
 				t.Errorf("Names() = %v, want %v", got, tt.wantNames)
 			}
-			if got := s.Default(); got != tt.wantDef {
+			if got := s.Default(); got.Name != tt.wantDef.Name || got.Dir != tt.wantDef.Dir {
 				t.Errorf("Default() = %v, want %v", got, tt.wantDef)
 			}
 			if got := s.Multi(); got != tt.wantMulti {
@@ -127,7 +127,7 @@ func TestSetGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, ok := s.Get("private"); !ok || p != (Profile{"private", "/p"}) {
+	if p, ok := s.Get("private"); !ok || p != pr("private", "/p") {
 		t.Errorf("Get(private) = %v, %v", p, ok)
 	}
 	if p, ok := s.Get("nope"); ok {
@@ -199,5 +199,107 @@ func TestEnv(t *testing.T) {
 				t.Errorf("Env() modified its input: %v, was %v", tt.env, in)
 			}
 		})
+	}
+}
+
+// symlinkedHome returns a real home dir holding .claude, and a symlink to it.
+func symlinkedHome(t *testing.T) (real, link string) {
+	t.Helper()
+	real = t.TempDir()
+	if err := os.Mkdir(filepath.Join(real, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link = filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	return real, link
+}
+
+func TestUserClaudeThroughSymlink(t *testing.T) {
+	real, link := symlinkedHome(t)
+	for _, tc := range []struct{ name, dir, home string }{
+		{"home is a symlink", real + "/.claude", link},
+		{"dir is under a symlink", link + "/.claude", real},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pr("x", tc.dir)
+			if got, want := p.ConfigFile(tc.home), filepath.Join(tc.home, ".claude.json"); got != want {
+				t.Errorf("ConfigFile = %q, want %q", got, want)
+			}
+			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}, tc.home); len(got) != 0 {
+				t.Errorf("Env = %v, want CLAUDE_CONFIG_DIR removed and not set", got)
+			}
+		})
+	}
+	t.Run("missing dirs are not aliases", func(t *testing.T) {
+		if got := pr("x", "/no/such/.claude").ConfigFile("/no/such-home"); got != "/no/such/.claude/.claude.json" {
+			t.Errorf("ConfigFile = %q", got)
+		}
+	})
+}
+
+func TestParseDuplicateDirThroughSymlink(t *testing.T) {
+	real, link := symlinkedHome(t)
+	_, err := Parse("work="+real+"/.claude,dev="+link+"/.claude", "")
+	if err == nil || !strings.Contains(err.Error(), "duplicate profile dir") {
+		t.Fatalf("Parse error = %v, want a duplicate profile dir", err)
+	}
+	if _, err := Parse("work=~/.claude,dev="+real+"/.claude", link); err == nil || !strings.Contains(err.Error(), "duplicate profile dir") {
+		t.Fatalf("Parse via ~ error = %v, want a duplicate profile dir", err)
+	}
+}
+
+// With CLAUDE_REMOTE_PROFILES unset, the single default profile MUST leave the
+// environment and the trust config exactly as they were before profiles.
+func TestSingleDefaultInherits(t *testing.T) {
+	tests := []struct {
+		name     string
+		fallback string
+		env      []string
+	}{
+		{name: "explicit CLAUDE_CONFIG_DIR=~/.claude", fallback: home + "/.claude",
+			env: []string{"PATH=/bin", "CLAUDE_CONFIG_DIR=" + home + "/.claude"}},
+		{name: "CLAUDE_HOME only", fallback: "/ch", env: []string{"PATH=/bin", "CLAUDE_HOME=/ch"}},
+		{name: "empty dir", fallback: "", env: []string{"PATH=/bin"}},
+		{name: "other CLAUDE_CONFIG_DIR", fallback: "/c", env: []string{"CLAUDE_CONFIG_DIR=/c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+			s, err := FromEnv(tt.fallback, home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := s.Default()
+			in := append([]string(nil), tt.env...)
+			got := p.Env(tt.env, home)
+			if !reflect.DeepEqual(got, in) {
+				t.Errorf("Env = %v, want the input unchanged %v", got, in)
+			}
+			if len(got) > 0 {
+				got[0] = "mutated"
+				if tt.env[0] == "mutated" {
+					t.Error("Env returned its input, not a copy")
+				}
+			}
+			if cf := p.ConfigFile(home); cf != "" {
+				t.Errorf("ConfigFile = %q, want \"\" (use the Manager's rule)", cf)
+			}
+		})
+	}
+}
+
+func TestListedProfilesDoNotInherit(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=/w")
+	s, err := FromEnv("/ignored", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Default().ConfigFile(home); got != "/w/.claude.json" {
+		t.Errorf("ConfigFile = %q, want /w/.claude.json", got)
+	}
+	if got := s.Default().Env(nil, home); !reflect.DeepEqual(got, []string{"CLAUDE_CONFIG_DIR=/w"}) {
+		t.Errorf("Env = %v", got)
 	}
 }

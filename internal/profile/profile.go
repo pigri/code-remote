@@ -12,7 +12,13 @@ import (
 )
 
 // Profile is one claude config dir, under a name callers pick it by.
-type Profile struct{ Name, Dir string }
+type Profile struct {
+	Name, Dir string
+
+	// inherit marks the single default used when CLAUDE_REMOTE_PROFILES is
+	// unset: claude then runs with the server's environment as it is.
+	inherit bool
+}
 
 // Set is the configured profiles, in the order they were listed, and which of
 // them is the default.
@@ -25,11 +31,10 @@ type Set struct {
 var validName = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 // Parse reads a "name=dir,name=dir" list. A dir of "~" or starting "~/" is
-// relative to userHome; every dir is cleaned and made absolute.
+// relative to userHome; every dir MUST then be absolute, and is cleaned.
 func Parse(spec, userHome string) ([]Profile, error) {
 	var out []Profile
 	names := map[string]bool{}
-	dirs := map[string]string{}
 	for _, entry := range strings.Split(spec, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -52,18 +57,19 @@ func Parse(spec, userHome string) ([]Profile, error) {
 			}
 			dir = filepath.Join(userHome, dir[1:])
 		}
-		dir, err := filepath.Abs(dir)
-		if err != nil {
-			return nil, fmt.Errorf("profile %q: %w", name, err)
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("profile %q: dir %q is not absolute", name, dir)
 		}
+		dir = filepath.Clean(dir)
 		if names[name] {
 			return nil, fmt.Errorf("duplicate profile name %q", name)
 		}
-		if other, ok := dirs[dir]; ok {
-			return nil, fmt.Errorf("duplicate profile dir %s (profiles %q and %q)", dir, other, name)
+		for _, other := range out {
+			if sameDir(other.Dir, dir) {
+				return nil, fmt.Errorf("duplicate profile dir %s (profiles %q and %q)", dir, other.Name, name)
+			}
 		}
 		names[name] = true
-		dirs[dir] = name
 		out = append(out, Profile{Name: name, Dir: dir})
 	}
 	return out, nil
@@ -76,7 +82,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 func FromEnv(fallbackDir, userHome string) (Set, error) {
 	spec := os.Getenv("CLAUDE_REMOTE_PROFILES")
 	if spec == "" {
-		return Set{list: []Profile{{Name: "default", Dir: fallbackDir}}}, nil
+		return Set{list: []Profile{{Name: "default", Dir: fallbackDir, inherit: true}}}, nil
 	}
 	list, err := Parse(spec, userHome)
 	if err != nil {
@@ -131,16 +137,33 @@ func (s Set) Names() []string {
 // the single-profile fallback.
 func (s Set) Multi() bool { return s.multi }
 
+// sameDir reports whether a and b name the same dir: equal once cleaned, or
+// both resolving to the same path through symlinks.
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
 // isUserClaude reports whether p is userHome/.claude, the dir claude uses when
 // CLAUDE_CONFIG_DIR is unset.
 func (p Profile) isUserClaude(userHome string) bool {
-	return userHome != "" && filepath.Clean(p.Dir) == filepath.Join(userHome, ".claude")
+	return userHome != "" && sameDir(p.Dir, filepath.Join(userHome, ".claude"))
 }
 
 // ConfigFile is claude's global config file for p: ~/.claude.json for
 // ~/.claude, since claude only looks there with CLAUDE_CONFIG_DIR unset, and
-// <dir>/.claude.json for any other dir.
+// <dir>/.claude.json for any other dir. It is "" for the single default
+// profile, meaning the caller keeps its own rule (Manager.ClaudeConfig, else
+// the file beside Manager.ClaudeHome).
 func (p Profile) ConfigFile(userHome string) string {
+	if p.inherit {
+		return ""
+	}
 	if p.isUserClaude(userHome) {
 		return filepath.Join(userHome, ".claude.json")
 	}
@@ -149,8 +172,13 @@ func (p Profile) ConfigFile(userHome string) string {
 
 // Env returns a copy of env that makes claude use p: CLAUDE_CONFIG_DIR is
 // removed, then set to p.Dir unless p is ~/.claude. Setting it to ~/.claude
-// would move claude's config file off ~/.claude.json (see ConfigFile).
+// would move claude's config file off ~/.claude.json (see ConfigFile). For the
+// single default profile it is an unchanged copy of env, so claude sees the
+// server's CLAUDE_CONFIG_DIR, or its absence, as before profiles existed.
 func (p Profile) Env(env []string, userHome string) []string {
+	if p.inherit {
+		return append([]string(nil), env...)
+	}
 	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		if !strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
