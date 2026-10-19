@@ -329,3 +329,91 @@ VALUES
 		d.Close()
 	}
 }
+
+// oldSchemaDB returns the path of a database created before column existed.
+func oldSchemaDB(t *testing.T, column string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "old.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE sessions DROP COLUMN ` + column); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	return path
+}
+
+// Another process (the server or crctl) can add a column between Open's check
+// and its ALTER; Open must still succeed.
+func TestMigrateColumnAddedConcurrently(t *testing.T) {
+	for _, column := range []string{"conv_id", "profile"} {
+		t.Run(column, func(t *testing.T) {
+			path := oldSchemaDB(t, column)
+			added := false
+			beforeAddColumn = func(col, def string) {
+				if col != column {
+					t.Errorf("hook called for %s, want only %s", col, column)
+					return
+				}
+				other, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer other.Close()
+				if _, err := other.Exec(`ALTER TABLE sessions ADD COLUMN ` + col + ` ` + def); err != nil {
+					t.Fatal(err)
+				}
+				added = true
+			}
+			t.Cleanup(func() { beforeAddColumn = nil })
+
+			d, err := Open(path)
+			if err != nil {
+				t.Fatalf("Open after a concurrent migration: %v", err)
+			}
+			defer d.Close()
+			if !added {
+				t.Fatal("hook never ran")
+			}
+			const id = "11111111-1111-1111-1111-111111111111"
+			if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", "private"); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.SetConversation(id, "c"); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := d.Conversation(id); got != "c" {
+				t.Errorf("Conversation = %q, want c", got)
+			}
+			if all, err := d.AllSessions(); err != nil || len(all) != 1 || all[0].Profile != "private" {
+				t.Errorf("AllSessions = %+v, %v, want one session with profile private", all, err)
+			}
+		})
+	}
+}
+
+// An ALTER that fails for any other reason still fails Open.
+func TestMigrateAlterErrorWithoutColumn(t *testing.T) {
+	path := oldSchemaDB(t, "conv_id")
+	beforeAddColumn = func(col, _ string) {
+		if col != "conv_id" {
+			return
+		}
+		other, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close()
+		if _, err := other.Exec(`DROP TABLE sessions`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeAddColumn = nil })
+
+	if d, err := Open(path); err == nil {
+		d.Close()
+		t.Fatal("Open succeeded although the ALTER failed and conv_id is missing")
+	}
+}

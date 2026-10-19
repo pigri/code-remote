@@ -28,6 +28,10 @@ func DefaultPath() string {
 	return filepath.Join(dir, "code-remote", "code-remote.db")
 }
 
+// beforeAddColumn, when set, runs between a migration's column check and its
+// ALTER TABLE. Tests use it to add the column from another connection.
+var beforeAddColumn func(column, def string)
+
 // DB is a SQLite session store. It implements cloud.Store.
 type DB struct{ db *sql.DB }
 
@@ -88,18 +92,25 @@ CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
 	// These columns were added after the first release; CREATE TABLE IF NOT
 	// EXISTS won't add them to an existing database. A profile of '' means
 	// none was recorded.
+	const hasColumn = `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name=?`
 	for _, col := range []struct{ name, def string }{
 		{"conv_id", "TEXT"},
 		{"profile", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		var n int
-		if err := d.db.QueryRow(
-			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name=?`, col.name).Scan(&n); err != nil {
+		if err := d.db.QueryRow(hasColumn, col.name).Scan(&n); err != nil {
 			return err
 		}
 		if n == 0 {
+			if beforeAddColumn != nil {
+				beforeAddColumn(col.name, col.def)
+			}
 			if _, err := d.db.Exec(`ALTER TABLE sessions ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
-				return err
+				// The server and crctl open the same database. If the other one
+				// added the column since the check, SQLite reports a duplicate.
+				if d.db.QueryRow(hasColumn, col.name).Scan(&n) != nil || n == 0 {
+					return err
+				}
 			}
 		}
 	}
