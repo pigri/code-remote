@@ -160,10 +160,11 @@ func pickBackend() (backend, error) {
 		return &httpBackend{base: strings.TrimRight(base, "/"), token: token}, nil
 	}
 	mgr := &session.Manager{
-		Prefix:     envOr("CLAUDE_REMOTE_SESSION_PREFIX", "pigri-dev-remote"),
-		ScreenBin:  resolveBin(envOr("SCREEN_BIN", "screen")),
-		ClaudeBin:  resolveBin(envOr("CLAUDE_BIN", "claude")),
-		ClaudeHome: claudeHome(),
+		Prefix:       envOr("CLAUDE_REMOTE_SESSION_PREFIX", "pigri-dev-remote"),
+		ScreenBin:    resolveBin(envOr("SCREEN_BIN", "screen")),
+		ClaudeBin:    resolveBin(envOr("CLAUDE_BIN", "claude")),
+		ClaudeHome:   claudeHome(),
+		ClaudeConfig: session.DefaultClaudeConfig(),
 		// Local mode runs as the invoking user, who can already start claude
 		// anywhere; the workspace root only narrows --dir when it is set.
 		WorkspaceRoot: envOr("CLAUDE_WORKSPACE_ROOT", "/"),

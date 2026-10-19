@@ -25,14 +25,21 @@ var (
 	trustLockStale = 15 * time.Second
 )
 
-// configPath is claude's config file: ClaudeConfig when set, otherwise
-// ".claude.json" in $CLAUDE_CONFIG_DIR or beside ClaudeHome (~/.claude.json).
+// DefaultClaudeConfig is the config file claude uses under the current
+// environment when it is not the one beside the claude home: ".claude.json" in
+// $CLAUDE_CONFIG_DIR, or "" when that is unset. Callers set it as ClaudeConfig.
+func DefaultClaudeConfig() string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return filepath.Join(d, ".claude.json")
+	}
+	return ""
+}
+
+// configPath is claude's config file: ClaudeConfig when set, otherwise the one
+// beside ClaudeHome (~/.claude.json).
 func (m *Manager) configPath() string {
 	if m.ClaudeConfig != "" {
 		return m.ClaudeConfig
-	}
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return filepath.Join(d, ".claude.json")
 	}
 	if m.ClaudeHome == "" {
 		return ""
