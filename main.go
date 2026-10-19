@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"claude-remote-api/internal/cloud"
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 	"claude-remote-api/internal/store"
 )
@@ -58,6 +59,12 @@ func run(ctx context.Context) int {
 	}
 
 	claudeHome := session.DefaultClaudeHome()
+	userHome, _ := os.UserHomeDir()
+	profiles, err := profile.FromEnv(claudeHome, userHome)
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
 
 	logger := auditLogger()
 
@@ -76,7 +83,8 @@ func run(ctx context.Context) int {
 
 	mgr := &session.Manager{Prefix: prefix, ClaudeBin: claudeBin, ScreenBin: screenBin, ClaudeHome: claudeHome, ClaudeConfig: session.DefaultClaudeConfig(),
 		WorkspaceRoot: os.Getenv("CLAUDE_WORKSPACE_ROOT"),
-		TrustDirs:     envBool("CLAUDE_REMOTE_TRUST_DIRS", false)}
+		TrustDirs:     envBool("CLAUDE_REMOTE_TRUST_DIRS", false),
+		Profiles:      profiles}
 	var stopped session.StoppedLister
 	if db != nil {
 		mgr.Store = db

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"claude-remote-api/internal/profile"
 )
 
 // Session is one detached claude run inside GNU screen. The Claude session id
@@ -64,14 +66,15 @@ type StoppedLister interface {
 // Manager wraps screen + claude. It only ever touches screen sessions named
 // "<Prefix>-<uuid>", so it can't see or kill unrelated screens on the host.
 type Manager struct {
-	Prefix        string   // e.g. "pigri-dev-remote"
-	ClaudeBin     string   // path to the claude binary
-	ScreenBin     string   // path to the screen binary
-	ClaudeHome    string   // ~/.claude (for reading session titles)
-	WorkspaceRoot string   // optional; when set, Create's dir must resolve under it
-	Store         Recorder // optional; records sessions for resumable tracking
-	ClaudeConfig  string   // optional; claude's config file (default: see configPath)
-	TrustDirs     bool     // mark a session's directory as trusted before launching into it
+	Prefix        string      // e.g. "pigri-dev-remote"
+	ClaudeBin     string      // path to the claude binary
+	ScreenBin     string      // path to the screen binary
+	ClaudeHome    string      // ~/.claude (for reading session titles)
+	WorkspaceRoot string      // optional; when set, Create's dir must resolve under it
+	Store         Recorder    // optional; records sessions for resumable tracking
+	ClaudeConfig  string      // optional; claude's config file (default: see configPath)
+	TrustDirs     bool        // mark a session's directory as trusted before launching into it
+	Profiles      profile.Set // the configured claude config dirs; not yet consulted
 
 	upgradeMu sync.Mutex // serializes Upgrade (one updater + restart pass at a time)
 

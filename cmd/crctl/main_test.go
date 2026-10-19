@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 )
 
@@ -333,6 +334,45 @@ func TestPickBackend(t *testing.T) {
 		}
 		if _, err := os.Stat(db); err != nil {
 			t.Errorf("pickBackend did not open the session DB at CLAUDE_REMOTE_DB: %v", err)
+		}
+	})
+	t.Run("local has the single default profile", func(t *testing.T) {
+		t.Setenv("CLAUDE_REMOTE_API_URL", "")
+		t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+		t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+		home := t.TempDir()
+		t.Setenv("CLAUDE_CONFIG_DIR", home)
+		be, err := pickBackend()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lb := be.(*localBackend)
+		if c, ok := lb.stopped.(io.Closer); ok {
+			t.Cleanup(func() { c.Close() })
+		}
+		ps := lb.mgr.Profiles
+		if want := (profile.Profile{Name: "default", Dir: home}); ps.Default() != want || ps.Multi() {
+			t.Errorf("Profiles default = %v multi=%v, want %v single", ps.Default(), ps.Multi(), want)
+		}
+		if lb.mgr.ClaudeHome != home {
+			t.Errorf("ClaudeHome = %q, want %q", lb.mgr.ClaudeHome, home)
+		}
+	})
+	t.Run("local with bad profiles errors", func(t *testing.T) {
+		t.Setenv("CLAUDE_REMOTE_API_URL", "")
+		t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+		for _, tc := range []struct{ profiles, def string }{{"work", ""}, {"work=/w", "private"}} {
+			t.Setenv("CLAUDE_REMOTE_PROFILES", tc.profiles)
+			t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", tc.def)
+			be, err := pickBackend()
+			if err == nil {
+				if lb, ok := be.(*localBackend); ok {
+					if c, ok := lb.stopped.(io.Closer); ok {
+						c.Close()
+					}
+				}
+				t.Errorf("pickBackend with CLAUDE_REMOTE_PROFILES=%q DEFAULT=%q: want error", tc.profiles, tc.def)
+			}
 		}
 	})
 	t.Run("remote with token", func(t *testing.T) {
