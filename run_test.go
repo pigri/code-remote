@@ -256,6 +256,7 @@ func TestRestartHandler(t *testing.T) {
 	}{
 		{"restart 200", &stubMgr{restartSess: session.Session{ID: stubID}}, path, http.StatusOK},
 		{"not resumable -> 404", &stubMgr{restartErr: session.ErrNotResumable}, path, http.StatusNotFound},
+		{"already running -> 409", &stubMgr{restartErr: session.ErrAlreadyRunning}, path, http.StatusConflict},
 		{"backend error -> 500", &stubMgr{restartErr: errors.New("boom")}, path, http.StatusInternalServerError},
 		{"bad id -> 400", &badIDMgr{}, "/sessions/not-a-uuid/restart", http.StatusBadRequest},
 		{"bad dir -> 400", &stubMgr{restartErr: session.ErrInvalidDir}, path, http.StatusBadRequest},

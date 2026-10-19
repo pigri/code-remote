@@ -17,6 +17,8 @@ import (
 // deterministically without screen installed.
 type fakeScreen struct {
 	created    []string // screen names from -dmS
+	pids       []int    // the pid of each created screen: the lowest free one from 10000, kept until it quits
+	vanish     []string // screens that exit on their own just before the next quit
 	extra      string   // trailing `screen -ls` lines (foreign sessions, footer)
 	failCreate bool
 	failKill   bool
@@ -29,7 +31,7 @@ type fakeScreen struct {
 	ps         string   // canned `ps -o pid=,ppid=,args=` output
 	psCalls    int      // times ps ran
 	unlisted   bool     // -dmS launches never show up in -ls
-	killed     []string // screen names quit via -S <name> -X quit
+	killed     []string // screen names quit via -S <[pid.]name> -X quit
 	launches   []string // full argv of each -dmS launch, space-joined
 
 	// cmds holds each -dmS command, whose Env the launch sets after this seam
@@ -45,10 +47,11 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 	out, exit, launch := "", 0, false
 	switch {
 	case len(args) > 0 && args[0] == "-ls":
+		f.syncPIDs()
 		var b strings.Builder
 		b.WriteString("There are screens on:\n")
 		for i, n := range f.created {
-			b.WriteString("\t" + strconv.Itoa(10000+i) + "." + n + "\t(06/15/2026 08:41:26 AM)\t(Detached)\n")
+			b.WriteString("\t" + strconv.Itoa(f.pids[i]) + "." + n + "\t(06/15/2026 08:41:26 AM)\t(Detached)\n")
 		}
 		b.WriteString(f.extra)
 		out = b.String()
@@ -65,12 +68,31 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 				f.onLaunch()
 			}
 		}
-	case len(args) > 0 && args[0] == "-S": // kill: -S <name> -X quit
-		if f.failKill {
-			out, exit = "No screen session found", 1
-		} else {
-			f.killed = append(f.killed, args[1])
-			f.created = slices.DeleteFunc(f.created, func(n string) bool { return n == args[1] })
+	case len(args) > 0 && args[0] == "-S": // kill: -S <[pid.]name> -X quit
+		f.syncPIDs()
+		for _, n := range f.vanish {
+			if i := slices.Index(f.created, n); i >= 0 {
+				f.created, f.pids = slices.Delete(f.created, i, i+1), slices.Delete(f.pids, i, i+1)
+			}
+		}
+		f.vanish = nil
+		// Like screen: "<pid>.<name>" picks one screen, a bare name every
+		// screen of that name, and it quits only a single match.
+		var match []int
+		for i, n := range f.created {
+			if args[1] == n || args[1] == strconv.Itoa(f.pids[i])+"."+n {
+				match = append(match, i)
+			}
+		}
+		switch {
+		case f.failKill || len(match) == 0:
+			out, exit = "No screen session found.", 1
+		case len(match) > 1:
+			out, exit = "There are several suitable screens on:", 1
+		default:
+			i := match[0]
+			f.killed = append(f.killed, f.created[i])
+			f.created, f.pids = slices.Delete(f.created, i, i+1), slices.Delete(f.pids, i, i+1)
 		}
 	case name == "ps":
 		f.psCalls++
@@ -99,6 +121,20 @@ func (f *fakeScreen) command(name string, args ...string) *exec.Cmd {
 		f.cmds = append(f.cmds, cmd)
 	}
 	return cmd
+}
+
+// syncPIDs gives every created screen a pid, after a test changed created.
+func (f *fakeScreen) syncPIDs() {
+	if len(f.pids) > len(f.created) {
+		f.pids = f.pids[:len(f.created)]
+	}
+	for len(f.pids) < len(f.created) {
+		pid := 10000
+		for slices.Contains(f.pids, pid) {
+			pid++
+		}
+		f.pids = append(f.pids, pid)
+	}
 }
 
 // helperCmd builds a command that re-execs this test binary as a stub process

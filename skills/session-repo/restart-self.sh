@@ -15,7 +15,13 @@ uuid_re='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 die() { echo "restart-self: $*" >&2; exit 1; }
 
 # The screen name is <prefix>-<session id>; $STY is "<pid>.<screen name>".
+# With CLAUDE_REMOTE_PROFILES (which a session inherits from whatever launched
+# it) the name may be <prefix>-<profile>-<session id>, which this split cannot
+# tell from a prefix ending in "-<profile>": crctl would relaunch the session
+# under a name the API does not list.
 session() {
+	[ -z "${CLAUDE_REMOTE_PROFILES:-}" ] ||
+		die "CLAUDE_REMOTE_PROFILES is set: self-restart of a session under profiles needs a newer session-repo skill; restart it with crctl from outside"
 	[ -n "${STY:-}" ] || die "not inside a screen session, so this claude is not managed by crctl"
 	name=${STY#*.}
 	[[ $name =~ ^(.+)-($uuid_re)$ ]] || die "screen '$name' is not a crctl session"

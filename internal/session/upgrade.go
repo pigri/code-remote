@@ -71,7 +71,8 @@ func (m *Manager) Version() string {
 // Upgrade runs `claude update` and then, when restart is set, restarts the
 // running sessions so they pick up the new binary. Each restart resumes the
 // ORIGINAL session id (see Restart), so the conversation, screen name, and
-// Remote Control name all carry over.
+// Remote Control name all carry over (a screen still named <prefix>-<id> is
+// renamed after its profile, see launchName).
 //
 // Only sessions that need it are restarted: one already running the installed
 // version is skipped, and so is one that isn't idle (restarting would cut off
@@ -160,7 +161,8 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 }
 
 // Restart stops a running session and relaunches it under the same screen and
-// Remote Control name, resuming its conversation (`claude --resume`) in the
+// Remote Control name (a screen still named <prefix>-<id> is renamed after its
+// profile, see launchName), resuming its conversation (`claude --resume`) in the
 // working directory it was running in. A session that is already stopped is
 // simply resumed.
 //
@@ -223,7 +225,17 @@ func (m *Manager) restartAs(s Session, info liveInfo, dir string, p profile.Prof
 	// second claude opens the same conversation.
 	pid := info.Reg.PID
 
-	if _, up := m.running(id); up {
+	// A screen of id that s was not listed with (a profile not configured
+	// here) would keep its claude running past the stop, and the relaunch
+	// could not start beside it.
+	live := m.screensOf(id)
+	for _, l := range live {
+		if !slices.Contains(s.screenTargets(), l.PID+"."+l.Screen) {
+			return Session{}, fmt.Errorf("%w: %s also runs as screen %s, which is not listed here; not restarting",
+				ErrAlreadyRunning, id, l.Screen)
+		}
+	}
+	if len(live) > 0 {
 		if err := m.kill(s, info); err != nil {
 			return Session{}, err
 		}

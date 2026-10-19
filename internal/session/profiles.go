@@ -60,14 +60,17 @@ func (m *Manager) lookupProfile(name string) (profile.Profile, error) {
 // one at ~/.claude, where every session from before profiles lives; else the
 // default.
 func (m *Manager) profileOf(id string) profile.Profile {
-	p, _, _ := m.resolveProfile(id)
+	p, _, _ := m.resolveProfile(id, "")
 	return p
 }
 
-// resolveProfile is profileOf; whether the Store holds no profile for id (""
-// recorded); and whether the profile is only a guess, found by neither the
-// Store nor a transcript.
-func (m *Manager) resolveProfile(id string) (p profile.Profile, unrecorded, guessed bool) {
+// resolveProfile is profileOf for a session whose screen name carries profile
+// named ("" for none), which comes after the Store's and before the
+// transcript's: a name says where the session was launched, but a profile the
+// Store recorded since wins. It also returns whether the Store holds no
+// profile for id ("" recorded), and whether the profile is only a guess, found
+// by neither the Store, the name nor a transcript.
+func (m *Manager) resolveProfile(id, named string) (p profile.Profile, unrecorded, guessed bool) {
 	list := m.profiles()
 	if len(list) == 1 {
 		return list[0], false, false
@@ -78,6 +81,11 @@ func (m *Manager) resolveProfile(id string) (p profile.Profile, unrecorded, gues
 				return p, false, false
 			}
 			unrecorded = name == ""
+		}
+	}
+	if named != "" {
+		if p, err := m.lookupProfile(named); err == nil {
+			return p, unrecorded, false
 		}
 	}
 	for _, p := range list {

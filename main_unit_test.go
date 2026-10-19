@@ -332,8 +332,9 @@ func newProfileHost(t *testing.T, spec, def string, screens map[string]int) *pro
 	for id, pid := range screens {
 		ls += "\\t" + strconv.Itoa(pid) + ".crtest-" + id + "\\t(Detached)\\n"
 	}
+	// A quit names its screen as <pid>.<name>; the log keeps the name.
 	script := "#!/bin/sh\ncase \"$1\" in\n-ls) printf '" + ls + "' ;;\n" +
-		"-S) echo \"$2\" >> '" + h.killed + "' ;;\nesac\nexit 0\n"
+		"-S) echo \"${2#*.}\" >> '" + h.killed + "' ;;\nesac\nexit 0\n"
 	screen := filepath.Join(dir, "screen")
 	if err := os.WriteFile(screen, []byte(script), 0o700); err != nil {
 		t.Fatal(err)

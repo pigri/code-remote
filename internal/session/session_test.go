@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"testing"
+
+	"claude-remote-api/internal/profile"
 )
 
 func TestGenUUID(t *testing.T) {
@@ -43,8 +45,8 @@ func TestValidID(t *testing.T) {
 func TestScreenName(t *testing.T) {
 	m := &Manager{Prefix: "pigri-dev-remote"}
 	id := "6fd0b321-a454-4b40-9aed-131afe120d36"
-	if got, want := m.screenName(id), "pigri-dev-remote-"+id; got != want {
-		t.Errorf("screenName = %q, want %q", got, want)
+	if got, want := m.launchName(profile.Profile{Name: "default"}, id), "pigri-dev-remote-"+id; got != want {
+		t.Errorf("launchName = %q, want %q", got, want)
 	}
 }
 

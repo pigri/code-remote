@@ -26,6 +26,41 @@ screen -dmS <prefix>-<uuid> claude --session-id <uuid> --remote-control <uuid>
 - Stopping/restarting the API does **not** kill running sessions (the systemd
   unit uses `KillMode=process`); they're rediscovered via `screen -ls`.
 
+### Screen names
+
+`<prefix>` is `CLAUDE_REMOTE_SESSION_PREFIX`. Without `CLAUDE_REMOTE_PROFILES`
+a session's screen is `<prefix>-<uuid>`. With it, the screen also carries the
+session's profile: `<prefix>-<profile>-<uuid>`, for example
+`pigri-dev-remote-private-<uuid>`.
+
+- The listing takes a screen as a session when its name is `<prefix>-<uuid>`,
+  or `<prefix>-<profile>-<uuid>` for a configured profile. Any other screen is
+  left alone, including one named after a profile that is no longer
+  configured.
+- The uuid is the fixed-length end of the name, so within one instance a `-` in
+  the prefix or in a profile name (`my-work`) is never ambiguous.
+- Another instance on the host MUST NOT use `<prefix>-<profile>` as its prefix,
+  for any configured profile. This instance would take that instance's
+  `<prefix>-<profile>-<uuid>` screens as its own, and list, stop and restart
+  them.
+- Renaming or removing a profile while its sessions run hides them: they are
+  no longer listed, and stop and upgrade do not see them. Stop them first, or
+  quit their screens by hand.
+- Before a relaunch, any screen named `<prefix>-...-<uuid>` counts as that
+  session running, including a hidden one. A resume or restart then refuses
+  with `409` rather than start a second Claude in the conversation.
+- Two screens for one session (a `<prefix>-<uuid>` one left next to a
+  `<prefix>-<profile>-<uuid>` one) list as one session, under the
+  profile-named screen. Stopping it quits both.
+- A `<prefix>-<uuid>` screen from before profiles is still listed, stopped and
+  restarted. Its next restart, resume or upgrade relaunches it under
+  `<prefix>-<profile>-<uuid>`.
+- The profile in a name is a hint. A profile the database recorded for the
+  session wins over it, and the name wins over a guess from where the
+  session's log is. A `<prefix>-<uuid>` name hints nothing.
+- Stop, restart and upgrade find a session's screen by its uuid, whatever name
+  it runs under.
+
 ## Requirements
 
 - Go 1.26+
@@ -144,7 +179,8 @@ server's environment as it is.
 Without `CLAUDE_REMOTE_PROFILES` it lists the one profile, `default`.
 
 A session's profile is the one recorded when it was launched. For a session
-recorded before profiles existed, it is the first profile whose dir holds the
+recorded before profiles existed, it is the profile its screen name carries
+(see [Screen names](#screen-names)), then the first profile whose dir holds the
 session's log, then the profile at `~/.claude`, then the default.
 
 A move forks the conversation (`claude --resume <id> --fork-session`): the
@@ -336,7 +372,10 @@ it fails with an error that says to upgrade the server.
 
 A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
 whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
-session as `default`, and `--profile` knows no other profile.
+session as `default`, does not list, stop or upgrade a session whose screen
+carries its profile, and `--profile` knows no other profile. It still refuses
+to resume or restart such a session while its screen runs (see
+[Screen names](#screen-names)).
 
 `crctl upgrade` runs `claude update`. To also move running sessions onto the new
 version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);
@@ -554,8 +593,10 @@ absolute path in `.env` — systemd's PATH doesn't include `~/.local/bin`.
   without a token).
 - The default bind is `:8080` — put it behind TLS (reverse proxy / tunnel), or
   bind `127.0.0.1`, since the bearer token rides the wire.
-- The manager only ever lists/kills `screen` sessions matching the prefix, and
-  session ids are UUID-validated, so it can't touch unrelated screens.
+- The manager only ever lists/kills `screen` sessions matching the prefix (see
+  [Screen names](#screen-names)), and session ids are UUID-validated, so it
+  can't touch unrelated screens, as long as no other instance's prefix is
+  `<prefix>-<profile>`.
 
 ## Caveat
 
