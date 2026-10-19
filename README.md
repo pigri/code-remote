@@ -293,15 +293,33 @@ clock (no mirror).
 ```sh
 crctl ls            # list sessions, most recently active first (default)
 crctl new           # start a new session
+crctl new --profile private  # ...under the "private" profile (Claude account)
 crctl resume <id>   # relaunch a stopped session by id
 crctl resume all    # relaunch every stopped session
 crctl restart <id>  # stop a session and resume it under the same id
 crctl restart <id> --dir ~/work/repo  # ...and move it into that directory
 crctl restart <id> --dir ~/work/repo --trust  # ...marking it a trusted folder first
+crctl restart <id> --profile work  # ...naming its profile (it must be its own)
 crctl upgrade --all # update claude, restart running sessions onto the new version
 crctl upgrade <id>  # update claude, restart just that session
 crctl rm <id>       # stop a session
 ```
+
+`new`, `resume` and `restart` take `--profile <name>`, one of
+`CLAUDE_REMOTE_PROFILES` (the API server's, in remote mode). On `new` it picks
+the account. It defaults to `CLAUDE_REMOTE_DEFAULT_PROFILE`, else the first
+profile listed in `CLAUDE_REMOTE_PROFILES`. On `resume` and `restart` it
+defaults to the session's own profile. Naming another one is refused: moving a
+session between profiles is not supported yet. An unknown profile is an error
+too. Without `CLAUDE_REMOTE_PROFILES` the only profile is `default`.
+
+An API server that predates profiles ignores `--profile` and launches the
+session under its only account. `crctl` then fails with an error that says the
+session is running and how to stop it.
+
+A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
+whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
+session as `default`, and `--profile` knows no other profile.
 
 `crctl upgrade` runs `claude update`. To also move running sessions onto the new
 version, pass `--all` (every session) or session ids (`crctl upgrade <id>...`);
@@ -323,6 +341,7 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | `CLAUDE_WORKSPACE_ROOT` | local | optional; limits `--dir` to paths under it (unset = any directory) |
 | `CLAUDE_REMOTE_TRUST_DIRS` | local | `1` = always behave as if `--trust` was passed |
 | `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_CONFIG_DIR` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides (`CLAUDE_CONFIG_DIR` wins over `CLAUDE_HOME`) |
+| `CLAUDE_REMOTE_PROFILES` · `CLAUDE_REMOTE_DEFAULT_PROFILE` | local | the profiles `--profile` picks from, as on the API server |
 | `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
 
 `crctl ls` lists **running** sessions plus **resumable** ones — sessions
@@ -349,12 +368,15 @@ just when the screen was started.
 
 ```
 $ crctl ls
-ID                                    TITLE                     STATUS    VERSION             LAST ACTIVE  ACTION
-6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  Detached  2.1.278 (outdated)  4m ago       screen -r pigri-dev-remote-6fd0b321-...
-a9c1cf1e-ce20-4833-9eeb-7acf5c327506  old refactor              Stopped   -                   2d ago       crctl resume a9c1cf1e-ce20-4833-9eeb-...
+ID                                    TITLE                     PROFILE  STATUS    VERSION             LAST ACTIVE  ACTION
+6fd0b321-a454-4b40-9aed-131afe120d36  Synapse - platform - k8s  work     Detached  2.1.278 (outdated)  4m ago       screen -r pigri-dev-remote-6fd0b321-...
+a9c1cf1e-ce20-4833-9eeb-7acf5c327506  old refactor              private  Stopped   -                   2d ago       crctl resume a9c1cf1e-ce20-4833-9eeb-...
 
 1 session(s) running an outdated claude; run `crctl upgrade --all` to restart them on the installed version.
 ```
+
+The `PROFILE` column is the profile each session runs under: `default` without
+`CLAUDE_REMOTE_PROFILES`, and `-` from an API server that predates profiles.
 
 The `VERSION` column is the claude version each running session's process is on.
 A session is marked `(outdated)` when that is behind the installed `claude` — it

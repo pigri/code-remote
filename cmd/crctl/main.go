@@ -5,8 +5,8 @@
 // process, token, or URL. Set CLAUDE_REMOTE_API_URL to talk to a remote API
 // instead (bearer token required).
 //
-//	crctl ls                 # list sessions (default)
-//	crctl new                # start a new session
+//	crctl ls                 # list sessions with their profile (default)
+//	crctl new                # start a new session (--profile P picks the account)
 //	crctl rm <id>            # stop a session
 //	crctl resume <id>        # relaunch a stopped session (--dir D to move it)
 //	crctl resume all         # relaunch every stopped session
@@ -14,10 +14,15 @@
 //	crctl upgrade --all      # update claude, restart all sessions onto the new version
 //	crctl upgrade <id>...    # update claude, restart just these sessions
 //
+// new, resume and restart take --profile P, one of CLAUDE_REMOTE_PROFILES. On
+// resume and restart it defaults to the session's own profile; another one is
+// refused, because moving a session between profiles is not supported yet.
+//
 // Env:
 //
 //	CLAUDE_REMOTE_API_URL    if set, use the HTTP API at this base URL (remote mode)
 //	CLAUDE_REMOTE_API_TOKEN  bearer token (required in remote mode)
+//	CLAUDE_REMOTE_PROFILES, CLAUDE_REMOTE_DEFAULT_PROFILE,
 //	CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_CONFIG_DIR,
 //	CLAUDE_HOME  (local mode)
 package main
@@ -25,6 +30,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,9 +53,9 @@ import (
 // screen manager or the remote HTTP API.
 type backend interface {
 	list() ([]session.Session, error)
-	create(dir string) (session.Session, error)
-	resume(id, dir string) (session.Session, error)
-	restart(id, dir string) (session.Session, error)
+	create(dir, prof string) (session.Session, error)
+	resume(id, dir, prof string) (session.Session, error)
+	restart(id, dir, prof string) (session.Session, error)
 	upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error)
 	remove(id string) error
 }
@@ -100,41 +106,9 @@ func run(args []string) error {
 	case "new", "create":
 		return create(be, args[1:])
 	case "resume":
-		dir, rest, err := dirFlag(args[1:])
-		if err != nil {
-			return err
-		}
-		if len(rest) != 1 {
-			return fmt.Errorf("usage: crctl resume (all | <id> [--dir D])")
-		}
-		if a := rest[0]; a == "all" || a == "--all" || a == "-a" {
-			if dir != "" {
-				return fmt.Errorf("--dir moves one session; it can't be combined with `resume all`")
-			}
-			return resumeAll(be)
-		}
-		s, err := be.resume(rest[0], dir)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
-		trustHint(s)
-		return nil
+		return resume(be, args[1:])
 	case "restart":
-		dir, rest, err := dirFlag(args[1:])
-		if err != nil {
-			return err
-		}
-		if len(rest) != 1 {
-			return fmt.Errorf("usage: crctl restart <id> [--dir D]")
-		}
-		s, err := be.restart(rest[0], dir)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("restarted %s\n  attach: screen -r %s\n", s.ID, s.Screen)
-		trustHint(s)
-		return nil
+		return restart(be, args[1:])
 	case "upgrade", "update":
 		return upgrade(be, args[1:])
 	case "rm", "stop", "delete":
@@ -198,14 +172,14 @@ type localBackend struct {
 }
 
 func (b *localBackend) list() ([]session.Session, error) { return b.mgr.ListAll(b.stopped) }
-func (b *localBackend) create(dir string) (session.Session, error) {
-	return b.mgr.Create(localDir(dir), "")
+func (b *localBackend) create(dir, prof string) (session.Session, error) {
+	return b.mgr.Create(localDir(dir), prof)
 }
-func (b *localBackend) resume(id, dir string) (session.Session, error) {
-	return b.mgr.ResumeIn(id, localDir(dir), "")
+func (b *localBackend) resume(id, dir, prof string) (session.Session, error) {
+	return b.mgr.ResumeIn(id, localDir(dir), prof)
 }
-func (b *localBackend) restart(id, dir string) (session.Session, error) {
-	return b.mgr.RestartIn(id, localDir(dir), "")
+func (b *localBackend) restart(id, dir, prof string) (session.Session, error) {
+	return b.mgr.RestartIn(id, localDir(dir), prof)
 }
 
 // localDir makes a --dir given on the command line absolute, so a relative one
@@ -251,30 +225,60 @@ func (b *httpBackend) list() ([]session.Session, error) {
 	return resp.Sessions, nil
 }
 
-func (b *httpBackend) create(dir string) (session.Session, error) {
+func (b *httpBackend) create(dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions", dirBody(dir), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "started")
 }
 
-func (b *httpBackend) resume(id, dir string) (session.Session, error) {
+func (b *httpBackend) resume(id, dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/resume", dirBody(dir), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions/"+id+"/resume", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "resumed")
 }
 
-func (b *httpBackend) restart(id, dir string) (session.Session, error) {
+func (b *httpBackend) restart(id, dir, prof string) (session.Session, error) {
 	var s session.Session
-	err := b.do(http.MethodPost, "/sessions/"+id+"/restart", dirBody(dir), &s)
-	return s, err
+	if err := b.do(http.MethodPost, "/sessions/"+id+"/restart", launchBody(dir, prof), &s); err != nil {
+		return s, err
+	}
+	return s, gotProfile(s, prof, "restarted")
 }
 
-// dirBody is the optional {"dir": ...} request body; nil when no dir is given.
-func dirBody(dir string) any {
-	if dir == "" {
+// gotProfile checks that a session launched with --profile prof runs under
+// it. An API server that predates profiles ignores the field, launches the
+// session under its only account and reports no profile. done says what it
+// did with the session, which by then is running.
+func gotProfile(s session.Session, prof, done string) error {
+	if prof == "" || s.Profile == prof {
 		return nil
 	}
-	return map[string]string{"dir": dir}
+	stop := fmt.Sprintf("stop it with `crctl rm %s` if that is the wrong account", s.ID)
+	if s.Profile == "" {
+		return fmt.Errorf("the API server does not support profiles: it ignored --profile %q and %s session %s "+
+			"under its own account; %s", prof, done, s.ID, stop)
+	}
+	return fmt.Errorf("the API server %s session %s under profile %q, not %q; %s", done, s.ID, s.Profile, prof, stop)
+}
+
+// launchBody is the optional {"dir": ..., "profile": ...} request body of
+// create, resume and restart, with only the fields given; nil when neither is.
+func launchBody(dir, prof string) any {
+	body := map[string]string{}
+	if dir != "" {
+		body["dir"] = dir
+	}
+	if prof != "" {
+		body["profile"] = prof
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	return body
 }
 
 func (b *httpBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
@@ -328,7 +332,7 @@ func (b *httpBackend) doTimeout(timeout time.Duration, method, path string, in, 
 		}
 		_ = json.Unmarshal(data, &e)
 		if e.Error != "" {
-			return fmt.Errorf("%s (%d)", e.Error, resp.StatusCode)
+			return &apiError{status: resp.StatusCode, msg: e.Error}
 		}
 		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
 	}
@@ -338,7 +342,43 @@ func (b *httpBackend) doTimeout(timeout time.Duration, method, path string, in, 
 	return nil
 }
 
+// apiError is an error the API returned as {"error": msg} with a status.
+type apiError struct {
+	status int
+	msg    string
+}
+
+func (e *apiError) Error() string { return fmt.Sprintf("%s (%d)", e.msg, e.status) }
+
+// apiSentinels are the session errors the API reports with a status of their
+// own. The server writes the wrapped error's text, which starts with the
+// sentinel's.
+var apiSentinels = map[error]int{
+	session.ErrInvalidProfile: http.StatusBadRequest,
+	session.ErrOtherProfile:   http.StatusConflict,
+}
+
+// Is makes errors.Is see the session error behind an API error, as it would in
+// local mode.
+func (e *apiError) Is(target error) bool {
+	status, ok := apiSentinels[target]
+	return ok && e.status == status && strings.HasPrefix(e.msg, target.Error())
+}
+
 // ---- commands ----
+
+// profileErr adds what to do about a profile error from create, resume or
+// restart; any other error is returned as is.
+func profileErr(err error) error {
+	switch {
+	case errors.Is(err, session.ErrOtherProfile):
+		return fmt.Errorf("%w\n  leave out --profile to keep it in its own profile", err)
+	case errors.Is(err, session.ErrInvalidProfile):
+		return fmt.Errorf("%w\n  the profiles are the names in CLAUDE_REMOTE_PROFILES (the API server's, "+
+			"in remote mode); without it the only one is \"default\"", err)
+	}
+	return err
+}
 
 func list(be backend) error {
 	ss, err := be.list()
@@ -353,7 +393,7 @@ func list(be backend) error {
 	// LastActive is RFC3339 in UTC, so it orders as a string.
 	sort.SliceStable(ss, func(i, j int) bool { return ss[i].LastActive > ss[j].LastActive })
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tVERSION\tLAST ACTIVE\tACTION")
+	fmt.Fprintln(w, "ID\tTITLE\tPROFILE\tSTATUS\tVERSION\tLAST ACTIVE\tACTION")
 	outdated := 0
 	for _, s := range ss {
 		title := s.Title
@@ -366,6 +406,10 @@ func list(be backend) error {
 		if s.Status == "Stopped" {
 			action = "crctl resume " + s.ID
 		}
+		prof := s.Profile
+		if prof == "" {
+			prof = "-" // a server that predates profiles omits it
+		}
 		version := s.Version
 		if version == "" {
 			version = "-"
@@ -374,7 +418,7 @@ func list(be backend) error {
 			version += " (outdated)"
 			outdated++
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, title, s.Status, version, humanizeAge(s.LastActive), action)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, title, prof, s.Status, version, humanizeAge(s.LastActive), action)
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -385,36 +429,96 @@ func list(be backend) error {
 	return nil
 }
 
-// dirFlag pulls --dir D / -d D / --dir=D out of args, returning the directory
-// ("" when not given) and the remaining arguments in order.
-func dirFlag(args []string) (dir string, rest []string, err error) {
+// launchFlags pulls --dir D / -d D / --dir=D and --profile P / --profile=P
+// out of args, returning the directory and profile ("" when not given) and the
+// remaining arguments in order.
+func launchFlags(args []string) (dir, prof string, rest []string, err error) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--dir" || args[i] == "-d":
 			if i+1 >= len(args) {
-				return "", nil, fmt.Errorf("%s needs a directory", args[i])
+				return "", "", nil, fmt.Errorf("%s needs a directory", args[i])
 			}
 			dir = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--dir="):
 			dir = strings.TrimPrefix(args[i], "--dir=")
+		case args[i] == "--profile":
+			if i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "-") {
+				return "", "", nil, fmt.Errorf("--profile needs a profile name")
+			}
+			prof = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--profile="):
+			prof = strings.TrimPrefix(args[i], "--profile=")
+			if prof == "" {
+				return "", "", nil, fmt.Errorf("--profile needs a profile name")
+			}
 		default:
 			rest = append(rest, args[i])
 		}
 	}
-	return dir, rest, nil
+	return dir, prof, rest, nil
 }
 
 func create(be backend, args []string) error {
-	dir, _, err := dirFlag(args)
+	dir, prof, rest, err := launchFlags(args)
 	if err != nil {
 		return err
 	}
-	s, err := be.create(dir)
+	if len(rest) != 0 {
+		return fmt.Errorf("usage: crctl new [--dir D] [--profile P]")
+	}
+	s, err := be.create(dir, prof)
 	if err != nil {
-		return err
+		return profileErr(err)
 	}
 	fmt.Printf("started %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	trustHint(s)
+	return nil
+}
+
+// resume relaunches one stopped session, or every one with `all`.
+func resume(be backend, args []string) error {
+	dir, prof, rest, err := launchFlags(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: crctl resume (all | <id> [--dir D] [--profile P])")
+	}
+	if a := rest[0]; a == "all" || a == "--all" || a == "-a" {
+		if dir != "" {
+			return fmt.Errorf("--dir moves one session; it can't be combined with `resume all`")
+		}
+		if prof != "" {
+			return fmt.Errorf("--profile applies to one session; it can't be combined with `resume all`")
+		}
+		return resumeAll(be)
+	}
+	s, err := be.resume(rest[0], dir, prof)
+	if err != nil {
+		return profileErr(err)
+	}
+	fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	trustHint(s)
+	return nil
+}
+
+// restart stops a session and resumes it under the same id.
+func restart(be backend, args []string) error {
+	dir, prof, rest, err := launchFlags(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: crctl restart <id> [--dir D] [--profile P]")
+	}
+	s, err := be.restart(rest[0], dir, prof)
+	if err != nil {
+		return profileErr(err)
+	}
+	fmt.Printf("restarted %s\n  attach: screen -r %s\n", s.ID, s.Screen)
 	trustHint(s)
 	return nil
 }
@@ -449,7 +553,7 @@ func resumeAll(be backend) error {
 			title = "(untitled)"
 		}
 		result, reason := "resumed", ""
-		if _, err := be.resume(s.ID, ""); err != nil {
+		if _, err := be.resume(s.ID, "", ""); err != nil {
 			result, reason = "failed", err.Error()
 			failed++
 		}
@@ -594,12 +698,14 @@ func usage() {
 	fmt.Print(`crctl - client for claude-remote
 
 Usage:
-  crctl ls            list running sessions (default)
-  crctl new [--dir D] start a new detached claude session (optional working dir)
-  crctl resume <id> [--dir D]
+  crctl ls            list sessions and the profile each runs under (default)
+  crctl new [--dir D] [--profile P]
+                      start a new detached claude session (optional working
+                      dir; --profile picks the account, else the default one)
+  crctl resume <id> [--dir D] [--profile P]
                       relaunch a stopped session by id (--dir moves it there)
   crctl resume all    relaunch every stopped session
-  crctl restart <id> [--dir D]
+  crctl restart <id> [--dir D] [--profile P]
                       stop a session and resume it under the same id; --dir
                       moves it into D (e.g. its git repo, for PR/branch tracking)
   crctl upgrade [--force] (--all | <id>...)
@@ -610,6 +716,11 @@ Usage:
                       --force restarts non-idle ones too. With neither --all
                       nor ids, only claude is updated.
   crctl rm <id>       stop a session
+  --profile P         with new/resume/restart: the profile (Claude account) to
+                      run under, one of CLAUDE_REMOTE_PROFILES. resume and
+                      restart default to the session's own profile; another
+                      one is refused, as moving a session between profiles is
+                      not supported yet
   --trust             with new/resume/restart: mark the session's directory as a
                       trusted folder for claude first, so a detached session
                       doesn't wait at the trust prompt (or CLAUDE_REMOTE_TRUST_DIRS=1)
@@ -620,6 +731,7 @@ Set CLAUDE_REMOTE_API_URL to use a remote API instead:
 Env:
   CLAUDE_REMOTE_API_URL    use the HTTP API at this base URL (remote mode)
   CLAUDE_REMOTE_API_TOKEN  bearer token (required in remote mode)
+  CLAUDE_REMOTE_PROFILES, CLAUDE_REMOTE_DEFAULT_PROFILE,
   CLAUDE_REMOTE_SESSION_PREFIX, CLAUDE_BIN, SCREEN_BIN, CLAUDE_CONFIG_DIR,
   CLAUDE_HOME  (local mode)
 `)
