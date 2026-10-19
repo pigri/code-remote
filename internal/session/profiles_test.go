@@ -536,6 +536,14 @@ func TestForProfileHoldsOneProfile(t *testing.T) {
 		if !slices.Equal(got, tc.live) {
 			t.Errorf("%s LiveRegistrations = %v, want %v", tc.name, got, tc.live)
 		}
+		l, live := v.ListLive()
+		got = got[:0]
+		for id := range live {
+			got = append(got, id)
+		}
+		if !slices.Equal(ids(l), tc.list) || !slices.Equal(got, tc.live) {
+			t.Errorf("%s ListLive = %v, %v; want %v, %v", tc.name, ids(l), got, tc.list, tc.live)
+		}
 	}
 	if _, err := m.ForProfile("nope"); !errors.Is(err, ErrInvalidProfile) {
 		t.Errorf("ForProfile(nope) err = %v, want ErrInvalidProfile", err)
@@ -703,6 +711,15 @@ func TestOneRegistryReadPerOperation(t *testing.T) {
 		{name: "Get", op: func(m *Manager) error { _, _, err := m.Get(idA); return err }},
 		{name: "ListAll", op: func(m *Manager) error { _, err := m.ListAll(m.Store.(*fakeStore)); return err }},
 		{name: "LiveRegistrations", op: func(m *Manager) error { m.LiveRegistrations(); return nil }},
+		{name: "ListLive", op: func(m *Manager) error { m.ListLive(); return nil }},
+		{name: "ProfileView.ListLive", op: func(m *Manager) error {
+			v, err := m.ForProfile("private")
+			if err != nil {
+				return err
+			}
+			v.ListLive()
+			return nil
+		}},
 		{name: "SyncConversations", op: func(m *Manager) error { m.SyncConversations(); return nil }},
 		{name: "Kill", op: func(m *Manager) error { _, err := m.Kill(idA); return err }},
 		{name: "ProfileView.Kill", op: func(m *Manager) error {

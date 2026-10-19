@@ -170,16 +170,21 @@ func (v *ProfileView) Profile() string { return v.profile }
 // List is Manager.List for the sessions v's profile owns.
 func (v *ProfileView) List() ([]Session, error) {
 	all, err := v.m.List()
-	if err != nil || len(all) == 0 {
+	if err != nil {
 		return nil, err
 	}
+	return v.own(all), nil
+}
+
+// own is the sessions of all that v's profile owns.
+func (v *ProfileView) own(all []Session) []Session {
 	var out []Session
 	for _, s := range all {
 		if s.Profile == v.profile {
 			out = append(out, s)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Registrations is Manager.Registrations for v's profile's registry.
@@ -197,8 +202,20 @@ func (v *ProfileView) Registrations() ([]Registration, error) {
 // LiveRegistrations is Manager.LiveRegistrations for the sessions v's profile
 // owns.
 func (v *ProfileView) LiveRegistrations() map[string]Registration {
+	return v.ownLive(v.m.LiveRegistrations())
+}
+
+// ListLive is List and LiveRegistrations from one read of the registries and
+// the process table.
+func (v *ProfileView) ListLive() ([]Session, map[string]Registration) {
+	all, live := v.m.ListLive()
+	return v.own(all), v.ownLive(live)
+}
+
+// ownLive is the entries of live in v's profile's registry.
+func (v *ProfileView) ownLive(live map[string]Registration) map[string]Registration {
 	out := map[string]Registration{}
-	for id, r := range v.m.LiveRegistrations() {
+	for id, r := range live {
 		if r.Profile == v.profile {
 			out[id] = r
 		}

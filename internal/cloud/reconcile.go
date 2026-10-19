@@ -28,6 +28,13 @@ type liveRegistrar interface {
 	LiveRegistrations() map[string]session.Registration
 }
 
+// liveLister is optionally implemented by the manager to list the running
+// sessions and their live registrations from one read of the registries and
+// the process table. It is preferred over List and liveRegistrar.
+type liveLister interface {
+	ListLive() ([]session.Session, map[string]session.Registration)
+}
+
 // Reconciler periodically reconciles server-side session state with local
 // screens: any session the server reports as archived has its screen quit. It
 // only ever acts on sessions the manager already owns (prefix-scoped), so it
@@ -142,20 +149,18 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		cwdByID[reg.SessionID] = reg.Cwd
 		bridgeByID[reg.SessionID] = reg.BridgeSessionID
 	}
-	// A resumed session's claude registers under the conversation it resumed,
-	// not our id, so the join above misses it and we'd confirm against a stale
-	// bridge id (404 -> "deleted" -> quit). Prefer the process-matched entry.
-	if lr, ok := r.Manager.(liveRegistrar); ok {
-		for id, reg := range lr.LiveRegistrations() {
-			cwdByID[id] = reg.Cwd
-			bridgeByID[id] = reg.BridgeSessionID
-		}
-	}
 
-	local, err := r.Manager.List()
+	local, live, err := r.listLocal()
 	if err != nil {
 		r.Log.Warn("session_sync", "phase", "list_local", "error", err.Error())
 		return
+	}
+	// A resumed session's claude registers under the conversation it resumed,
+	// not our id, so the join above misses it and we'd confirm against a stale
+	// bridge id (404 -> "deleted" -> quit). Prefer the process-matched entry.
+	for id, reg := range live {
+		cwdByID[id] = reg.Cwd
+		bridgeByID[id] = reg.BridgeSessionID
 	}
 
 	now := time.Now
@@ -260,4 +265,19 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 				"match", match, "reason", reason)
 		}
 	}
+}
+
+// listLocal is the manager's running sessions and, when it can tell, their
+// live registrations.
+func (r *Reconciler) listLocal() ([]session.Session, map[string]session.Registration, error) {
+	if ll, ok := r.Manager.(liveLister); ok {
+		local, live := ll.ListLive()
+		return local, live, nil
+	}
+	var live map[string]session.Registration
+	if lr, ok := r.Manager.(liveRegistrar); ok {
+		live = lr.LiveRegistrations()
+	}
+	local, err := r.Manager.List()
+	return local, live, err
 }

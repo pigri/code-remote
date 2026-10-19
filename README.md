@@ -125,7 +125,7 @@ export CLAUDE_REMOTE_API_TOKEN=$(openssl rand -hex 24)
 | `CLAUDE_REMOTE_SESSION_SYNC` | `on` | Poll the server for archived sessions and quit their screens (`off` to disable) |
 | `CLAUDE_REMOTE_SYNC_INTERVAL` | `30s` | How often to reconcile (Go duration, e.g. `30s`, `1m`) |
 | `CLAUDE_REMOTE_ARCHIVE_GRACE` | `15m` | A session must stay archived this long before its screen is quit (`0` = immediate) |
-| `CLAUDE_REMOTE_CREDENTIALS` | `.credentials.json` in the claude home (`$CLAUDE_CONFIG_DIR`, `$CLAUDE_HOME` or `~/.claude`), or in the default profile's dir with `CLAUDE_REMOTE_PROFILES` | OAuth credentials file (token source for the Sessions API). With several profiles, session sync covers only the default profile's sessions |
+| `CLAUDE_REMOTE_CREDENTIALS` | `.credentials.json` in the claude home (`$CLAUDE_CONFIG_DIR`, `$CLAUDE_HOME` or `~/.claude`) | OAuth credentials file (token source for the Sessions API). With `CLAUDE_REMOTE_PROFILES`, each profile uses `<dir>/.credentials.json` and setting this is a startup error |
 | `CLAUDE_REMOTE_CLOUD_BASE` | `https://api.anthropic.com` | Sessions API base URL |
 | `CLAUDE_REMOTE_MATCH_TITLE` | `off` | Also match by title+cwd for sessions with no bridge id (titles are mutable — opt-in) |
 | `CLAUDE_REMOTE_DB` | `$XDG_DATA_HOME/code-remote/code-remote.db` | SQLite session mirror + ledger path |
@@ -309,9 +309,16 @@ msg=auto_archive id=<uuid> screen=<prefix>-<uuid> reason=archived_on_server
 - Auth uses the local OAuth token from `CLAUDE_REMOTE_CREDENTIALS` (the same one
   `claude` uses). The token is **never logged**, and the file is re-read each
   cycle so refreshed tokens are picked up automatically.
+- With `CLAUDE_REMOTE_PROFILES`, each profile syncs on its own: one reconciler
+  per profile, signed in with that profile's `<dir>/.credentials.json`, sees
+  and quits only that profile's sessions. Another account's sessions are never
+  sent to its cloud, where they would read as deleted. Its log lines carry
+  `profile=<name>`.
 - It **degrades gracefully**: on a host with no credentials file (e.g. a
   headless server where you've never logged in `claude`), sync logs
-  `session_sync_disabled` once and the rest of the API runs normally.
+  `session_sync_disabled` once and the rest of the API runs normally. With
+  several profiles this is per profile: one without credentials is logged and
+  skipped, and the others still sync.
 - Disable with `CLAUDE_REMOTE_SESSION_SYNC=off`.
 
 State is persisted in a **SQLite store** (`CLAUDE_REMOTE_DB`, pure-Go

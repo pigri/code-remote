@@ -439,6 +439,18 @@ func (m *Manager) annotateLive(running []Session, c *regCache) {
 // registers under the conversation it resumed) is still found.
 func (m *Manager) LiveRegistrations() map[string]Registration {
 	running, c := m.list()
+	return m.liveRegistrations(running, c)
+}
+
+// ListLive is List and LiveRegistrations from one read of the registries and
+// the process table.
+func (m *Manager) ListLive() ([]Session, map[string]Registration) {
+	running, c := m.list()
+	return running, m.liveRegistrations(running, c)
+}
+
+// liveRegistrations is LiveRegistrations of running, read through c.
+func (m *Manager) liveRegistrations(running []Session, c *regCache) map[string]Registration {
 	if len(running) == 0 {
 		return nil
 	}

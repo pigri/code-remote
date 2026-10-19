@@ -264,15 +264,25 @@ func TestSyncHandleWaitPrefersDone(t *testing.T) {
 	}
 }
 
-func TestSyncTarget(t *testing.T) {
-	t.Run("single profile: the manager and its home", func(t *testing.T) {
+func TestSyncTargets(t *testing.T) {
+	t.Run("single profile: the manager and its home's credentials", func(t *testing.T) {
 		mgr := &session.Manager{ClaudeHome: "/h/.claude"}
-		home, view, err := syncTarget(mgr)
-		if err != nil || home != "/h/.claude" || view != reconcileManager(mgr) {
-			t.Errorf("syncTarget = %q, %T; want the claude home and the manager itself", home, view)
+		got, err := syncTargets(mgr)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("syncTargets = %+v, %v; want one target", got, err)
+		}
+		if g := got[0]; g.profile != "" || g.creds != "/h/.claude/.credentials.json" || g.view != reconcileManager(mgr) {
+			t.Errorf("target = %+v; want no profile, the claude home's credentials and the manager itself", g)
 		}
 	})
-	t.Run("several profiles: the default's dir and sessions", func(t *testing.T) {
+	t.Run("single profile: CLAUDE_REMOTE_CREDENTIALS overrides", func(t *testing.T) {
+		t.Setenv("CLAUDE_REMOTE_CREDENTIALS", "/elsewhere/creds.json")
+		got, err := syncTargets(&session.Manager{ClaudeHome: "/h/.claude"})
+		if err != nil || len(got) != 1 || got[0].creds != "/elsewhere/creds.json" {
+			t.Errorf("syncTargets = %+v, %v; want the override's credentials", got, err)
+		}
+	})
+	t.Run("several profiles: each profile's dir and sessions", func(t *testing.T) {
 		user := t.TempDir()
 		t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
 		t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "private")
@@ -280,15 +290,22 @@ func TestSyncTarget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		home, view, err := syncTarget(&session.Manager{ClaudeHome: filepath.Join(user, ".claude"), Profiles: set})
+		got, err := syncTargets(&session.Manager{ClaudeHome: filepath.Join(user, ".claude"), Profiles: set})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := filepath.Join(user, ".claude-private"); home != want {
-			t.Errorf("home = %q, want the default profile's %q", home, want)
+		want := []struct{ name, dir string }{{"work", ".claude"}, {"private", ".claude-private"}}
+		if len(got) != len(want) {
+			t.Fatalf("syncTargets = %+v, want one target per profile", got)
 		}
-		if v, ok := view.(*session.ProfileView); !ok || v.Profile() != "private" {
-			t.Errorf("view = %#v, want the view of private", view)
+		for i, w := range want {
+			g := got[i]
+			if g.profile != w.name || g.creds != filepath.Join(user, w.dir, ".credentials.json") {
+				t.Errorf("target %d = %+v, want %s with %s's credentials", i, g, w.name, w.dir)
+			}
+			if v, ok := g.view.(*session.ProfileView); !ok || v.Profile() != w.name {
+				t.Errorf("target %d view = %#v, want the view of %s", i, g.view, w.name)
+			}
 		}
 	})
 }
@@ -376,7 +393,7 @@ func (h *profileHost) register(t *testing.T, dir, file, id string, pid int, brid
 // against a cloud that knows no session, and returns the screens it quit.
 func (h *profileHost) reconcile(t *testing.T) string {
 	t.Helper()
-	_, view, err := syncTarget(h.mgr)
+	view, err := h.mgr.ForProfile(h.mgr.Profiles.Default().Name)
 	if err != nil {
 		t.Fatal(err)
 	}
