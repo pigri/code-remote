@@ -152,6 +152,32 @@ func (f *fakeManager) Kill(id string) (bool, error) {
 	return true, nil
 }
 
+// liveManager is a fakeManager that also knows each running session's live
+// registration, as session.Manager does.
+type liveManager struct {
+	fakeManager
+	live map[string]session.Registration
+}
+
+func (l *liveManager) ListLive() ([]session.Session, map[string]session.Registration) {
+	return l.sessions, l.live
+}
+
+// An entry under a session's id that is not its claude's own — one a quit
+// claude left behind — lends it no bridge, even one the cloud archived.
+func TestReconcileIgnoresTheBridgeOfAStaleEntry(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_old", SessionStatus: "archived"}}}
+	mgr := &liveManager{fakeManager: fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_old"}},
+	}}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 0 {
+		t.Fatalf("killed = %v, want none", mgr.killed)
+	}
+}
+
 // Title+Cwd join: archived cloud sessions map to our screens via the registry's
 // cwd, and only archived ones get quit.
 func TestReconcileQuitsArchivedByTitleCwd(t *testing.T) {
@@ -198,9 +224,9 @@ func TestReconcileQuitsDeletedSession(t *testing.T) {
 		sessions:    []Session{}, // session no longer listed
 		getNotFound: map[string]bool{"session_gone": true},
 	}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_gone"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}},
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_gone"}},
 	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
 	r.ReconcileOnce(context.Background())
@@ -213,9 +239,9 @@ func TestReconcileQuitsDeletedSession(t *testing.T) {
 // is not archived -> must NOT quit.
 func TestReconcileMissingButAliveNotQuit(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{}} // not listed; Get returns idle (default)
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_paged"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}},
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_paged"}},
 	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
 	r.ReconcileOnce(context.Background())
@@ -229,9 +255,9 @@ func TestReconcileQuitsArchivedByBridgeID(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{
 		{ID: "session_X", SessionStatus: "archived"}, // no title
 	}}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}, // no title either
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}}, // no title either
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_X"}},
 	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger()}
 	r.ReconcileOnce(context.Background())
@@ -288,9 +314,9 @@ func TestReconcileNoArchivedIsNoop(t *testing.T) {
 // unarchiving resets the clock.
 func TestReconcileGracePeriod(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_X", SessionStatus: "archived"}}}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}},
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_X"}},
 	}
 	clk := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(),
@@ -316,9 +342,9 @@ func TestReconcileGracePeriod(t *testing.T) {
 
 func TestReconcileGraceResetsOnUnarchive(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_X", SessionStatus: "archived"}}}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}},
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_X"}},
 	}
 	clk := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(),

@@ -107,7 +107,7 @@ type titleKey struct{ title, cwd string }
 // the server has archived.
 //
 // The server never exposes our --session-id UUID, so we map server→local by the
-// registry's bridgeSessionId == server id (stable, rename-proof). When
+// live registry entry's bridgeSessionId == server id (stable, rename-proof). When
 // MatchTitle is set, sessions lacking a bridgeSessionId fall back to a Title+Cwd
 // match that only fires when EVERY server session sharing that Title+Cwd is
 // archived, so a session with a live cloud counterpart is never killed.
@@ -144,10 +144,8 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		r.Log.Warn("session_sync", "phase", "registrations", "error", err.Error())
 	}
 	cwdByID := make(map[string]string, len(regs))
-	bridgeByID := make(map[string]string, len(regs))
 	for _, reg := range regs {
 		cwdByID[reg.SessionID] = reg.Cwd
-		bridgeByID[reg.SessionID] = reg.BridgeSessionID
 	}
 
 	local, live, err := r.listLocal()
@@ -156,11 +154,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 		return
 	}
 	// A resumed session's claude registers under the conversation it resumed,
-	// not our id, so the join above misses it and we'd confirm against a stale
-	// bridge id (404 -> "deleted" -> quit). Prefer the process-matched entry.
+	// not our id, so the join above misses it. Prefer the process-matched entry.
 	for id, reg := range live {
 		cwdByID[id] = reg.Cwd
-		bridgeByID[id] = reg.BridgeSessionID
 	}
 
 	now := time.Now
@@ -172,9 +168,13 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 
 	for _, ls := range local {
 		cwd := cwdByID[ls.ID]
-		bridge := bridgeByID[ls.ID]
+		// The bridge comes only from the session's own claude process. Another
+		// entry under its id is a quit claude's, whose bridge names a cloud
+		// session a resumed one has left: archived or deleted, it would quit it.
+		bridge := live[ls.ID].BridgeSessionID
 		// A deleted session's live registry resets bridgeSessionId to null;
-		// fall back to the last-known bridge id so we can still confirm it.
+		// fall back to the last-known bridge id so we can still confirm it. It
+		// is this launch's: a launch clears it, and only a live one is stored.
 		if bridge == "" {
 			if lb, lerr := st.LastBridge(ls.ID); lerr == nil && lb != "" {
 				bridge = lb

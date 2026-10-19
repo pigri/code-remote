@@ -112,9 +112,9 @@ func TestListCredentialsError(t *testing.T) {
 // Run does an initial reconcile, then ticks until the context is cancelled.
 func TestRunTicksAndStops(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{{ID: "session_X", SessionStatus: "archived"}}}
-	mgr := &fakeManager{
-		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}},
-		regs:     []session.Registration{{SessionID: "uuid-1", BridgeSessionID: "session_X"}},
+	mgr := &liveManager{
+		fakeManager: fakeManager{sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1"}}},
+		live:        map[string]session.Registration{"uuid-1": {SessionID: "uuid-1", BridgeSessionID: "session_X"}},
 	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), Interval: time.Millisecond}
 
