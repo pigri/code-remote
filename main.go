@@ -246,7 +246,11 @@ func startSessionSync(ctx context.Context, logger *slog.Logger, mgr *session.Man
 		return nil
 	}
 
-	home, view := syncTarget(mgr)
+	home, view, err := syncTarget(mgr)
+	if err != nil {
+		logger.Warn("session_sync_disabled", "reason", "no view of the default profile", "error", err.Error())
+		return nil
+	}
 	credsPath := envOr("CLAUDE_REMOTE_CREDENTIALS", filepath.Join(home, ".credentials.json"))
 	if _, err := os.Stat(credsPath); err != nil {
 		logger.Warn("session_sync_disabled", "reason", "no credentials file", "path", credsPath)
@@ -313,13 +317,16 @@ type reconcileManager interface {
 // credentials it uses, and the sessions it sees. With several profiles that is
 // the default profile and its sessions only, since another account's sessions
 // would read as deleted in this account's cloud.
-func syncTarget(mgr *session.Manager) (home string, view reconcileManager) {
+func syncTarget(mgr *session.Manager) (home string, view reconcileManager, err error) {
 	if !mgr.Profiles.Multi() {
-		return mgr.ClaudeHome, mgr
+		return mgr.ClaudeHome, mgr, nil
 	}
 	def := mgr.Profiles.Default()
-	v, _ := mgr.ForProfile(def.Name)
-	return def.Dir, v
+	v, err := mgr.ForProfile(def.Name)
+	if err != nil {
+		return "", nil, err
+	}
+	return def.Dir, v, nil
 }
 
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)

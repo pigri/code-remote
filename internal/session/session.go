@@ -689,11 +689,37 @@ func scrubEnv(cmd *exec.Cmd, p profile.Profile) {
 	cmd.Env = p.Env(sessionEnv(env))
 }
 
-// List returns all running sessions owned by this manager.
+// List returns all running sessions owned by this manager, each in its
+// profile: the one its claude registered in, else its resolved one.
 func (m *Manager) List() ([]Session, error) {
 	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
 	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
-	return m.parseSessions(string(out)), nil
+	sessions := m.parseSessions(string(out))
+	m.registeredProfiles(sessions)
+	return sessions, nil
+}
+
+// registeredProfiles puts each running session whose claude has a
+// registration (see regIndex) in the profile it registered in, so every
+// caller sees one profile for it. With one profile there is nothing to move.
+func (m *Manager) registeredProfiles(sessions []Session) {
+	if !m.Profiles.Multi() || len(sessions) == 0 {
+		return
+	}
+	ix := m.regIndex()
+	for i := range sessions {
+		s := &sessions[i]
+		r, ok, _, _ := ix.lookup(*s, s.Profile)
+		if !ok || r.Profile == "" || r.Profile == s.Profile {
+			continue
+		}
+		p, err := m.lookupProfile(r.Profile)
+		if err != nil {
+			continue
+		}
+		s.Profile = p.Name
+		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
+	}
 }
 
 // parseSessions turns `screen -ls` output into our sessions (prefix-scoped,

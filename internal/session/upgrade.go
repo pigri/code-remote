@@ -267,52 +267,17 @@ var resumeArgRe = regexp.MustCompile(`--(?:resume|session-id)[ =]([0-9a-f-]{36})
 // itself. Candidates without an on-disk log are passed over, so Conv is always
 // something that can be resumed if anything is.
 func (m *Manager) liveIndex() func(Session) liveInfo {
-	regs, _ := m.Registrations()
-	byID := make(map[string]Registration, len(regs))
-	byPID := make(map[string]Registration, len(regs))
-	for _, r := range regs {
-		byID[r.SessionID] = r
-		if r.PID > 0 {
-			byPID[strconv.Itoa(r.PID)] = r
-		}
-	}
-
-	// One pass over the process table: each screen's child and its argv.
-	type proc struct{ pid, args string }
-	child := map[string]proc{} // parent pid -> child
-	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		p := proc{pid: f[0], args: strings.Join(f[2:], " ")}
-		// A screen has one child (claude); if a pid somehow has several, prefer
-		// the one claude registered.
-		if _, dup := child[f[1]]; dup {
-			if _, registered := byPID[p.pid]; !registered {
-				continue
-			}
-		}
-		child[f[1]] = p
-	}
-
+	ix := m.regIndex()
 	return func(s Session) liveInfo {
-		home := m.sessionProfile(s).Dir
+		prof := m.sessionProfile(s)
+		home := prof.Dir
 		usable := func(conv string) bool {
 			return m.ValidID(conv) && (home == "" || logIn(home, conv) != "")
 		}
 		info := liveInfo{Conv: s.ID}
-		p, hasProc := child[s.PID]
-		if s.PID == "" {
-			hasProc = false
-		}
-		if hasProc {
-			info.Reg, info.Known = byPID[p.pid]
-		}
-		if !info.Known {
-			info.Reg, info.Known = byID[s.ID]
-		}
+		var p proc
+		var hasProc bool
+		info.Reg, info.Known, p, hasProc = ix.lookup(s, prof.Name)
 
 		candidates := []string{info.Reg.SessionID}
 		if c := m.storedConv(home, s.ID); c != s.ID { // s.ID means "nothing recorded"
@@ -331,6 +296,85 @@ func (m *Manager) liveIndex() func(Session) liveInfo {
 		}
 		return info
 	}
+}
+
+// proc is a process: its pid and its command line.
+type proc struct{ pid, args string }
+
+// regIndex joins running sessions to their claude process and its entry in
+// some profile's registry.
+type regIndex struct {
+	byID, byPID map[string][]Registration
+	child       map[string]proc // screen pid -> its child
+}
+
+// regIndex reads every profile's registry and the process table once.
+func (m *Manager) regIndex() regIndex {
+	regs, _ := m.Registrations()
+	ix := regIndex{
+		byID:  make(map[string][]Registration, len(regs)),
+		byPID: make(map[string][]Registration, len(regs)),
+		child: map[string]proc{},
+	}
+	for _, r := range regs {
+		ix.byID[r.SessionID] = append(ix.byID[r.SessionID], r)
+		if r.PID > 0 {
+			pid := strconv.Itoa(r.PID)
+			ix.byPID[pid] = append(ix.byPID[pid], r)
+		}
+	}
+	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		p := proc{pid: f[0], args: strings.Join(f[2:], " ")}
+		// A screen has one child (claude); if a pid somehow has several, prefer
+		// the one claude registered.
+		if _, dup := ix.child[f[1]]; dup && len(ix.byPID[p.pid]) == 0 {
+			continue
+		}
+		ix.child[f[1]] = p
+	}
+	return ix
+}
+
+// lookup finds running session s's claude process and its registration, for
+// a session in profile prof: by the process's pid, else by s's id.
+func (ix regIndex) lookup(s Session, prof string) (reg Registration, known bool, p proc, hasProc bool) {
+	p, hasProc = ix.child[s.PID]
+	hasProc = hasProc && s.PID != ""
+	if hasProc {
+		if reg, known = pickReg(ix.byPID[p.pid], prof); known {
+			return reg, known, p, hasProc
+		}
+	}
+	reg, known = pickReg(ix.byID[s.ID], prof)
+	return reg, known, p, hasProc
+}
+
+// pickReg is the registration among regs, which share a pid or a session id,
+// for a session in profile prof. Within one profile the last read wins. Across
+// profiles only an entry in prof does: a stale file left by a crashed claude
+// can share a live claude's pid, so an entry in another profile proves
+// nothing, and none is picked.
+func pickReg(regs []Registration, prof string) (Registration, bool) {
+	if len(regs) == 0 {
+		return Registration{}, false
+	}
+	last := regs[len(regs)-1]
+	for _, r := range regs {
+		if r.Profile != last.Profile {
+			for i := len(regs) - 1; i >= 0; i-- {
+				if regs[i].Profile == prof {
+					return regs[i], true
+				}
+			}
+			return Registration{}, false
+		}
+	}
+	return last, true
 }
 
 // pidAlive reports whether a process with the given pid exists. A zero pid

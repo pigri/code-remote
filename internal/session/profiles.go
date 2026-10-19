@@ -111,9 +111,8 @@ func (m *Manager) launchProfile(id string, own profile.Profile, prof string) (pr
 }
 
 // ProfileView is the part of a Manager that one profile owns: its running
-// sessions, its registrations, and kills of its own sessions only. A running
-// session belongs to the profile whose registry its claude registered in, and
-// to its resolved profile when it has no registration. See Manager.ForProfile.
+// sessions (those whose Profile it is, see List), its registrations, and kills
+// of its own sessions only. See Manager.ForProfile.
 type ProfileView struct {
 	m       *Manager
 	profile string
@@ -132,25 +131,15 @@ func (m *Manager) ForProfile(name string) (*ProfileView, error) {
 // Profile is the name of the profile v holds.
 func (v *ProfileView) Profile() string { return v.profile }
 
-// owner is the profile running session s belongs to; info is what liveIndex
-// found for it.
-func owner(s Session, info liveInfo) string {
-	if info.Known && info.Reg.Profile != "" {
-		return info.Reg.Profile
-	}
-	return s.Profile
-}
-
 // List is Manager.List for the sessions v's profile owns.
 func (v *ProfileView) List() ([]Session, error) {
 	all, err := v.m.List()
 	if err != nil || len(all) == 0 {
 		return nil, err
 	}
-	live := v.m.liveIndex()
 	var out []Session
 	for _, s := range all {
-		if owner(s, live(s)) == v.profile {
+		if s.Profile == v.profile {
 			out = append(out, s)
 		}
 	}
@@ -188,8 +177,8 @@ func (v *ProfileView) Kill(id string) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	if o := owner(s, v.m.liveIndex()(s)); o != v.profile {
-		return false, fmt.Errorf("%w: %s runs in profile %q, not %q", ErrOtherProfile, id, o, v.profile)
+	if s.Profile != v.profile {
+		return false, fmt.Errorf("%w: %s runs in profile %q, not %q", ErrOtherProfile, id, s.Profile, v.profile)
 	}
 	return v.m.Kill(id)
 }

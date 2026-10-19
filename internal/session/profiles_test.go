@@ -567,3 +567,60 @@ func TestForProfileKillRefusesAnotherProfile(t *testing.T) {
 		t.Errorf("killed = %v, want only the work session", fs.killed)
 	}
 }
+
+// When two profiles' registries hold the same pid, the entry in the session's
+// own profile is its registration. When neither is in its own profile, it
+// has none: no entry a stale file left behind decides where it runs.
+func TestRegistryCollisionAcrossProfiles(t *testing.T) {
+	user := t.TempDir()
+	t.Setenv("HOME", user)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private,third=~/.claude-third")
+	set, err := profile.FromEnv("", user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := func(dir, file, id string) {
+		sdir := filepath.Join(user, dir, "sessions")
+		if err := os.MkdirAll(sdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"sessionId":"` + id + `","pid":7777,"bridgeSessionId":"bridge_` + dir + `"}`
+		if err := os.WriteFile(filepath.Join(sdir, file+".json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Neither entry carries the session's id: the live claude has moved to a
+	// new conversation, and the stale one was another session.
+	const conv, stale = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4", "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e"
+	reg(".claude", "a", conv) // the live claude, listed first
+	reg(".claude-third", "s", stale)
+
+	for _, tc := range []struct {
+		stored, want, bridge string
+	}{
+		{"work", "work", "bridge_.claude"}, // the session's own entry wins over the later stale one
+		{"private", "private", ""},         // neither entry is its own: no registration
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000\n"}
+			withFakeScreen(t, fs)
+			fst := &fakeStore{stored: map[string]string{idA: tc.stored}}
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+			l, _ := m.List()
+			if len(l) != 1 || l[0].Profile != tc.want {
+				t.Fatalf("List = %+v, want the session in %s", l, tc.want)
+			}
+			live := m.LiveRegistrations()
+			if got := live[idA].BridgeSessionID; got != tc.bridge {
+				t.Errorf("live bridge = %q, want %q", got, tc.bridge)
+			}
+			for _, name := range []string{"work", "private", "third"} {
+				v, _ := m.ForProfile(name)
+				vl, _ := v.List()
+				if in := len(vl) == 1; in != (name == tc.want) {
+					t.Errorf("%s view holds the session: %v, want %v", name, in, name == tc.want)
+				}
+			}
+		})
+	}
+}
