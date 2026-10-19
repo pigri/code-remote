@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 	"claude-remote-api/internal/store"
 )
@@ -256,4 +257,57 @@ func TestSyncHandleWaitPrefersDone(t *testing.T) {
 	if !(*syncHandle)(nil).wait(ctx) {
 		t.Error("nil handle wait = false, want true")
 	}
+}
+
+// scopeStub is a manager holding sessions and registrations of two profiles.
+type scopeStub struct{ killed []string }
+
+func (s *scopeStub) List() ([]session.Session, error) {
+	return []session.Session{{ID: "w", Profile: "work"}, {ID: "p", Profile: "private"}}, nil
+}
+func (s *scopeStub) Kill(id string) (bool, error) { s.killed = append(s.killed, id); return true, nil }
+func (s *scopeStub) Registrations() ([]session.Registration, error) {
+	return []session.Registration{{SessionID: "w", Profile: "work"}, {SessionID: "p", Profile: "private"}}, nil
+}
+func (s *scopeStub) LiveRegistrations() map[string]session.Registration {
+	return map[string]session.Registration{"w": {SessionID: "w", Profile: "work"}, "p": {SessionID: "p", Profile: "private"}}
+}
+
+func TestProfileScopeHoldsOneProfile(t *testing.T) {
+	v := profileScope{mgr: &scopeStub{}, profile: "private"}
+	if l, _ := v.List(); len(l) != 1 || l[0].ID != "p" {
+		t.Errorf("List = %+v, want only the private session", l)
+	}
+	if r, _ := v.Registrations(); len(r) != 1 || r[0].SessionID != "p" {
+		t.Errorf("Registrations = %+v, want only the private one", r)
+	}
+	if r := v.LiveRegistrations(); len(r) != 1 || r["p"].SessionID != "p" {
+		t.Errorf("LiveRegistrations = %+v, want only the private one", r)
+	}
+}
+
+func TestSyncTarget(t *testing.T) {
+	t.Run("single profile: the manager and its home", func(t *testing.T) {
+		mgr := &session.Manager{ClaudeHome: "/h/.claude"}
+		home, view := syncTarget(mgr)
+		if home != "/h/.claude" || view != reconcileManager(mgr) {
+			t.Errorf("syncTarget = %q, %T; want the claude home and the manager itself", home, view)
+		}
+	})
+	t.Run("several profiles: the default's dir and sessions", func(t *testing.T) {
+		user := t.TempDir()
+		t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+		t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "private")
+		set, err := profile.FromEnv("", user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		home, view := syncTarget(&session.Manager{ClaudeHome: filepath.Join(user, ".claude"), Profiles: set})
+		if want := filepath.Join(user, ".claude-private"); home != want {
+			t.Errorf("home = %q, want the default profile's %q", home, want)
+		}
+		if s, ok := view.(profileScope); !ok || s.profile != "private" {
+			t.Errorf("view = %#v, want a profileScope for private", view)
+		}
+	})
 }

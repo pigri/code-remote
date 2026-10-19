@@ -166,9 +166,9 @@ func resolve(p string) string {
 	}
 }
 
-// isUserClaude reports whether p is userHome/.claude, the dir claude uses when
-// CLAUDE_CONFIG_DIR is unset.
-func (p Profile) isUserClaude(userHome string) bool {
+// IsUserClaude reports whether p is userHome/.claude, the dir claude uses when
+// CLAUDE_CONFIG_DIR is unset. It is false when userHome is "".
+func (p Profile) IsUserClaude(userHome string) bool {
 	return userHome != "" && sameDir(p.Dir, filepath.Join(userHome, ".claude"))
 }
 
@@ -182,7 +182,7 @@ func (p Profile) ConfigFile(userHome string) string {
 	if !p.explicit {
 		return ""
 	}
-	if p.isUserClaude(userHome) {
+	if p.IsUserClaude(userHome) {
 		return filepath.Join(userHome, ".claude.json")
 	}
 	return filepath.Join(p.Dir, ".claude.json")
@@ -204,7 +204,7 @@ func (p Profile) Env(env []string, userHome string) []string {
 			out = append(out, kv)
 		}
 	}
-	if !p.isUserClaude(userHome) {
+	if !p.IsUserClaude(userHome) {
 		out = append(out, "CLAUDE_CONFIG_DIR="+p.Dir)
 	}
 	return out

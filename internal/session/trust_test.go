@@ -114,7 +114,7 @@ func TestLaunchTrustsOrFlagsDir(t *testing.T) {
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home,
 			WorkspaceRoot: root, ClaudeConfig: filepath.Join(home, "config.json"), TrustDirs: trust}
 
-		s, err := m.ResumeIn(id, root)
+		s, err := m.ResumeIn(id, root, "")
 		if err != nil {
 			t.Fatalf("ResumeIn: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestLaunchTrustsOrFlagsDir(t *testing.T) {
 			t.Errorf("TrustDirs=%v: NeedsTrust=%v trusted=%v", trust, s.NeedsTrust, m.DirTrusted(root))
 		}
 
-		c, err := m.Create(root)
+		c, err := m.Create(root, "")
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}

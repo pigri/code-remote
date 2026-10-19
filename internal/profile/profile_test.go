@@ -359,3 +359,21 @@ func TestParseDuplicateDirNotYetCreated(t *testing.T) {
 		t.Errorf("distinct missing dirs: %v", err)
 	}
 }
+
+func TestIsUserClaude(t *testing.T) {
+	for _, tc := range []struct {
+		p    Profile
+		home string
+		want bool
+	}{
+		{pr("work", home+"/.claude"), home, true},
+		{pr("work", home+"/.claude/"), home, true},
+		{pr("private", home+"/.claude-private"), home, false},
+		{pr("work", home+"/.claude"), "", false},
+		{Profile{Name: "default", Dir: home + "/.claude"}, home, true},
+	} {
+		if got := tc.p.IsUserClaude(tc.home); got != tc.want {
+			t.Errorf("%+v.IsUserClaude(%q) = %v, want %v", tc.p, tc.home, got, tc.want)
+		}
+	}
+}

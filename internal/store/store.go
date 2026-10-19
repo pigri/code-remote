@@ -155,6 +155,17 @@ func (d *DB) Cwd(uuid string) (string, error) {
 	return c.String, nil
 }
 
+// Profile returns the profile last recorded for a session, or "" when none is
+// (or the session is unknown).
+func (d *DB) Profile(uuid string) (string, error) {
+	var p string
+	err := d.db.QueryRow(`SELECT profile FROM sessions WHERE uuid=?`, uuid).Scan(&p)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return p, err
+}
+
 // UpsertSession records/updates the mirrored view, preserving the ledger columns
 // (grace clock, archived_at, resumed_at).
 func (d *DB) UpsertSession(r cloud.SessionRecord) error {

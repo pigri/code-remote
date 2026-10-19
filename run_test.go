@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -103,6 +104,7 @@ type stubMgr struct {
 	restartSess session.Session
 	restartErr  error
 	gotDir      string // dir passed to ResumeIn / RestartIn
+	gotProfile  string // profile passed to Create / ResumeIn / RestartIn
 	upgradeRes  session.UpgradeResult
 	upgradeErr  error
 	gotRestart  bool // restart flag passed to Upgrade
@@ -111,15 +113,16 @@ type stubMgr struct {
 }
 
 func (s *stubMgr) ValidID(string) bool { return true } // let requests reach the manager
-func (s *stubMgr) Create(string) (session.Session, error) {
+func (s *stubMgr) Create(_, prof string) (session.Session, error) {
+	s.gotProfile = prof
 	return s.createSess, s.createErr
 }
-func (s *stubMgr) ResumeIn(_, dir string) (session.Session, error) {
-	s.gotDir = dir
+func (s *stubMgr) ResumeIn(_, dir, prof string) (session.Session, error) {
+	s.gotDir, s.gotProfile = dir, prof
 	return s.resumeSess, s.resumeErr
 }
-func (s *stubMgr) RestartIn(_, dir string) (session.Session, error) {
-	s.gotDir = dir
+func (s *stubMgr) RestartIn(_, dir, prof string) (session.Session, error) {
+	s.gotDir, s.gotProfile = dir, prof
 	return s.restartSess, s.restartErr
 }
 func (s *stubMgr) Upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
@@ -406,5 +409,36 @@ func TestRunExitsWhenServerFails(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second): // under run's 5s shutdown deadline
 		t.Fatal("run did not return promptly after the server failed")
+	}
+}
+
+func TestHandlersPassProfile(t *testing.T) {
+	for _, path := range []string{"/sessions", "/sessions/" + stubID + "/resume", "/sessions/" + stubID + "/restart"} {
+		m := &stubMgr{}
+		rr := send(t, stubHandler(m), http.MethodPost, path, `{"dir":"repo","profile":"private"}`)
+		if rr.Code >= 300 || m.gotProfile != "private" {
+			t.Errorf("POST %s = %d, profile %q; want 2xx with profile private (%s)", path, rr.Code, m.gotProfile, rr.Body)
+		}
+	}
+}
+
+func TestHandlersProfileErrors(t *testing.T) {
+	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
+	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)
+	for _, tc := range []struct {
+		path string
+		mgr  *stubMgr
+		want int
+	}{
+		{"/sessions", &stubMgr{createErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: invalid}, http.StatusBadRequest},
+		{"/sessions/" + stubID + "/resume", &stubMgr{resumeErr: other}, http.StatusConflict},
+		{"/sessions/" + stubID + "/restart", &stubMgr{restartErr: other}, http.StatusConflict},
+	} {
+		rr := send(t, stubHandler(tc.mgr), http.MethodPost, tc.path, `{"profile":"x"}`)
+		if rr.Code != tc.want || !strings.Contains(rr.Body.String(), "profile") {
+			t.Errorf("POST %s with %v = %d %s, want %d naming the profile", tc.path, tc.mgr, rr.Code, rr.Body, tc.want)
+		}
 	}
 }

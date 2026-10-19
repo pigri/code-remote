@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"claude-remote-api/internal/profile"
 )
 
 // Tunables for the upgrade/restart flow; vars so tests can shorten them.
@@ -126,14 +128,15 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 	for _, s := range running {
 		info := live(s)
 		reg, known := info.Reg, info.Known
-		o := RestartOutcome{ID: s.ID, Title: m.convTitle(s.ID, info.Conv)}
+		p := m.profileOf(s.ID)
+		o := RestartOutcome{ID: s.ID, Title: convTitle(p.Dir, s.ID, info.Conv)}
 		switch {
 		case known && res.After != "" && reg.Version == res.After:
 			o.Action, o.Reason = ActionSkipped, "already on "+res.After
 		case known && !force && reg.Status != "" && reg.Status != "idle":
 			o.Action, o.Reason = ActionSkipped, reg.Status+" (use force to restart anyway)"
 		default:
-			if _, rerr := m.restart(s, info, ""); rerr != nil {
+			if _, rerr := m.restart(s, info, "", p); rerr != nil {
 				o.Action, o.Reason = ActionFailed, rerr.Error()
 			} else {
 				o.Action = ActionRestarted
@@ -170,34 +173,39 @@ func runTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
 //
 // It refuses (ErrNotResumable) before killing anything when there is no on-disk
 // log to resume from, so a restart can't turn into a plain kill.
-func (m *Manager) Restart(id string) (Session, error) { return m.RestartIn(id, "") }
+func (m *Manager) Restart(id string) (Session, error) { return m.RestartIn(id, "", "") }
 
-// RestartIn is Restart with the session moved to working directory dir (see
-// ResumeIn). A bad dir is refused (ErrInvalidDir) before anything is stopped.
-func (m *Manager) RestartIn(id, dir string) (Session, error) {
+// RestartIn is Restart with the session moved to working directory dir, under
+// profile prof (see ResumeIn). A bad dir or profile is refused before anything
+// is stopped.
+func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
+	}
+	p, err := m.launchProfile(id, prof)
+	if err != nil {
+		return Session{}, err
 	}
 	s, running, err := m.Get(id)
 	if err != nil {
 		return Session{}, err
 	}
 	if !running {
-		return m.ResumeIn(id, dir)
+		return m.ResumeIn(id, dir, prof)
 	}
-	return m.restart(s, m.liveIndex()(s), dir)
+	return m.restart(s, m.liveIndex()(s), dir, p)
 }
 
-// restart is RestartIn for a session known to be running; info is what
-// liveIndex found for it.
-func (m *Manager) restart(s Session, info liveInfo, dir string) (Session, error) {
+// restart is RestartIn for a session known to be running in profile p; info is
+// what liveIndex found for it.
+func (m *Manager) restart(s Session, info liveInfo, dir string, p profile.Profile) (Session, error) {
 	id, conv := s.ID, info.Conv
 	if dir != "" {
 		if _, err := m.resolveDir(dir); err != nil {
 			return Session{}, err
 		}
 	}
-	if m.ClaudeHome != "" && !m.HasSessionLog(conv) {
+	if p.Dir != "" && logIn(p.Dir, conv) == "" {
 		return Session{}, fmt.Errorf("%w: no claude session log for %s (not restarting)", ErrNotResumable, conv)
 	}
 
@@ -222,7 +230,7 @@ func (m *Manager) restart(s Session, info liveInfo, dir string) (Session, error)
 		}
 		time.Sleep(stopPoll)
 	}
-	return m.resume(id, conv, dir)
+	return m.resume(id, conv, dir, p)
 }
 
 // liveInfo is what is known about a running session's claude process.
@@ -279,10 +287,11 @@ func (m *Manager) liveIndex() func(Session) liveInfo {
 		child[f[1]] = p
 	}
 
-	usable := func(conv string) bool {
-		return m.ValidID(conv) && (m.ClaudeHome == "" || m.HasSessionLog(conv))
-	}
 	return func(s Session) liveInfo {
+		home := m.home(s.ID)
+		usable := func(conv string) bool {
+			return m.ValidID(conv) && (home == "" || logIn(home, conv) != "")
+		}
 		info := liveInfo{Conv: s.ID}
 		p, hasProc := child[s.PID]
 		if s.PID == "" {
@@ -296,7 +305,7 @@ func (m *Manager) liveIndex() func(Session) liveInfo {
 		}
 
 		candidates := []string{info.Reg.SessionID}
-		if c := m.storedConv(s.ID); c != s.ID { // s.ID means "nothing recorded"
+		if c := m.storedConv(home, s.ID); c != s.ID { // s.ID means "nothing recorded"
 			candidates = append(candidates, c)
 		}
 		if hasProc {
