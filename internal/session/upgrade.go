@@ -307,13 +307,14 @@ func (m *Manager) liveConv(s Session, home string, info liveInfo) string {
 }
 
 // reread is info with s's registration read again from its file, so a stop
-// that comes a while after the index was built notes where s is by then.
+// that comes a while after the index was built notes where s is by then. A
+// file another process has written at the pid since is not s's.
 func (m *Manager) reread(s Session, info liveInfo) liveInfo {
 	if !info.Known || info.Reg.path == "" {
 		return info
 	}
 	regs := rereadFile(info.Reg.path, info.Reg.Profile)
-	if len(regs) != 1 || regs[0].PID != info.Reg.PID {
+	if len(regs) != 1 || regs[0].PID != info.Reg.PID || regs[0].procStart != info.Reg.procStart {
 		return info
 	}
 	regs[0].owned = info.Reg.owned
@@ -354,8 +355,9 @@ func (c *regCache) index() regIndex {
 }
 
 // regIndex reads every profile's registry and the process table once. An
-// entry counts only while its pid is alive: a crashed claude leaves its file
-// behind, and another claude can get its pid.
+// entry counts only while its pid is alive, and only from the process that
+// wrote it: a crashed claude leaves its file behind, and another claude can
+// get its pid.
 func (m *Manager) regIndex() regIndex {
 	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
 	var procs [][2]string // ppid, pid
@@ -387,8 +389,8 @@ func (m *Manager) regIndex() regIndex {
 	}
 	for _, r := range regs {
 		pid := strconv.Itoa(r.PID)
-		if _, alive := args[pid]; r.PID > 0 && len(procs) > 0 && !alive {
-			continue // its process is gone
+		if _, alive := args[pid]; r.PID > 0 && (len(procs) > 0 && !alive || !wroteBy(r, pid)) {
+			continue // its process is gone, or another one has its pid
 		}
 		ix.byID[r.SessionID] = append(ix.byID[r.SessionID], r)
 		if r.PID > 0 {
@@ -405,6 +407,17 @@ func (m *Manager) regIndex() regIndex {
 		ix.child[ppid] = proc{pid: pid, args: args[pid]}
 	}
 	return ix
+}
+
+// wroteBy reports whether r may have been written by process pid: unless r
+// records its process's start (procStart) and pid's differs. The start is in
+// clock ticks since boot, which a step of the wall clock does not move.
+func wroteBy(r Registration, pid string) bool {
+	if r.procStart == "" {
+		return true // an older claude records none
+	}
+	start, err := procStart(pid)
+	return err != nil || start == r.procStart
 }
 
 // owner is the profile a process runs under, when known.
