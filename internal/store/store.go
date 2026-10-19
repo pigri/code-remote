@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
+	_ "modernc.org/sqlite"
+	"modernc.org/sqlite/lib"
 
 	"claude-remote-api/internal/cloud"
 	"claude-remote-api/internal/session"
@@ -69,20 +69,31 @@ func Open(path string) (*DB, error) {
 
 const busyTimeout = 5 * time.Second
 
+// walSwitchTimeout bounds how long switchToWAL retries. Tests shrink it.
+var walSwitchTimeout = busyTimeout
+
 // switchToWAL puts the database in WAL mode. On a database not yet in WAL
 // mode, SQLite upgrades a read transaction to a write transaction to switch,
 // and returns SQLITE_BUSY at once, without the busy handler, when another
-// connection holds the write lock. So retry for up to busyTimeout.
+// connection holds the write lock. So retry on SQLITE_BUSY until
+// walSwitchTimeout has passed. One attempt can itself wait up to busyTimeout
+// for another lock, so the switch can take up to about
+// walSwitchTimeout+busyTimeout.
 func switchToWAL(db *sql.DB) error {
-	deadline := time.Now().Add(busyTimeout)
+	deadline := time.Now().Add(walSwitchTimeout)
 	for {
 		_, err := db.Exec(`PRAGMA journal_mode=WAL`)
-		var serr *sqlite.Error
-		if err == nil || !errors.As(err, &serr) || serr.Code()&0xff != sqlite3.SQLITE_BUSY || time.Now().After(deadline) {
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// isBusy reports whether err is SQLITE_BUSY or one of its extended codes.
+func isBusy(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 func (d *DB) Close() error { return d.db.Close() }
