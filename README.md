@@ -65,6 +65,7 @@ session's profile: `<prefix>-<profile>-<uuid>`, for example
 
 - Go 1.26+
 - `screen`
+- `ps` (procps), to tell a live claude from a stale registry file
 - `claude` (Claude Code) on the host
 
 ## Build
