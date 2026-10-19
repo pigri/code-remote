@@ -19,6 +19,11 @@ type Profile struct {
 	// (the single default, or the zero Profile) leaves claude's environment as
 	// the server's is.
 	explicit bool
+
+	// home is the user's home dir as it was when the profile was configured.
+	// It decides which profile is ~/.claude, so a later change of $HOME moves
+	// nothing.
+	home string
 }
 
 // Set is the configured profiles, in the order they were listed, and which of
@@ -71,7 +76,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 			}
 		}
 		names[name] = true
-		out = append(out, Profile{Name: name, Dir: dir, explicit: true})
+		out = append(out, Profile{Name: name, Dir: dir, explicit: true, home: userHome})
 	}
 	return out, nil
 }
@@ -83,7 +88,7 @@ func Parse(spec, userHome string) ([]Profile, error) {
 func FromEnv(fallbackDir, userHome string) (Set, error) {
 	spec := os.Getenv("CLAUDE_REMOTE_PROFILES")
 	if spec == "" {
-		return Set{list: []Profile{{Name: "default", Dir: fallbackDir}}}, nil
+		return Set{list: []Profile{{Name: "default", Dir: fallbackDir, home: userHome}}}, nil
 	}
 	list, err := Parse(spec, userHome)
 	if err != nil {
@@ -166,10 +171,11 @@ func resolve(p string) string {
 	}
 }
 
-// IsUserClaude reports whether p is userHome/.claude, the dir claude uses when
-// CLAUDE_CONFIG_DIR is unset. It is false when userHome is "".
-func (p Profile) IsUserClaude(userHome string) bool {
-	return userHome != "" && sameDir(p.Dir, filepath.Join(userHome, ".claude"))
+// IsUserClaude reports whether p is ~/.claude, the dir claude uses when
+// CLAUDE_CONFIG_DIR is unset, for the home p was configured with. It is false
+// when that home is "".
+func (p Profile) IsUserClaude() bool {
+	return p.home != "" && sameDir(p.Dir, filepath.Join(p.home, ".claude"))
 }
 
 // ConfigFile is claude's global config file for p: ~/.claude.json for
@@ -178,12 +184,12 @@ func (p Profile) IsUserClaude(userHome string) bool {
 // CLAUDE_REMOTE_PROFILES (the single default, or the zero Profile), meaning the
 // caller keeps its own rule (Manager.ClaudeConfig, else the file beside
 // Manager.ClaudeHome).
-func (p Profile) ConfigFile(userHome string) string {
+func (p Profile) ConfigFile() string {
 	if !p.explicit {
 		return ""
 	}
-	if p.IsUserClaude(userHome) {
-		return filepath.Join(userHome, ".claude.json")
+	if p.IsUserClaude() {
+		return filepath.Join(p.home, ".claude.json")
 	}
 	return filepath.Join(p.Dir, ".claude.json")
 }
@@ -194,7 +200,7 @@ func (p Profile) ConfigFile(userHome string) string {
 // profile not listed in CLAUDE_REMOTE_PROFILES it is an unchanged copy of env,
 // so claude sees the server's CLAUDE_CONFIG_DIR, or its absence, as before
 // profiles existed.
-func (p Profile) Env(env []string, userHome string) []string {
+func (p Profile) Env(env []string) []string {
 	if !p.explicit {
 		return append([]string(nil), env...)
 	}
@@ -204,7 +210,7 @@ func (p Profile) Env(env []string, userHome string) []string {
 			out = append(out, kv)
 		}
 	}
-	if !p.IsUserClaude(userHome) {
+	if !p.IsUserClaude() {
 		out = append(out, "CLAUDE_CONFIG_DIR="+p.Dir)
 	}
 	return out

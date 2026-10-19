@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"os"
 
 	"claude-remote-api/internal/profile"
 )
@@ -71,25 +70,36 @@ func (m *Manager) profileOf(id string) profile.Profile {
 			return p
 		}
 	}
-	if h := userHome(); h != "" {
-		for _, p := range list {
-			if p.IsUserClaude(h) {
-				return p
-			}
+	for _, p := range list {
+		if p.IsUserClaude() {
+			return p
 		}
 	}
 	p, _ := m.lookupProfile("")
 	return p
 }
 
-// home is the claude config dir of session id's profile.
-func (m *Manager) home(id string) string { return m.profileOf(id).Dir }
+// sessionProfile is the profile of s, a session List resolved, without
+// resolving it again.
+func (m *Manager) sessionProfile(s Session) profile.Profile {
+	if s.Profile != "" {
+		if p, err := m.lookupProfile(s.Profile); err == nil {
+			return p
+		}
+	}
+	return m.profileOf(s.ID)
+}
 
-// launchProfile is the profile to relaunch session id under when the caller
-// asked for prof: its own for "". Another profile would be a move between
-// profiles, which is refused with ErrOtherProfile.
-func (m *Manager) launchProfile(id, prof string) (profile.Profile, error) {
-	own := m.profileOf(id)
+// hasConv reports whether session id's conversation has a log in profile p.
+// It is true when p has no dir to look in.
+func (m *Manager) hasConv(p profile.Profile, id string) bool {
+	return p.Dir == "" || logIn(p.Dir, m.storedConv(p.Dir, id)) != ""
+}
+
+// launchProfile is the profile to relaunch session id, whose profile is own,
+// under when the caller asked for prof: own for "". Another profile would be a
+// move between profiles, which is refused with ErrOtherProfile.
+func (m *Manager) launchProfile(id string, own profile.Profile, prof string) (profile.Profile, error) {
 	if prof == "" || prof == own.Name {
 		return own, nil
 	}
@@ -100,8 +110,86 @@ func (m *Manager) launchProfile(id, prof string) (profile.Profile, error) {
 		ErrOtherProfile, id, own.Name, prof)
 }
 
-// userHome is the user's home dir, "" when unknown.
-func userHome() string {
-	h, _ := os.UserHomeDir()
-	return h
+// ProfileView is the part of a Manager that one profile owns: its running
+// sessions, its registrations, and kills of its own sessions only. A running
+// session belongs to the profile whose registry its claude registered in, and
+// to its resolved profile when it has no registration. See Manager.ForProfile.
+type ProfileView struct {
+	m       *Manager
+	profile string
+}
+
+// ForProfile returns the view of profile name ("" for the default). An
+// unknown name is ErrInvalidProfile.
+func (m *Manager) ForProfile(name string) (*ProfileView, error) {
+	p, err := m.lookupProfile(name)
+	if err != nil {
+		return nil, err
+	}
+	return &ProfileView{m: m, profile: p.Name}, nil
+}
+
+// Profile is the name of the profile v holds.
+func (v *ProfileView) Profile() string { return v.profile }
+
+// owner is the profile running session s belongs to; info is what liveIndex
+// found for it.
+func owner(s Session, info liveInfo) string {
+	if info.Known && info.Reg.Profile != "" {
+		return info.Reg.Profile
+	}
+	return s.Profile
+}
+
+// List is Manager.List for the sessions v's profile owns.
+func (v *ProfileView) List() ([]Session, error) {
+	all, err := v.m.List()
+	if err != nil || len(all) == 0 {
+		return nil, err
+	}
+	live := v.m.liveIndex()
+	var out []Session
+	for _, s := range all {
+		if owner(s, live(s)) == v.profile {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// Registrations is Manager.Registrations for v's profile's registry.
+func (v *ProfileView) Registrations() ([]Registration, error) {
+	all, err := v.m.Registrations()
+	var out []Registration
+	for _, r := range all {
+		if r.Profile == v.profile {
+			out = append(out, r)
+		}
+	}
+	return out, err
+}
+
+// LiveRegistrations is Manager.LiveRegistrations for the sessions v's profile
+// owns.
+func (v *ProfileView) LiveRegistrations() map[string]Registration {
+	out := map[string]Registration{}
+	for id, r := range v.m.LiveRegistrations() {
+		if r.Profile == v.profile {
+			out[id] = r
+		}
+	}
+	return out
+}
+
+// Kill is Manager.Kill for a session v's profile owns. A session another
+// profile owns is refused with ErrOtherProfile and left running.
+func (v *ProfileView) Kill(id string) (bool, error) {
+	s, ok, err := v.m.Get(id)
+	if err != nil || !ok {
+		return false, err
+	}
+	if o := owner(s, v.m.liveIndex()(s)); o != v.profile {
+		return false, fmt.Errorf("%w: %s runs in profile %q, not %q", ErrOtherProfile, id, o, v.profile)
+	}
+	return v.m.Kill(id)
 }

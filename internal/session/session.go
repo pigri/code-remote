@@ -244,18 +244,14 @@ func (m *Manager) record(s *Session, cwd string, p profile.Profile) {
 	if status == "" {
 		status = "Detached"
 	}
-	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt, p.Name)
+	// One profile records none: its name would not resolve once profiles are
+	// configured, and "" keeps a profile an earlier run recorded.
+	name := ""
+	if m.Profiles.Multi() {
+		name = p.Name
+	}
+	_ = m.Store.Record(s.ID, s.Screen, s.Title, cwd, status, s.CreatedAt, name)
 }
-
-// HasSessionLog reports whether an on-disk claude log exists for id in its
-// profile (i.e. the session can actually be resumed). Always false when the
-// profile has no dir.
-func (m *Manager) HasSessionLog(id string) bool {
-	return logIn(m.home(id), id) != ""
-}
-
-// lastActive is lastActiveIn for id in its own profile.
-func (m *Manager) lastActive(id string) string { return lastActiveIn(m.home(id), id) }
 
 // lastActiveIn returns the modification time of id's log under home — a proxy
 // for when the conversation was last active (claude appends to the log as it
@@ -285,10 +281,20 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 	if store == nil {
 		return running, nil
 	}
+	// Each stopped session's profile is resolved once, here or below.
+	resolved := map[string]profile.Profile{}
+	profileOf := func(id string) profile.Profile {
+		p, ok := resolved[id]
+		if !ok {
+			p = m.profileOf(id)
+			resolved[id] = p
+		}
+		return p
+	}
 	// A stopped session is resumable when the conversation it was last in
 	// (storedConv; the session id itself unless it drifted) still has a log.
 	resumable := func(id string) bool {
-		home := m.home(id)
+		home := profileOf(id).Dir
 		return logIn(home, m.storedConv(home, id)) != ""
 	}
 	stopped, err := store.StoppedSessions(running, resumable)
@@ -297,7 +303,7 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 	}
 	for i := range stopped {
 		id := stopped[i].ID
-		p := m.profileOf(id)
+		p := profileOf(id)
 		conv := m.storedConv(p.Dir, id)
 		stopped[i].Status = "Stopped"
 		stopped[i].Profile = p.Name
@@ -329,7 +335,7 @@ func (m *Manager) annotateLive(running []Session) {
 			s.Outdated = installed != "" && s.Version != "" && s.Version != installed
 		}
 		if info.Conv != s.ID {
-			home := m.home(s.ID)
+			home := m.sessionProfile(*s).Dir
 			if t := lastActiveIn(home, info.Conv); t != "" {
 				s.LastActive = t
 			}
@@ -454,7 +460,16 @@ func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	p, err := m.launchProfile(id, prof)
+	own := m.profileOf(id)
+	if prof != "" && !m.hasConv(own, id) {
+		// Not found comes before any check of prof, as it would without one.
+		if _, running, err := m.Get(id); err != nil {
+			return Session{}, err
+		} else if !running {
+			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
+		}
+	}
+	p, err := m.launchProfile(id, own, prof)
 	if err != nil {
 		return Session{}, err
 	}
@@ -671,7 +686,7 @@ func scrubEnv(cmd *exec.Cmd, p profile.Profile) {
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = p.Env(sessionEnv(env), userHome())
+	cmd.Env = p.Env(sessionEnv(env))
 }
 
 // List returns all running sessions owned by this manager.
@@ -744,9 +759,6 @@ func (m *Manager) Kill(id string) (bool, error) {
 	}
 	return true, nil
 }
-
-// title is titleIn for id in its own profile.
-func (m *Manager) title(id string) string { return titleIn(m.home(id), id) }
 
 // titleIn reads the current display name claude persists for a session. The
 // file is <home>/projects/<cwd>/<id>.jsonl (named by id); the latest

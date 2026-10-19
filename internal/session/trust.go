@@ -42,7 +42,7 @@ func DefaultClaudeConfig() string {
 // otherwise ClaudeConfig when set, else the one beside the profile's dir
 // (~/.claude.json).
 func (m *Manager) configPath(p profile.Profile) string {
-	if f := p.ConfigFile(userHome()); f != "" {
+	if f := p.ConfigFile(); f != "" {
 		return f
 	}
 	if m.ClaudeConfig != "" {
@@ -54,17 +54,8 @@ func (m *Manager) configPath(p profile.Profile) string {
 	return p.Dir + ".json"
 }
 
-// defaultConfigPath is configPath for the default profile.
-func (m *Manager) defaultConfigPath() string {
-	p, _ := m.lookupProfile("")
-	return m.configPath(p)
-}
-
-// DirTrusted reports whether the default profile's claude has dir recorded as
-// a trusted folder. It is false when that can't be determined.
-func (m *Manager) DirTrusted(dir string) bool { return dirTrusted(m.defaultConfigPath(), dir) }
-
-// dirTrusted is DirTrusted for the config file at path.
+// dirTrusted reports whether the claude config file at path has dir recorded
+// as a trusted folder. It is false when that can't be determined.
 func dirTrusted(path, dir string) bool {
 	if path == "" {
 		return false
@@ -81,13 +72,9 @@ func dirTrusted(path, dir string) bool {
 	return json.Unmarshal(data, &cfg) == nil && cfg.Projects[dir].Trusted
 }
 
-// TrustDir records dir as a trusted folder in the default profile's claude
-// config, leaving every other setting as it is. It is the same answer as
-// accepting the prompt, so callers only do it for a directory the operator
-// asked for.
-func (m *Manager) TrustDir(dir string) error { return trustDir(m.defaultConfigPath(), dir) }
-
-// trustDir is TrustDir for the config file at path.
+// trustDir records dir as a trusted folder in the claude config file at path,
+// leaving every other setting as it is. It is the same answer as accepting the
+// prompt, so callers only do it for a directory the operator asked for.
 func trustDir(path, dir string) error {
 	if path == "" {
 		return fmt.Errorf("trust %s: claude config location unknown", dir)

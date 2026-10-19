@@ -302,6 +302,7 @@ type fakeStore struct {
 	recorded []string          // uuids passed to Record
 	profiles []string          // profile passed to each Record
 	stored   map[string]string // uuid -> profile, served by Profile
+	lookups  map[string]int    // uuid -> calls to Profile
 	lastCwd  string
 	stopped  []Session
 	convs    map[string]string // uuid -> conversation id
@@ -333,7 +334,13 @@ func (f *fakeStore) Record(uuid, _, _, cwd, _, _, profile string) error {
 	return nil
 }
 
-func (f *fakeStore) Profile(uuid string) (string, error) { return f.stored[uuid], nil }
+func (f *fakeStore) Profile(uuid string) (string, error) {
+	if f.lookups == nil {
+		f.lookups = map[string]int{}
+	}
+	f.lookups[uuid]++
+	return f.stored[uuid], nil
+}
 
 func (f *fakeStore) StoppedSessions(running []Session, keep func(string) bool) ([]Session, error) {
 	var out []Session
@@ -372,7 +379,7 @@ func TestListAll(t *testing.T) {
 	fs := &fakeScreen{created: []string{"test-rc-" + runningID}}
 	withFakeScreen(t, fs)
 
-	// Session log on disk for the stopped id, so HasSessionLog keeps it.
+	// Session log on disk for the stopped id, so it stays resumable.
 	home := t.TempDir()
 	proj := filepath.Join(home, "projects", "repo")
 	if err := os.MkdirAll(proj, 0o755); err != nil {
@@ -450,7 +457,7 @@ func TestListPopulatesLastActive(t *testing.T) {
 	}
 
 	// No ClaudeHome -> no log lookup -> empty LastActive (not a crash).
-	if la := (&Manager{Prefix: "test-rc", ScreenBin: "screen"}).lastActive(id); la != "" {
+	if la := lastActiveIn("", id); la != "" {
 		t.Errorf("lastActive(no home) = %q, want empty", la)
 	}
 }
@@ -467,14 +474,13 @@ func TestTitleReadsFromDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := &Manager{Prefix: "test-rc", ClaudeHome: home}
-	if got := m.title(id); got != "my title" {
+	if got := titleIn(home, id); got != "my title" {
 		t.Errorf("title = %q, want %q", got, "my title")
 	}
-	if got := m.title("a9c1cf1e-ce20-4833-9eeb-7acf5c327506"); got != "" {
+	if got := titleIn(home, "a9c1cf1e-ce20-4833-9eeb-7acf5c327506"); got != "" {
 		t.Errorf("title(no file) = %q, want empty", got)
 	}
-	if got := (&Manager{}).title(id); got != "" { // ClaudeHome empty -> ""
+	if got := titleIn("", id); got != "" { // no home -> ""
 		t.Errorf("title(no home) = %q, want empty", got)
 	}
 }

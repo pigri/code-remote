@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"claude-remote-api/internal/cloud"
 	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 	"claude-remote-api/internal/store"
@@ -259,33 +261,6 @@ func TestSyncHandleWaitPrefersDone(t *testing.T) {
 	}
 }
 
-// scopeStub is a manager holding sessions and registrations of two profiles.
-type scopeStub struct{ killed []string }
-
-func (s *scopeStub) List() ([]session.Session, error) {
-	return []session.Session{{ID: "w", Profile: "work"}, {ID: "p", Profile: "private"}}, nil
-}
-func (s *scopeStub) Kill(id string) (bool, error) { s.killed = append(s.killed, id); return true, nil }
-func (s *scopeStub) Registrations() ([]session.Registration, error) {
-	return []session.Registration{{SessionID: "w", Profile: "work"}, {SessionID: "p", Profile: "private"}}, nil
-}
-func (s *scopeStub) LiveRegistrations() map[string]session.Registration {
-	return map[string]session.Registration{"w": {SessionID: "w", Profile: "work"}, "p": {SessionID: "p", Profile: "private"}}
-}
-
-func TestProfileScopeHoldsOneProfile(t *testing.T) {
-	v := profileScope{mgr: &scopeStub{}, profile: "private"}
-	if l, _ := v.List(); len(l) != 1 || l[0].ID != "p" {
-		t.Errorf("List = %+v, want only the private session", l)
-	}
-	if r, _ := v.Registrations(); len(r) != 1 || r[0].SessionID != "p" {
-		t.Errorf("Registrations = %+v, want only the private one", r)
-	}
-	if r := v.LiveRegistrations(); len(r) != 1 || r["p"].SessionID != "p" {
-		t.Errorf("LiveRegistrations = %+v, want only the private one", r)
-	}
-}
-
 func TestSyncTarget(t *testing.T) {
 	t.Run("single profile: the manager and its home", func(t *testing.T) {
 		mgr := &session.Manager{ClaudeHome: "/h/.claude"}
@@ -306,8 +281,103 @@ func TestSyncTarget(t *testing.T) {
 		if want := filepath.Join(user, ".claude-private"); home != want {
 			t.Errorf("home = %q, want the default profile's %q", home, want)
 		}
-		if s, ok := view.(profileScope); !ok || s.profile != "private" {
-			t.Errorf("view = %#v, want a profileScope for private", view)
+		if v, ok := view.(*session.ProfileView); !ok || v.Profile() != "private" {
+			t.Errorf("view = %#v, want the view of private", view)
 		}
 	})
+}
+
+// notFoundCloud is an account whose cloud knows no session.
+type notFoundCloud struct{}
+
+func (notFoundCloud) List(context.Context) ([]cloud.Session, error) { return nil, nil }
+func (notFoundCloud) Get(context.Context, string) (cloud.Session, bool, error) {
+	return cloud.Session{}, false, nil
+}
+
+// A session whose claude registered in another profile's registry stays out
+// of the sync's view, even when its own profile resolves to the default: its
+// last bridge belongs to the other account, where the default's cloud would
+// read it as deleted.
+func TestReconcilerLeavesAnotherProfilesSession(t *testing.T) {
+	const x, w = "6fd0b321-a454-4b40-9aed-131afe120d36", "a9c1cf1e-ce20-4833-9eeb-7acf5c327506"
+	user := t.TempDir()
+	t.Setenv("HOME", user)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+	set, err := profile.FromEnv("", user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both registries have reset their bridge, so the store's last one is all
+	// the reconciler has.
+	for id, dir := range map[string]string{x: ".claude-private", w: ".claude"} {
+		sdir := filepath.Join(user, dir, "sessions")
+		if err := os.MkdirAll(sdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		reg := `{"sessionId":"` + id + `","bridgeSessionId":null}`
+		if err := os.WriteFile(filepath.Join(sdir, id+".json"), []byte(reg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "mirror.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for id, bridge := range map[string]string{x: "session_private", w: "session_work"} {
+		// x's row says work, yet its claude runs in private.
+		if err := db.Record(id, "crtest-"+id, "", "", "Detached", "", "work"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.UpsertSession(cloud.SessionRecord{UUID: id, Screen: "crtest-" + id, BridgeSessionID: bridge}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A screen with both sessions running, which logs each quit.
+	dir := t.TempDir()
+	killed := filepath.Join(dir, "killed")
+	screen := filepath.Join(dir, "screen")
+	script := "#!/bin/sh\ncase \"$1\" in\n" +
+		"-ls) printf 'There are screens on:\\n\\t99999998.crtest-" + x + "\\t(Detached)\\n\\t99999999.crtest-" + w + "\\t(Detached)\\n' ;;\n" +
+		"-S) echo \"$2\" >> '" + killed + "' ;;\n" +
+		"esac\nexit 0\n"
+	if err := os.WriteFile(screen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &session.Manager{Prefix: "crtest", ScreenBin: screen, ClaudeHome: filepath.Join(user, ".claude"),
+		Profiles: set, Store: db}
+
+	_, view := syncTarget(mgr)
+	rec := &cloud.Reconciler{Cloud: notFoundCloud{}, Manager: view, Store: db, Grace: 0, Log: discardLogger()}
+	rec.ReconcileOnce(context.Background())
+
+	got, _ := os.ReadFile(killed)
+	if want := "crtest-" + w + "\n"; string(got) != want {
+		t.Errorf("killed = %q, want only %q, the work session gone from the work cloud", got, want)
+	}
+}
+
+func TestRunRefusesCredentialsWithProfiles(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_TOKEN", "tok")
+	t.Setenv("SCREEN_BIN", os.Args[0])
+	t.Setenv("CLAUDE_BIN", os.Args[0])
+	t.Setenv("CLAUDE_REMOTE_API_ADDR", "127.0.0.1:0")
+	t.Setenv("CLAUDE_REMOTE_SESSION_SYNC", "off")
+	t.Setenv("CLAUDE_REMOTE_DB", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=/w,private=/p")
+	t.Setenv("CLAUDE_REMOTE_CREDENTIALS", "/creds.json")
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	// Pre-cancelled: a run that ignored the setting would serve and exit 0.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := run(ctx); code != 1 {
+		t.Errorf("run = %d, want 1", code)
+	}
+	if !strings.Contains(buf.String(), "CLAUDE_REMOTE_CREDENTIALS") || !strings.Contains(buf.String(), "CLAUDE_REMOTE_PROFILES") {
+		t.Errorf("log = %q, want it to name CLAUDE_REMOTE_CREDENTIALS and CLAUDE_REMOTE_PROFILES", buf.String())
+	}
 }

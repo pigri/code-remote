@@ -128,7 +128,7 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 	for _, s := range running {
 		info := live(s)
 		reg, known := info.Reg, info.Known
-		p := m.profileOf(s.ID)
+		p := m.sessionProfile(s)
 		o := RestartOutcome{ID: s.ID, Title: convTitle(p.Dir, s.ID, info.Conv)}
 		switch {
 		case known && res.After != "" && reg.Version == res.After:
@@ -182,16 +182,26 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	p, err := m.launchProfile(id, prof)
-	if err != nil {
-		return Session{}, err
-	}
 	s, running, err := m.Get(id)
 	if err != nil {
 		return Session{}, err
 	}
+	var own profile.Profile
+	if running {
+		own = m.sessionProfile(s)
+	} else {
+		own = m.profileOf(id)
+		// Not found comes before any check of prof, as it would without one.
+		if prof != "" && !m.hasConv(own, id) {
+			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)
+		}
+	}
+	p, err := m.launchProfile(id, own, prof)
+	if err != nil {
+		return Session{}, err
+	}
 	if !running {
-		return m.ResumeIn(id, dir, prof)
+		return m.resume(id, m.storedConv(p.Dir, id), dir, p)
 	}
 	return m.restart(s, m.liveIndex()(s), dir, p)
 }
@@ -288,7 +298,7 @@ func (m *Manager) liveIndex() func(Session) liveInfo {
 	}
 
 	return func(s Session) liveInfo {
-		home := m.home(s.ID)
+		home := m.sessionProfile(s).Dir
 		usable := func(conv string) bool {
 			return m.ValidID(conv) && (home == "" || logIn(home, conv) != "")
 		}

@@ -11,7 +11,13 @@ import (
 const home = "/home/u"
 
 // pr is a profile as Parse makes it, from CLAUDE_REMOTE_PROFILES.
-func pr(name, dir string) Profile { return Profile{Name: name, Dir: dir, explicit: true} }
+// pr is a listed profile configured with home as the user's home dir.
+func pr(name, dir string) Profile { return prh(name, dir, home) }
+
+// prh is a listed profile configured with h as the user's home dir.
+func prh(name, dir, h string) Profile {
+	return Profile{Name: name, Dir: dir, explicit: true, home: h}
+}
 
 func TestParse(t *testing.T) {
 	tests := []struct {
@@ -150,10 +156,10 @@ func TestZeroSet(t *testing.T) {
 	}
 	// A Manager built without Profiles MUST keep today's env and trust rule.
 	env := []string{"PATH=/bin", "CLAUDE_CONFIG_DIR=/c"}
-	if got := s.Default().Env(env, home); !reflect.DeepEqual(got, env) {
+	if got := s.Default().Env(env); !reflect.DeepEqual(got, env) {
 		t.Errorf("zero Set Default().Env = %v, want %v unchanged", got, env)
 	}
-	if got := s.Default().ConfigFile(home); got != "" {
+	if got := s.Default().ConfigFile(); got != "" {
 		t.Errorf("zero Set Default().ConfigFile = %q, want \"\"", got)
 	}
 }
@@ -174,7 +180,7 @@ func TestConfigFile(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := pr("x", tt.dir).ConfigFile(tt.home); got != tt.want {
+			if got := prh("x", tt.dir, tt.home).ConfigFile(); got != tt.want {
 				t.Errorf("ConfigFile(%q) = %q, want %q", tt.dir, got, tt.want)
 			}
 		})
@@ -200,7 +206,7 @@ func TestEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := append([]string(nil), tt.env...)
-			got := pr("x", tt.dir).Env(tt.env, home)
+			got := pr("x", tt.dir).Env(tt.env)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Env() = %v, want %v", got, tt.want)
 			}
@@ -239,17 +245,17 @@ func TestUserClaudeThroughSymlink(t *testing.T) {
 		{"dir is under a symlink", link + "/.claude", real},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := pr("x", tc.dir)
-			if got, want := p.ConfigFile(tc.home), filepath.Join(tc.home, ".claude.json"); got != want {
+			p := prh("x", tc.dir, tc.home)
+			if got, want := p.ConfigFile(), filepath.Join(tc.home, ".claude.json"); got != want {
 				t.Errorf("ConfigFile = %q, want %q", got, want)
 			}
-			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}, tc.home); len(got) != 0 {
+			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}); len(got) != 0 {
 				t.Errorf("Env = %v, want CLAUDE_CONFIG_DIR removed and not set", got)
 			}
 		})
 	}
 	t.Run("missing dirs are not aliases", func(t *testing.T) {
-		if got := pr("x", "/no/such/.claude").ConfigFile("/no/such-home"); got != "/no/such/.claude/.claude.json" {
+		if got := prh("x", "/no/such/.claude", "/no/such-home").ConfigFile(); got != "/no/such/.claude/.claude.json" {
 			t.Errorf("ConfigFile = %q", got)
 		}
 	})
@@ -289,7 +295,7 @@ func TestSingleDefaultInherits(t *testing.T) {
 			}
 			p := s.Default()
 			in := append([]string(nil), tt.env...)
-			got := p.Env(tt.env, home)
+			got := p.Env(tt.env)
 			if !reflect.DeepEqual(got, in) {
 				t.Errorf("Env = %v, want the input unchanged %v", got, in)
 			}
@@ -299,7 +305,7 @@ func TestSingleDefaultInherits(t *testing.T) {
 					t.Error("Env returned its input, not a copy")
 				}
 			}
-			if cf := p.ConfigFile(home); cf != "" {
+			if cf := p.ConfigFile(); cf != "" {
 				t.Errorf("ConfigFile = %q, want \"\" (use the Manager's rule)", cf)
 			}
 		})
@@ -312,10 +318,10 @@ func TestListedProfilesDoNotInherit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Default().ConfigFile(home); got != "/w/.claude.json" {
+	if got := s.Default().ConfigFile(); got != "/w/.claude.json" {
 		t.Errorf("ConfigFile = %q, want /w/.claude.json", got)
 	}
-	if got := s.Default().Env(nil, home); !reflect.DeepEqual(got, []string{"CLAUDE_CONFIG_DIR=/w"}) {
+	if got := s.Default().Env(nil); !reflect.DeepEqual(got, []string{"CLAUDE_CONFIG_DIR=/w"}) {
 		t.Errorf("Env = %v", got)
 	}
 }
@@ -329,17 +335,17 @@ func TestUserClaudeNotYetCreated(t *testing.T) {
 		{"dir is under a symlink", link + "/.claude", real},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := pr("x", tc.dir)
-			if got, want := p.ConfigFile(tc.home), filepath.Join(tc.home, ".claude.json"); got != want {
+			p := prh("x", tc.dir, tc.home)
+			if got, want := p.ConfigFile(), filepath.Join(tc.home, ".claude.json"); got != want {
 				t.Errorf("ConfigFile = %q, want %q", got, want)
 			}
-			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}, tc.home); len(got) != 0 {
+			if got := p.Env([]string{"CLAUDE_CONFIG_DIR=/old"}); len(got) != 0 {
 				t.Errorf("Env = %v, want CLAUDE_CONFIG_DIR removed and not set", got)
 			}
 		})
 	}
 	t.Run("other missing dir under the same home", func(t *testing.T) {
-		if got, want := pr("x", real+"/.claude-dev").ConfigFile(link), real+"/.claude-dev/.claude.json"; got != want {
+		if got, want := prh("x", real+"/.claude-dev", link).ConfigFile(), real+"/.claude-dev/.claude.json"; got != want {
 			t.Errorf("ConfigFile = %q, want %q", got, want)
 		}
 	})
@@ -369,11 +375,31 @@ func TestIsUserClaude(t *testing.T) {
 		{pr("work", home+"/.claude"), home, true},
 		{pr("work", home+"/.claude/"), home, true},
 		{pr("private", home+"/.claude-private"), home, false},
-		{pr("work", home+"/.claude"), "", false},
-		{Profile{Name: "default", Dir: home + "/.claude"}, home, true},
+		{prh("work", home+"/.claude", ""), "", false},
+		{Profile{Name: "default", Dir: home + "/.claude", home: home}, home, true},
 	} {
-		if got := tc.p.IsUserClaude(tc.home); got != tc.want {
-			t.Errorf("%+v.IsUserClaude(%q) = %v, want %v", tc.p, tc.home, got, tc.want)
+		if got := tc.p.IsUserClaude(); got != tc.want {
+			t.Errorf("%+v.IsUserClaude() = %v, want %v", tc.p, got, tc.want)
 		}
+	}
+}
+
+// A profile keeps the home it was parsed with: changing $HOME before launch
+// moves neither its env nor its config file.
+func TestProfileKeepsItsParseTimeHome(t *testing.T) {
+	list, err := Parse("work=/h/.claude,private=/h/.claude-private", "/h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	work, private := list[0], list[1]
+	if got := work.Env([]string{"CLAUDE_CONFIG_DIR=/old"}); len(got) != 0 {
+		t.Errorf("work Env = %v, want CLAUDE_CONFIG_DIR removed", got)
+	}
+	if got := work.ConfigFile(); got != "/h/.claude.json" {
+		t.Errorf("work ConfigFile = %q, want /h/.claude.json", got)
+	}
+	if got := private.Env(nil); !reflect.DeepEqual(got, []string{"CLAUDE_CONFIG_DIR=/h/.claude-private"}) {
+		t.Errorf("private Env = %v", got)
 	}
 }

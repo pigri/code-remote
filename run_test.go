@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"claude-remote-api/internal/profile"
 	"claude-remote-api/internal/session"
 )
 
@@ -440,5 +441,38 @@ func TestHandlersProfileErrors(t *testing.T) {
 		if rr.Code != tc.want || !strings.Contains(rr.Body.String(), "profile") {
 			t.Errorf("POST %s with %v = %d %s, want %d naming the profile", tc.path, tc.mgr, rr.Code, rr.Body, tc.want)
 		}
+	}
+}
+
+// Resuming or restarting a session that does not exist is 404, whichever
+// profile the request names, and launches nothing.
+func TestHandlersUnknownSessionWithProfile(t *testing.T) {
+	user := t.TempDir()
+	t.Setenv("HOME", user)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "work=~/.claude,private=~/.claude-private")
+	set, err := profile.FromEnv("", user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	launched := filepath.Join(dir, "launched")
+	screen := filepath.Join(dir, "screen")
+	script := "#!/bin/sh\nif [ \"$1\" = -dmS ]; then echo \"$2\" >> '" + launched + "'; fi\nexit 0\n"
+	if err := os.WriteFile(screen, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &session.Manager{Prefix: "crtest", ScreenBin: screen, ClaudeBin: "claude",
+		ClaudeHome: filepath.Join(user, ".claude"), Profiles: set}
+	for _, action := range []string{"resume", "restart"} {
+		for _, prof := range []string{"work", "private", "nope"} {
+			path := "/sessions/" + stubID + "/" + action
+			rr := send(t, stubHandler(mgr), http.MethodPost, path, `{"profile":"`+prof+`"}`)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("POST %s with profile %s = %d %s, want 404", path, prof, rr.Code, rr.Body)
+			}
+		}
+	}
+	if _, err := os.Stat(launched); !os.IsNotExist(err) {
+		t.Errorf("a launch was attempted: stat err = %v", err)
 	}
 }

@@ -90,8 +90,8 @@ func TestListReadsEachSessionFromItsProfile(t *testing.T) {
 		if s.Profile != want.profile || s.Title != want.title || s.LastActive == "" {
 			t.Errorf("%s = %+v, want profile %q, title %q and a last-active time", id, s, want.profile, want.title)
 		}
-		if !m.HasSessionLog(id) {
-			t.Errorf("HasSessionLog(%s) = false, want its profile's log found", id)
+		if logIn(m.profileOf(id).Dir, id) == "" {
+			t.Errorf("no log for %s in its profile", id)
 		}
 	}
 }
@@ -276,6 +276,8 @@ func TestRecordWritesTheResolvedProfile(t *testing.T) {
 		}
 	})
 
+	// Single-profile mode records no profile: "default" is not a name the
+	// row could be resolved by once profiles are configured.
 	t.Run("single profile", func(t *testing.T) {
 		fs, fst := &fakeScreen{}, &fakeStore{}
 		withFakeScreen(t, fs)
@@ -283,8 +285,24 @@ func TestRecordWritesTheResolvedProfile(t *testing.T) {
 		if _, err := m.Create("", ""); err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(fst.profiles, []string{"default"}) {
-			t.Errorf("recorded profiles = %q, want [default]", fst.profiles)
+		if !slices.Equal(fst.profiles, []string{""}) {
+			t.Errorf("recorded profiles = %q, want [\"\"]", fst.profiles)
+		}
+	})
+
+	t.Run("single profile keeps a stored profile across a restart", func(t *testing.T) {
+		fastStop(t)
+		home := t.TempDir()
+		upgradeHome(t, home, idA, "", "")
+		fs, fst := &fakeScreen{created: []string{"test-rc-" + idA}}, &fakeStore{stored: map[string]string{idA: "private"}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+		if _, err := m.RestartIn(idA, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if len(fs.launches) != 1 || !slices.Equal(fst.profiles, []string{""}) || fst.stored[idA] != "private" {
+			t.Errorf("launches %d, recorded %q, stored %q; want one launch recording no profile, private kept",
+				len(fs.launches), fst.profiles, fst.stored[idA])
 		}
 	})
 }
@@ -390,5 +408,162 @@ func TestSessionJSONCarriesProfile(t *testing.T) {
 	}
 	if data, _ := json.Marshal(Session{ID: idA}); strings.Contains(string(data), "profile") {
 		t.Errorf("JSON = %s, want no profile field when there is none", data)
+	}
+}
+
+// A listing resolves each session's profile once, and a restart resolves it
+// once before it launches.
+func TestOneResolutionPerSession(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.private, idA, "a")
+	writeTitledLog(t, h.private, idB, "b")
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{stored: map[string]string{idA: "private", idB: "private"}, stopped: []Session{{ID: idB}}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	if _, err := m.ListAll(fst); err != nil {
+		t.Fatal(err)
+	}
+	if fst.lookups[idA] != 1 || fst.lookups[idB] != 1 {
+		t.Errorf("ListAll lookups = %v, want one per session", fst.lookups)
+	}
+
+	fst.lookups = nil
+	fs.failCreate = true // stop at the launch: count what comes before it
+	if _, err := m.RestartIn(idB, "", ""); err == nil {
+		t.Fatal("RestartIn with a failing screen = nil error")
+	}
+	if fst.lookups[idB] != 1 {
+		t.Errorf("RestartIn(stopped) lookups = %d, want 1", fst.lookups[idB])
+	}
+}
+
+// A session that does not exist is not found, whatever profile is asked for.
+func TestUnknownSessionWithProfileIsNotFound(t *testing.T) {
+	fastStop(t)
+	set, _ := twoProfiles(t, "")
+	fs := &fakeScreen{}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set}
+	for _, prof := range []string{"work", "private", "nope"} {
+		if _, err := m.ResumeIn(idA, "", prof); !errors.Is(err, ErrNotResumable) {
+			t.Errorf("ResumeIn(unknown, %q) err = %v, want ErrNotResumable", prof, err)
+		}
+		if _, err := m.RestartIn(idA, "", prof); !errors.Is(err, ErrNotResumable) {
+			t.Errorf("RestartIn(unknown, %q) err = %v, want ErrNotResumable", prof, err)
+		}
+	}
+	if len(fs.launches) != 0 || len(fs.killed) != 0 {
+		t.Errorf("launches %v, kills %v; want none", fs.launches, fs.killed)
+	}
+}
+
+// Profiles keep the home they were configured with: a later change of $HOME
+// moves neither the launch env nor the ~/.claude match.
+func TestProfilesKeepTheirParseTimeHome(t *testing.T) {
+	set, _ := twoProfiles(t, "private")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "/parent/config")
+	fs := &fakeScreen{parentEnv: true}
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set}
+
+	if _, err := m.Create("", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := envValue(fs.cmds[0].Env, "CLAUDE_CONFIG_DIR"); ok {
+		t.Errorf("work child has CLAUDE_CONFIG_DIR=%q, want it removed", v)
+	}
+	if got := m.profileOf(idB).Name; got != "work" {
+		t.Errorf("profile of an unknown session = %q, want work, the ~/.claude profile", got)
+	}
+}
+
+// A profile's view holds the sessions whose claude runs in that profile: the
+// profile of its live registration when it has one, else its resolved one.
+func TestForProfileHoldsOneProfile(t *testing.T) {
+	const idC = "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e"
+	set, h := twoProfiles(t, "")
+	upgradeHome(t, h.private, idA, "1.0.0", "idle") // resolves to work, registered in private
+	upgradeHome(t, h.work, idB, "1.0.0", "idle")
+	writeTitledLog(t, h.private, idC, "c") // private, not registered
+	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB, "test-rc-" + idC}}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{stored: map[string]string{idA: "work", idB: "work", idC: "private"}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	ids := func(l []Session) []string {
+		var out []string
+		for _, s := range l {
+			out = append(out, s.ID)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name       string
+		list, regs []string
+		live       []string
+	}{
+		{"work", []string{idB}, []string{idB}, []string{idB}},
+		{"private", []string{idA, idC}, []string{idA}, []string{idA}},
+	} {
+		v, err := m.ForProfile(tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l, _ := v.List(); !slices.Equal(ids(l), tc.list) {
+			t.Errorf("%s List = %v, want %v", tc.name, ids(l), tc.list)
+		}
+		regs, _ := v.Registrations()
+		var got []string
+		for _, r := range regs {
+			got = append(got, r.SessionID)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, tc.regs) {
+			t.Errorf("%s Registrations = %v, want %v", tc.name, got, tc.regs)
+		}
+		got = got[:0]
+		for id := range v.LiveRegistrations() {
+			got = append(got, id)
+		}
+		if !slices.Equal(got, tc.live) {
+			t.Errorf("%s LiveRegistrations = %v, want %v", tc.name, got, tc.live)
+		}
+	}
+	if _, err := m.ForProfile("nope"); !errors.Is(err, ErrInvalidProfile) {
+		t.Errorf("ForProfile(nope) err = %v, want ErrInvalidProfile", err)
+	}
+}
+
+// A profile's view kills only its own sessions.
+func TestForProfileKillRefusesAnotherProfile(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	upgradeHome(t, h.private, idA, "1.0.0", "idle")
+	upgradeHome(t, h.work, idB, "1.0.0", "idle")
+	fs := &fakeScreen{created: []string{"test-rc-" + idA, "test-rc-" + idB}}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{stored: map[string]string{idA: "work", idB: "work"}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+	v, err := m.ForProfile("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, err := v.Kill(idA); ok || !errors.Is(err, ErrOtherProfile) {
+		t.Errorf("work Kill(private session) = %v, %v; want false, ErrOtherProfile", ok, err)
+	}
+	if len(fs.killed) != 0 {
+		t.Fatalf("killed %v after a refused kill", fs.killed)
+	}
+	if ok, err := v.Kill("9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"); ok || err != nil {
+		t.Errorf("work Kill(unknown) = %v, %v; want false, nil", ok, err)
+	}
+	if ok, err := v.Kill(idB); !ok || err != nil {
+		t.Errorf("work Kill(work session) = %v, %v; want true, nil", ok, err)
+	}
+	if !slices.Equal(fs.killed, []string{"test-rc-" + idB}) {
+		t.Errorf("killed = %v, want only the work session", fs.killed)
 	}
 }

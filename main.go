@@ -69,6 +69,12 @@ func run(parent context.Context) int {
 		log.Print(err)
 		return 1
 	}
+	// One credentials file would sign every profile's sync into one account.
+	if profiles.Multi() && os.Getenv("CLAUDE_REMOTE_CREDENTIALS") != "" {
+		log.Print("CLAUDE_REMOTE_CREDENTIALS cannot be used with CLAUDE_REMOTE_PROFILES: " +
+			"the session sync uses the default profile's own credentials")
+		return 1
+	}
 
 	logger := auditLogger()
 
@@ -312,47 +318,8 @@ func syncTarget(mgr *session.Manager) (home string, view reconcileManager) {
 		return mgr.ClaudeHome, mgr
 	}
 	def := mgr.Profiles.Default()
-	return def.Dir, profileScope{mgr: mgr, profile: def.Name}
-}
-
-// profileScope is the part of a manager's sessions that run under one profile.
-type profileScope struct {
-	mgr     reconcileManager
-	profile string
-}
-
-func (p profileScope) List() ([]session.Session, error) {
-	all, err := p.mgr.List()
-	var out []session.Session
-	for _, s := range all {
-		if s.Profile == p.profile {
-			out = append(out, s)
-		}
-	}
-	return out, err
-}
-
-func (p profileScope) Kill(id string) (bool, error) { return p.mgr.Kill(id) }
-
-func (p profileScope) Registrations() ([]session.Registration, error) {
-	all, err := p.mgr.Registrations()
-	var out []session.Registration
-	for _, r := range all {
-		if r.Profile == p.profile {
-			out = append(out, r)
-		}
-	}
-	return out, err
-}
-
-func (p profileScope) LiveRegistrations() map[string]session.Registration {
-	out := map[string]session.Registration{}
-	for id, r := range p.mgr.LiveRegistrations() {
-		if r.Profile == p.profile {
-			out[id] = r
-		}
-	}
-	return out
+	v, _ := mgr.ForProfile(def.Name)
+	return def.Dir, v
 }
 
 // defaultDBPath is $XDG_DATA_HOME/code-remote (or ~/.local/share/code-remote)
