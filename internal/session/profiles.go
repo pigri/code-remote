@@ -22,10 +22,10 @@ type profileSetter interface {
 type resolvedBy uint8
 
 const (
-	byGuess      resolvedBy = iota // the ~/.claude rule or the default
+	byUnknown    resolvedBy = iota // not resolved by parseSessions
+	byGuess                        // the ~/.claude rule or the default
 	byTranscript                   // the profile holding its transcript
 	byStore                        // the profile the Store recorded, or the only one
-	byRegistry                     // the registry its claude registered in
 )
 
 // profiles lists the profiles sessions can run under. Without
@@ -102,14 +102,27 @@ func (m *Manager) resolveProfile(id string) (profile.Profile, resolvedBy) {
 }
 
 // noteProfile best-effort records in the Store the profile running session s
-// registered in, as found by liveIndex (info), unless the Store already holds
-// it. Once s stops, its profile resolves from the Store, so it resumes there.
+// registered in, as found by liveIndex (info), when the Store holds none it
+// resolves by. Once s stops, its profile resolves from the Store, so it
+// resumes there. A recorded profile is never overwritten: an entry in another
+// profile may be a stale one whose pid the session's claude reused.
 func (m *Manager) noteProfile(s Session, info liveInfo) {
 	ps, ok := m.Store.(profileSetter)
-	if !ok || !m.Profiles.Multi() || !info.Known || info.Reg.Profile != s.Profile || s.by == byStore {
+	if !ok || !m.Profiles.Multi() || !info.Known || info.Reg.Profile != s.Profile ||
+		(s.by != byGuess && s.by != byTranscript) {
 		return
 	}
-	_ = ps.SetProfile(s.ID, s.Profile)
+	m.convMu.Lock()
+	defer m.convMu.Unlock()
+	if m.profSeen[s.ID] == s.Profile {
+		return
+	}
+	if ps.SetProfile(s.ID, s.Profile) == nil {
+		if m.profSeen == nil {
+			m.profSeen = map[string]string{}
+		}
+		m.profSeen[s.ID] = s.Profile
+	}
 }
 
 // sessionProfile is the profile of s, a session List resolved, without

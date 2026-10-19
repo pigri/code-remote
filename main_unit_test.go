@@ -422,7 +422,7 @@ func TestReconcilerIgnoresAStaleEntryWithAReusedPID(t *testing.T) {
 	// work is listed last, so a merge that lets the later profile win picks
 	// the stale entry.
 	h := newProfileHost(t, "private=~/.claude-private,work=~/.claude", "work", map[string]int{sessX: 4242})
-	fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+	fakePS(t, "  7777  4242 3600 claude --resume "+sessX+"\\n")
 	h.register(t, ".claude-private", sessX, sessX, 7777, "")
 	h.register(t, ".claude", sessZ, sessZ, 7777, "session_stale")
 	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", "private"); err != nil {
@@ -439,7 +439,7 @@ func TestReconcilerIgnoresAStaleEntryWithAReusedPID(t *testing.T) {
 // the two apart, so neither is its registration and nothing is quit.
 func TestReconcilerIgnoresAStaleEntryInAGuessedProfile(t *testing.T) {
 	h := newProfileHost(t, "private=~/.claude-private,work=~/.claude", "work", map[string]int{sessX: 4242})
-	fakePS(t, "  7777  4242 claude --resume "+sessX+"\\n")
+	fakePS(t, "  7777  4242 3600 claude --resume "+sessX+"\\n")
 	h.register(t, ".claude-private", sessX, sessX, 7777, "")
 	h.register(t, ".claude", sessZ, sessZ, 7777, "session_stale")
 	if err := h.db.Record(sessX, "crtest-"+sessX, "", "", "Detached", "", ""); err != nil {

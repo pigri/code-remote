@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -203,6 +204,7 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 // restart is RestartIn for a session known to be running in profile p; info is
 // what liveIndex found for it.
 func (m *Manager) restart(s Session, info liveInfo, dir string, p profile.Profile) (Session, error) {
+	info = m.reread(s, info)
 	id, conv := s.ID, info.Conv
 	if dir != "" {
 		if _, err := m.resolveDir(dir); err != nil {
@@ -244,6 +246,7 @@ type liveInfo struct {
 	Reg   Registration // its entry in claude's process registry
 	Known bool         // false when it has no registry entry (Reg is zero)
 	Conv  string       // the conversation it is in; never empty
+	args  string       // its command line, when its process was found
 }
 
 // resumeArgRe pulls the conversation id out of a claude command line as we
@@ -266,32 +269,52 @@ func (m *Manager) liveIndex(c *regCache) func(Session) liveInfo {
 	ix := c.index()
 	return func(s Session) liveInfo {
 		prof := m.sessionProfile(s)
-		home := prof.Dir
-		usable := func(conv string) bool {
-			return m.ValidID(conv) && (home == "" || logIn(home, conv) != "")
-		}
-		info := liveInfo{Conv: s.ID}
+		var info liveInfo
 		var p proc
 		var hasProc bool
 		info.Reg, info.Known, p, hasProc = ix.lookup(s, prof.Name)
-
-		candidates := []string{info.Reg.SessionID}
-		if c := m.storedConv(home, s.ID); c != s.ID { // s.ID means "nothing recorded"
-			candidates = append(candidates, c)
-		}
 		if hasProc {
-			if a := resumeArgRe.FindStringSubmatch(p.args); a != nil {
-				candidates = append(candidates, a[1])
-			}
+			info.args = p.args
 		}
-		for _, c := range candidates {
-			if c != "" && usable(c) {
-				info.Conv = c
-				break
-			}
-		}
+		info.Conv = m.liveConv(s, prof.Dir, info)
 		return info
 	}
+}
+
+// liveConv is the conversation running session s, logged under home, is in,
+// given what liveIndex found (info): see liveIndex.
+func (m *Manager) liveConv(s Session, home string, info liveInfo) string {
+	usable := func(conv string) bool {
+		return m.ValidID(conv) && (home == "" || logIn(home, conv) != "")
+	}
+	candidates := []string{info.Reg.SessionID}
+	if c := m.storedConv(home, s.ID); c != s.ID { // s.ID means "nothing recorded"
+		candidates = append(candidates, c)
+	}
+	if a := resumeArgRe.FindStringSubmatch(info.args); a != nil {
+		candidates = append(candidates, a[1])
+	}
+	for _, c := range candidates {
+		if c != "" && usable(c) {
+			return c
+		}
+	}
+	return s.ID
+}
+
+// reread is info with s's registration read again from its file, so a stop
+// that comes a while after the index was built notes where s is by then.
+func (m *Manager) reread(s Session, info liveInfo) liveInfo {
+	if !info.Known || info.Reg.path == "" {
+		return info
+	}
+	regs := readRegistrations([]string{info.Reg.path}, info.Reg.Profile)
+	if len(regs) != 1 || regs[0].PID != info.Reg.PID {
+		return info
+	}
+	info.Reg = regs[0]
+	info.Conv = m.liveConv(s, m.sessionProfile(s).Dir, info)
+	return info
 }
 
 // proc is a process: its pid and its command line.
@@ -319,8 +342,33 @@ func (c *regCache) index() regIndex {
 	return *c.ix
 }
 
-// regIndex reads every profile's registry and the process table once.
+// regSkew is how much older than the start of the process holding its pid a
+// registry file may look and still be that process's own: ps gives the start
+// in whole seconds.
+const regSkew = 2 * time.Second
+
+// regIndex reads every profile's registry and the process table once. An
+// entry whose file was last written before the process now holding its pid
+// started was left by an earlier process, one that crashed, and is dropped.
 func (m *Manager) regIndex() regIndex {
+	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,etimes=,args=").Output()
+	now := time.Now()
+	started := map[string]time.Time{}
+	var procs [][2]string // ppid, pid
+	args := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		et, err := strconv.Atoi(f[2])
+		if err != nil {
+			continue
+		}
+		started[f[0]] = now.Add(-time.Duration(et) * time.Second)
+		procs = append(procs, [2]string{f[1], f[0]})
+		args[f[0]] = strings.Join(f[3:], " ")
+	}
 	regs, _ := m.Registrations()
 	ix := regIndex{
 		byID:  make(map[string][]Registration, len(regs)),
@@ -328,25 +376,23 @@ func (m *Manager) regIndex() regIndex {
 		child: map[string]proc{},
 	}
 	for _, r := range regs {
+		pid := strconv.Itoa(r.PID)
+		if st, ok := started[pid]; ok && r.PID > 0 && !r.mtime.IsZero() && r.mtime.Before(st.Add(-regSkew)) {
+			continue
+		}
 		ix.byID[r.SessionID] = append(ix.byID[r.SessionID], r)
 		if r.PID > 0 {
-			pid := strconv.Itoa(r.PID)
 			ix.byPID[pid] = append(ix.byPID[pid], r)
 		}
 	}
-	out, _ := execCommand("ps", "-e", "-o", "pid=,ppid=,args=").Output()
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		p := proc{pid: f[0], args: strings.Join(f[2:], " ")}
+	for _, pp := range procs {
+		ppid, pid := pp[0], pp[1]
 		// A screen has one child (claude); if a pid somehow has several, prefer
 		// the one claude registered.
-		if _, dup := ix.child[f[1]]; dup && len(ix.byPID[p.pid]) == 0 {
+		if _, dup := ix.child[ppid]; dup && len(ix.byPID[pid]) == 0 {
 			continue
 		}
-		ix.child[f[1]] = p
+		ix.child[ppid] = proc{pid: pid, args: args[pid]}
 	}
 	return ix
 }
@@ -358,40 +404,45 @@ func (ix regIndex) lookup(s Session, prof string) (reg Registration, known bool,
 	guess := s.by == byGuess
 	p, hasProc = ix.child[s.PID]
 	hasProc = hasProc && s.PID != ""
+	ids := []string{s.ID}
 	if hasProc {
-		if reg, known = pickReg(ix.byPID[p.pid], prof, guess); known {
+		if a := resumeArgRe.FindStringSubmatch(p.args); a != nil {
+			ids = append(ids, a[1])
+		}
+		if reg, known = pickReg(ix.byPID[p.pid], prof, guess, ids); known {
 			return reg, known, p, hasProc
 		}
 	}
-	reg, known = pickReg(ix.byID[s.ID], prof, guess)
+	reg, known = pickReg(ix.byID[s.ID], prof, guess, ids)
 	return reg, known, p, hasProc
 }
 
 // pickReg is the registration among regs, which share a pid or a session id,
-// for a session in profile prof. Within one profile the last read wins. Across
-// profiles only an entry in prof does, and only when prof is not a guess: a
-// stale file left by a crashed claude can share a live claude's pid, so an
-// entry in another profile proves nothing, and neither does one in a profile
-// that was guessed. Then none is picked.
-func pickReg(regs []Registration, prof string, guess bool) (Registration, bool) {
+// for a session in profile prof. Within one profile the last read wins.
+// Across profiles a stale file left by a crashed claude can share a live
+// claude's pid, so an entry in another profile proves nothing, and neither
+// does one in a profile that was guessed. Then an entry in prof wins, unless
+// prof is a guess; else one naming the session (its id or the conversation on
+// its claude's command line, in ids); else none is picked.
+func pickReg(regs []Registration, prof string, guess bool, ids []string) (Registration, bool) {
 	if len(regs) == 0 {
 		return Registration{}, false
 	}
 	last := regs[len(regs)-1]
-	for _, r := range regs {
-		if r.Profile != last.Profile {
-			if guess {
-				return Registration{}, false
-			}
-			for i := len(regs) - 1; i >= 0; i-- {
-				if regs[i].Profile == prof {
-					return regs[i], true
-				}
-			}
-			return Registration{}, false
+	if !slices.ContainsFunc(regs, func(r Registration) bool { return r.Profile != last.Profile }) {
+		return last, true
+	}
+	for i := len(regs) - 1; i >= 0 && !guess; i-- {
+		if regs[i].Profile == prof {
+			return regs[i], true
 		}
 	}
-	return last, true
+	for i := len(regs) - 1; i >= 0; i-- {
+		if slices.Contains(ids, regs[i].SessionID) {
+			return regs[i], true
+		}
+	}
+	return Registration{}, false
 }
 
 // pidAlive reports whether a process with the given pid exists. A zero pid

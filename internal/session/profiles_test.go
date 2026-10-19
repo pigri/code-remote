@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"claude-remote-api/internal/profile"
 )
@@ -602,7 +604,7 @@ func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 		{"private", "private", ""},         // neither entry is its own: no registration
 	} {
 		t.Run(tc.stored, func(t *testing.T) {
-			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000\n"}
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 3600\n"}
 			withFakeScreen(t, fs)
 			fst := &fakeStore{stored: map[string]string{idA: tc.stored}}
 			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
@@ -625,9 +627,10 @@ func TestRegistryCollisionAcrossProfiles(t *testing.T) {
 	}
 }
 
-// A session whose row says work while its claude runs in private stays in
-// private once it stops: the stop (or the periodic sync before it) notes the
-// registered profile, so a resume reopens the conversation it was in there.
+// A session whose row names no profile, found in work by its transcript while
+// its claude runs in private, stays in private once it stops: the stop (or the
+// periodic sync before it) notes the registered profile, so a resume reopens
+// the conversation it was in there.
 func TestStopKeepsTheRegisteredProfile(t *testing.T) {
 	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
 	setup := func(t *testing.T) (*Manager, *fakeScreen, *fakeStore, homes) {
@@ -642,9 +645,9 @@ func TestStopKeepsTheRegisteredProfile(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(sdir, "7777.json"), []byte(reg), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --session-id " + idA + "\n", parentEnv: true}
+		fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 3600 claude --session-id " + idA + "\n", parentEnv: true}
 		withFakeScreen(t, fs)
-		fst := &fakeStore{stored: map[string]string{idA: "work"}}
+		fst := &fakeStore{stored: map[string]string{idA: ""}} // resolves to work by its transcript
 		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}, fs, fst, h
 	}
 
@@ -717,6 +720,195 @@ func TestOneRegistryReadPerOperation(t *testing.T) {
 			if fs.psCalls > 1 {
 				t.Errorf("%s ran ps %d times, want at most once", tc.name, fs.psCalls)
 			}
+			if tc.unlisted && fst.lookups[idA] != 0 {
+				t.Errorf("%s resolved the running session's profile %d times while polling, want 0", tc.name, fst.lookups[idA])
+			}
 		})
+	}
+}
+
+// register writes a registry entry for id as claude process pid under home,
+// last modified at mod (now when zero).
+func register(t *testing.T, home, file, id string, pid int, mod time.Time) {
+	t.Helper()
+	sdir := filepath.Join(home, "sessions")
+	if err := os.MkdirAll(sdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sdir, file+".json")
+	body := `{"sessionId":"` + id + `","pid":` + strconv.Itoa(pid) + `}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !mod.IsZero() {
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+const convZ = "3c4b2a1e-0f9d-4e8c-b7a6-5d4c3b2a1f0e" // a crashed private claude's conversation
+
+// The store says work. A crashed private claude left its registry file behind,
+// and the new work claude got its pid; a sync runs before that claude
+// registers. The stale entry moves nothing: the session stays in work, and a
+// stop and resume reopen its own work conversation.
+func TestStaleEntryOfAReusedPIDIsNotPersisted(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	writeTitledLog(t, h.private, convZ, "crashed")
+	register(t, h.private, "7777", convZ, 7777, time.Now().Add(-2*time.Hour))
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 60 claude --resume " + idA + "\n", parentEnv: true}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{stored: map[string]string{idA: "work"}}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	m.SyncConversations()
+	if _, err := m.Kill(idA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Resume(idA); err != nil {
+		t.Fatal(err)
+	}
+	if fst.stored[idA] != "work" {
+		t.Errorf("stored profile = %q, want work", fst.stored[idA])
+	}
+	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+idA) {
+		t.Errorf("launches = %q, want one resuming %s", fs.launches, idA)
+	}
+	if v, ok := envValue(fs.cmds[0].Env, "CLAUDE_CONFIG_DIR"); ok {
+		t.Errorf("resumed with CLAUDE_CONFIG_DIR=%q, want work's (unset)", v)
+	}
+}
+
+// A registry file older than the process now holding its pid is stale and
+// matches nothing; one written since the process started is its own.
+func TestRegistryEntryOlderThanItsProcessIsIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mod  time.Time
+		want string // the session's profile
+	}{
+		{"older than the process", time.Now().Add(-2 * time.Hour), "work"},
+		{"written since it started", time.Now(), "private"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			writeTitledLog(t, h.work, idA, "a")
+			register(t, h.private, "7777", convZ, 7777, tc.mod)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 60 claude --resume " + idA + "\n"})
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "work"}}}
+			if l, _ := m.List(); len(l) != 1 || l[0].Profile != tc.want {
+				t.Errorf("List = %+v, want the session in %s", l, tc.want)
+			}
+			if _, known := m.LiveRegistrations()[idA]; known != (tc.want == "private") {
+				t.Errorf("live registration found: %v, want %v", known, tc.want == "private")
+			}
+		})
+	}
+}
+
+// A profile the Store recorded is never overwritten from the registry, even
+// by an entry that is not stale: only a row with no profile gets one.
+func TestRecordedProfileIsNotOverwritten(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	register(t, h.private, "7777", idA, 7777, time.Time{})
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 60 claude --resume " + idA + "\n"})
+	fst := &fakeStore{stored: map[string]string{idA: "work"}}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+	m.SyncConversations()
+	if fst.sets != 0 || fst.stored[idA] != "work" {
+		t.Errorf("SetProfile calls %d, stored %q; want none, work kept", fst.sets, fst.stored[idA])
+	}
+}
+
+// On a cross-profile pid collision a guessed profile still finds the entry
+// that names the session: by its id, or by the conversation on its claude's
+// command line. An entry naming neither is no registration.
+func TestGuessedCollisionPrefersTheSessionsOwnEntry(t *testing.T) {
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	for _, tc := range []struct {
+		name, liveID, want string
+		known              bool
+	}{
+		{"by session id", idA, "private", true},
+		{"by command-line conversation", conv, "private", true},
+		{"by neither", idB, "work", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, h := twoProfiles(t, "")
+			register(t, h.work, "7777", convZ, 7777, time.Time{}) // stale, yet newer than the process
+			register(t, h.private, "7777", tc.liveID, 7777, time.Time{})
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 3600 claude --resume " + conv + "\n"})
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set} // no store, no transcript: a guess
+			if l, _ := m.List(); len(l) != 1 || l[0].Profile != tc.want {
+				t.Errorf("List = %+v, want the session in %s", l, tc.want)
+			}
+			r, known := m.LiveRegistrations()[idA]
+			if known != tc.known || (known && r.SessionID != tc.liveID) {
+				t.Errorf("live registration = %+v (%v), want known %v with id %s", r, known, tc.known, tc.liveID)
+			}
+		})
+	}
+}
+
+// A Session built outside parseSessions has an unknown resolution: it is not
+// a guess when its registration is looked up, and it never writes a profile.
+func TestUnknownResolutionIsNotAGuess(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	register(t, h.work, "w", convZ, 7777, time.Time{})
+	register(t, h.private, "p", idB, 7777, time.Time{})
+	withFakeScreen(t, &fakeScreen{ps: "7777 10000 3600 claude\n"})
+	fst := &fakeStore{}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+
+	s := Session{ID: idA, PID: "10000", Profile: "private"}
+	if r, known, _, _ := (&regCache{m: m}).index().lookup(s, "private"); !known || r.Profile != "private" {
+		t.Errorf("lookup = %+v (%v), want the private entry", r, known)
+	}
+	m.noteProfile(s, liveInfo{Known: true, Reg: Registration{Profile: "private"}})
+	if fst.sets != 0 {
+		t.Errorf("SetProfile calls = %d, want none", fst.sets)
+	}
+}
+
+// A sync writes a session's profile once, even when the write matches no row.
+func TestNoteProfileWritesOnce(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	writeTitledLog(t, h.work, idA, "a")
+	register(t, h.private, "7777", idA, 7777, time.Time{})
+	withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 60 claude --resume " + idA + "\n"})
+	fst := &fakeStore{noRows: true}
+	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: fst}
+	m.SyncConversations()
+	m.SyncConversations()
+	if fst.sets != 1 {
+		t.Errorf("SetProfile calls = %d over two syncs, want 1", fst.sets)
+	}
+}
+
+// A restart notes and resumes the conversation the session is in when it
+// stops, not the one it was in when the index was built.
+func TestRestartRereadsItsRegistration(t *testing.T) {
+	fastStop(t)
+	const conv = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	home := t.TempDir()
+	writeTitledLog(t, home, idA, "a")
+	writeTitledLog(t, home, conv, "after /clear")
+	register(t, home, "4242", idA, 4242, time.Time{})
+	fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "4242 10000 3600 claude --session-id " + idA + "\n"}
+	withFakeScreen(t, fs)
+	fst := &fakeStore{}
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+	l, c := m.list()
+	info := m.liveIndex(c)(l[0])
+	register(t, home, "4242", conv, 4242, time.Time{}) // claude moves on meanwhile
+	if _, err := m.restart(l[0], info, "", m.profiles()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+conv) || fst.convs[idA] != conv {
+		t.Errorf("launches %q, noted conversation %q; want both %s", fs.launches, fst.convs[idA], conv)
 	}
 }

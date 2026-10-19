@@ -26,7 +26,7 @@ type fakeScreen struct {
 	version    string
 	updateTo   string
 	failUpdate bool
-	ps         string   // canned `ps -o pid=,ppid=` output ("<pid> <ppid>" lines)
+	ps         string   // canned `ps -o pid=,ppid=,etimes=,args=` output
 	psCalls    int      // times ps ran
 	unlisted   bool     // -dmS launches never show up in -ls
 	killed     []string // screen names quit via -S <name> -X quit
@@ -312,6 +312,8 @@ type fakeStore struct {
 	stopped  []Session
 	convs    map[string]string // uuid -> conversation id
 	cwds     map[string]string // uuid -> cwd served by Cwd
+	sets     int               // calls to SetProfile
+	noRows   bool              // SetProfile matches no row
 }
 
 func (f *fakeStore) Cwd(uuid string) (string, error) { return f.cwds[uuid], nil }
@@ -348,6 +350,10 @@ func (f *fakeStore) Profile(uuid string) (string, error) {
 }
 
 func (f *fakeStore) SetProfile(uuid, profile string) error {
+	f.sets++
+	if f.noRows { // like the DB's UPDATE on a session it has no row for
+		return nil
+	}
 	if f.stored == nil {
 		f.stored = map[string]string{}
 	}

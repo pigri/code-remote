@@ -36,7 +36,7 @@ type Session struct {
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
 
-	by resolvedBy // how Profile was found
+	by resolvedBy // how parseSessions resolved Profile, before any move to a registered one
 }
 
 // Recorder durably notes sessions the manager starts, so a session stays
@@ -83,6 +83,7 @@ type Manager struct {
 
 	convMu   sync.Mutex
 	convSeen map[string]string // session id -> conversation id last written to Store
+	profSeen map[string]string // session id -> profile last written to Store
 }
 
 // ErrInvalidDir is returned (wrapped) when a requested session working
@@ -500,10 +501,10 @@ func (m *Manager) resume(id, conv, dir string, p profile.Profile) (Session, erro
 
 	// Already running? Resuming would launch a second claude against the same
 	// session id — refuse and hand back the live session so the caller can 409.
-	if s, ok := m.running(id); ok {
-		one := []Session{s}
-		m.registeredProfiles(one, &regCache{m: m})
-		return one[0], ErrAlreadyRunning
+	if _, up := m.running(id); up {
+		if s, ok, _ := m.get(id); ok {
+			return s, ErrAlreadyRunning
+		}
 	}
 
 	// The session must exist on disk to resume. When its profile has no dir we
@@ -708,16 +709,22 @@ func (m *Manager) list() ([]Session, *regCache) {
 }
 
 // screens returns the running sessions, each in its resolved profile, without
-// reading any registry: enough to tell whether a session runs.
+// reading any registry.
 func (m *Manager) screens() []Session {
-	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
-	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
-	return m.parseSessions(string(out))
+	return m.parseSessions(m.screenLS())
 }
 
-// running returns session id from screens, if it runs.
+// screenLS is the output of `screen -ls`.
+func (m *Manager) screenLS() string {
+	// `screen -ls` exits non-zero when sessions exist; ignore the code, parse stdout.
+	out, _ := execCommand(m.ScreenBin, "-ls").CombinedOutput()
+	return string(out)
+}
+
+// running returns session id, with no profile, if its screen runs: it reads
+// screen names only, enough to tell whether a session runs.
 func (m *Manager) running(id string) (Session, bool) {
-	return find(m.screens(), id)
+	return find(m.parseScreens(m.screenLS()), id)
 }
 
 // find returns the session with id among sessions.
@@ -749,7 +756,6 @@ func (m *Manager) registeredProfiles(sessions []Session, c *regCache) {
 			continue
 		}
 		moveTo(s, p)
-		s.by = byRegistry
 	}
 }
 
@@ -762,11 +768,23 @@ func moveTo(s *Session, p profile.Profile) {
 	s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 }
 
-// parseSessions turns `screen -ls` output into our sessions (prefix-scoped,
-// UUID-validated), each with its resolved profile. Pure except for the
-// per-session profile, title and last-active reads, which find nothing when
-// the profile has no dir.
+// parseSessions is parseScreens with each session's resolved profile, and
+// its title and last-active time read there (nothing when the profile has no
+// dir).
 func (m *Manager) parseSessions(out string) []Session {
+	sessions := m.parseScreens(out)
+	for i := range sessions {
+		s := &sessions[i]
+		p, by := m.resolveProfile(s.ID)
+		s.Profile, s.by = p.Name, by
+		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
+	}
+	return sessions
+}
+
+// parseScreens turns `screen -ls` output into our sessions (prefix-scoped,
+// UUID-validated), with no profile. Pure.
+func (m *Manager) parseScreens(out string) []Session {
 	var sessions []Session
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimSpace(raw)
@@ -779,8 +797,7 @@ func (m *Manager) parseSessions(out string) []Session {
 		if !ok || !m.ValidID(id) {
 			continue
 		}
-		p, by := m.resolveProfile(id)
-		s := Session{ID: id, Screen: name, PID: pid, Title: titleIn(p.Dir, id), LastActive: lastActiveIn(p.Dir, id), Profile: p.Name, by: by}
+		s := Session{ID: id, Screen: name, PID: pid}
 		switch {
 		case strings.Contains(line, "(Detached)"):
 			s.Status = "Detached"
@@ -885,6 +902,9 @@ type Registration struct {
 	BridgeSessionID string // server session id; "" when not bridged
 	Status          string // idle | busy | shell | waiting | ...
 	Profile         string // the profile whose registry holds the entry
+
+	path  string    // the registry file
+	mtime time.Time // when the file was last written
 }
 
 // Registrations reads claude's process registry under <dir>/sessions/*.json of
@@ -925,7 +945,10 @@ func readRegistrations(paths []string, profile string) []Registration {
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
 			continue
 		}
-		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile}
+		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p}
+		if fi, err := os.Stat(p); err == nil {
+			reg.mtime = fi.ModTime()
+		}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}
