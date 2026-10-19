@@ -429,7 +429,9 @@ func TestConcurrentOpens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.Close()
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	const rounds, n = 30, 8
 	for round := range rounds {
@@ -441,9 +443,9 @@ func TestConcurrentOpens(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				d, err := Open(path)
+				db, err := Open(path)
 				if err == nil {
-					err = d.Close()
+					err = db.Close()
 				}
 				errs <- err
 			}()
@@ -457,4 +459,74 @@ func TestConcurrentOpens(t *testing.T) {
 			}
 		}
 	}
+}
+
+// openWhileLocked runs lock on another connection to path, then Open in the
+// background. The lock is released after 200 ms; Open must wait for it and
+// then succeed.
+func openWhileLocked(t *testing.T, path string, lock ...string) {
+	t.Helper()
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	other.SetMaxOpenConns(1) // the lock and its COMMIT share one connection
+	for _, q := range lock {
+		if _, err := other.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		db, err := Open(path)
+		if err == nil {
+			err = db.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if _, err := other.Exec(`COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Open while another connection held %q: %v", lock, err)
+	}
+}
+
+// rollbackLock leaves a database in rollback-journal mode, as an older
+// release left it, and takes a write lock on it with begin.
+func rollbackLock(begin string) []string {
+	return []string{`PRAGMA journal_mode=DELETE`, `CREATE TABLE t (x)`, begin, `INSERT INTO t VALUES (1)`}
+}
+
+// Every statement of Open, the WAL switch included, waits for an exclusive
+// lock held by another process.
+func TestOpenWaitsForExclusiveLock(t *testing.T) {
+	openWhileLocked(t, filepath.Join(t.TempDir(), "code-remote.db"), rollbackLock(`BEGIN EXCLUSIVE`)...)
+}
+
+// The WAL switch upgrades a read transaction to a write transaction, and
+// SQLite does not call the busy handler for that upgrade. Open must still wait
+// for a reserved lock held by another process.
+func TestOpenWaitsForReservedLock(t *testing.T) {
+	openWhileLocked(t, filepath.Join(t.TempDir(), "code-remote.db"), rollbackLock(`BEGIN IMMEDIATE`)...)
+}
+
+// On a database already in WAL mode, the migration waits through busy_timeout
+// for another process's write transaction.
+func TestOpenWaitsForWALWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "code-remote.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE sessions DROP COLUMN conv_id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	openWhileLocked(t, path, `BEGIN IMMEDIATE`, `INSERT INTO events (kind) VALUES ('lock')`)
 }

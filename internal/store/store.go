@@ -5,12 +5,14 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"claude-remote-api/internal/cloud"
 	"claude-remote-api/internal/session"
@@ -46,8 +48,14 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(1) // serialize writers; avoids SQLITE_BUSY
-	if _, err := sqlDB.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`); err != nil {
+	// Serializes this process's statements. The server and crctl each open the
+	// database, so locks still contend across processes: busy_timeout waits.
+	sqlDB.SetMaxOpenConns(1)
+	if _, err := sqlDB.Exec(fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyTimeout.Milliseconds())); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("set pragmas: %w", err)
+	}
+	if err := switchToWAL(sqlDB); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("set pragmas: %w", err)
 	}
@@ -57,6 +65,24 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+const busyTimeout = 5 * time.Second
+
+// switchToWAL puts the database in WAL mode. On a database not yet in WAL
+// mode, SQLite upgrades a read transaction to a write transaction to switch,
+// and returns SQLITE_BUSY at once, without the busy handler, when another
+// connection holds the write lock. So retry for up to busyTimeout.
+func switchToWAL(db *sql.DB) error {
+	deadline := time.Now().Add(busyTimeout)
+	for {
+		_, err := db.Exec(`PRAGMA journal_mode=WAL`)
+		var serr *sqlite.Error
+		if err == nil || !errors.As(err, &serr) || serr.Code()&0xff != sqlite3.SQLITE_BUSY || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (d *DB) Close() error { return d.db.Close() }
