@@ -132,6 +132,30 @@ func readProcEnviron(pid string) ([]string, error) {
 	return strings.Split(strings.TrimRight(string(data), "\x00"), "\x00"), nil
 }
 
+// procStart reads the start time of process pid as claude records it for its
+// own process in a registry entry's procStart; overridden in tests.
+var procStart = readProcStart
+
+// readProcStart is field 22 of /proc/<pid>/stat (starttime), as a decimal
+// string, the way claude writes procStart on Linux.
+func readProcStart(pid string) (string, error) {
+	data, err := os.ReadFile(filepath.Join("/proc", pid, "stat"))
+	if err != nil {
+		return "", err
+	}
+	return parseStart(string(data))
+}
+
+// parseStart is the starttime field of a /proc/<pid>/stat line. Fields are
+// counted after the command name's last ")".
+func parseStart(stat string) (string, error) {
+	_, rest, _ := strings.Cut(stat[strings.LastIndex(stat, ")")+1:], " ")
+	if f := strings.Fields(rest); len(f) > 19 {
+		return f[19], nil
+	}
+	return "", errors.New("no starttime in stat")
+}
+
 // environ is process pid's environment.
 func (m *Manager) environ(pid string) ([]string, error) {
 	if m.ProcEnviron != nil {
@@ -929,8 +953,9 @@ type Registration struct {
 	Status          string // idle | busy | shell | waiting | ...
 	Profile         string // the profile whose registry holds the entry
 
-	path  string // the registry file
-	owned bool   // its process's environment names its profile
+	path      string // the registry file
+	owned     bool   // its process's environment names its profile
+	procStart string // the start of the process that wrote it; "" when not recorded
 }
 
 // Registrations reads claude's process registry under <dir>/sessions/*.json of
@@ -967,11 +992,12 @@ func readRegistrations(paths []string, profile string) []Registration {
 			Cwd             string  `json:"cwd"`
 			BridgeSessionID *string `json:"bridgeSessionId"`
 			Status          string  `json:"status"`
+			ProcStart       string  `json:"procStart"`
 		}
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" {
 			continue
 		}
-		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p}
+		reg := Registration{SessionID: rec.SessionID, PID: rec.PID, Version: rec.Version, Cwd: rec.Cwd, Status: rec.Status, Profile: profile, path: p, procStart: rec.ProcStart}
 		if rec.BridgeSessionID != nil {
 			reg.BridgeSessionID = *rec.BridgeSessionID
 		}

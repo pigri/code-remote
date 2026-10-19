@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"claude-remote-api/internal/profile"
 )
@@ -1235,5 +1236,145 @@ func TestEntryOfAProcessInAnotherProfileTellsNothing(t *testing.T) {
 	m := &Manager{Prefix: "test-rc", ScreenBin: "screen", Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "private"}}}
 	if r, known := m.LiveRegistrations()[idA]; known {
 		t.Errorf("live registration = %+v, want none", r)
+	}
+}
+
+// registerStarted is register with the start claude records for its process
+// (procStart, omitted when "") and its wall-clock startedAt.
+func registerStarted(t *testing.T, home, file, id string, pid int, start string, startedAt time.Time) {
+	t.Helper()
+	register(t, home, file, id, pid)
+	rec := map[string]any{"sessionId": id, "pid": pid, "startedAt": startedAt.UnixMilli()}
+	if start != "" {
+		rec["procStart"] = start
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "sessions", file+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// withProcStart fakes the start of the processes in starts (pid -> start);
+// any other process's is unreadable.
+func withProcStart(t *testing.T, starts map[string]string) {
+	t.Helper()
+	orig := procStart
+	procStart = func(pid string) (string, error) {
+		s, ok := starts[pid]
+		if !ok {
+			return "", errors.New("no such process")
+		}
+		return s, nil
+	}
+	t.Cleanup(func() { procStart = orig })
+}
+
+// The reviewer's probe: the Store says work. A crashed work claude left its
+// registry file at pid 7777, naming its conversation convZ, and a new work
+// claude resuming idA got that pid; a sync runs before it registers. The
+// entry was written by a process that started at another time, so it counts
+// for nothing: the sync notes idA, and a stop and resume reopen idA.
+func TestCrashedEntryAtAReusedPIDIsIgnored(t *testing.T) {
+	for _, two := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one profile", true: "two profiles"}[two], func(t *testing.T) {
+			fst := &fakeStore{}
+			m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", Store: fst}
+			home := t.TempDir()
+			if two {
+				set, h := twoProfiles(t, "")
+				m.Profiles, home = set, h.work
+				fst.stored = map[string]string{idA: "work"}
+				withEnviron(t, map[string]string{"7777": ""})
+			} else {
+				m.ClaudeHome = home
+			}
+			writeTitledLog(t, home, idA, "a")
+			writeTitledLog(t, home, convZ, "crashed")
+			registerStarted(t, home, "7777", convZ, 7777, "100", time.Now().Add(-time.Hour))
+			withProcStart(t, map[string]string{"7777": "200"})
+			fs := &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"}
+			withFakeScreen(t, fs)
+
+			m.SyncConversations()
+			if fst.convs[idA] != idA {
+				t.Errorf("synced conversation = %q, want %s", fst.convs[idA], idA)
+			}
+			if _, err := m.Kill(idA); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Resume(idA); err != nil {
+				t.Fatal(err)
+			}
+			if len(fs.launches) != 1 || !strings.Contains(fs.launches[0], "--resume "+idA) {
+				t.Errorf("launches = %q, want one resuming %s", fs.launches, idA)
+			}
+		})
+	}
+}
+
+// A live claude that /clears registers under a new conversation; its entry
+// still counts, so the sync notes the new one. Neither the wall clock nor
+// the file's mtime decides it: startedAt and the mtime are off by years, as
+// after a clock step. An entry with no procStart (an older claude) or whose
+// process's start cannot be read is judged as before, by its pid alone.
+func TestLiveEntryKeepsItsConversation(t *testing.T) {
+	const cleared = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4"
+	for _, tc := range []struct {
+		name, recorded string
+		live           map[string]string // pid -> its process's start
+	}{
+		{"start matches", "200", map[string]string{"7777": "200"}},
+		{"no procStart", "", map[string]string{"7777": "200"}},
+		{"start unreadable", "200", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeTitledLog(t, home, idA, "a")
+			writeTitledLog(t, home, cleared, "cleared")
+			registerStarted(t, home, "7777", cleared, 7777, tc.recorded, time.Now().AddDate(5, 0, 0))
+			past := time.Now().AddDate(-5, 0, 0)
+			if err := os.Chtimes(filepath.Join(home, "sessions", "7777.json"), past, past); err != nil {
+				t.Fatal(err)
+			}
+			withProcStart(t, tc.live)
+			withFakeScreen(t, &fakeScreen{created: []string{"test-rc-" + idA}, ps: "7777 10000 claude --resume " + idA + "\n"})
+			fst := &fakeStore{}
+			m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home, Store: fst}
+
+			m.SyncConversations()
+			if fst.convs[idA] != cleared {
+				t.Errorf("synced conversation = %q, want %s", fst.convs[idA], cleared)
+			}
+		})
+	}
+}
+
+// A process's start is field 22 of its stat line, counted after the last
+// ")" so a command name holding ") " cannot shift it.
+func TestParseStart(t *testing.T) {
+	stat := "4242 (a) b) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 0 987654 999 0\n"
+	if got, err := parseStart(stat); got != "987654" || err != nil {
+		t.Errorf("parseStart = %q, %v; want 987654", got, err)
+	}
+	if got, err := parseStart("4242 (short) S 1"); err == nil {
+		t.Errorf("parseStart(short line) = %q, want an error", got)
+	}
+}
+
+// The start is read from /proc: this test process's own.
+func TestReadProcStartReadsOwnProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc/<pid>/stat is Linux only")
+	}
+	self := strconv.Itoa(os.Getpid())
+	got, err := readProcStart(self)
+	if _, perr := strconv.ParseUint(got, 10, 64); err != nil || perr != nil {
+		t.Fatalf("readProcStart(self) = %q, %v; want a tick count", got, err)
+	}
+	if again, _ := readProcStart(self); again != got {
+		t.Errorf("readProcStart(self) changed: %q, then %q", got, again)
 	}
 }
