@@ -402,7 +402,7 @@ func oldSchemaDB(t *testing.T, column string) string {
 // Another process (the server or crctl) can add a column between Open's check
 // and its ALTER; Open must still succeed.
 func TestMigrateColumnAddedConcurrently(t *testing.T) {
-	for _, column := range []string{"conv_id", "profile", "launch_gen"} {
+	for _, column := range []string{"conv_id", "profile", "launch_gen", "title_active"} {
 		t.Run(column, func(t *testing.T) {
 			path := oldSchemaDB(t, column)
 			added := false
@@ -836,5 +836,92 @@ VALUES
 	}
 	if gens, _ := d.LaunchGens(); gens[one] != 1 {
 		t.Errorf("generation after a launch = %d, want 1", gens[one])
+	}
+}
+
+// A pass marks a session's title counterpart as seen active only at the
+// generation it read; every launch forgets the mark.
+func TestTitleActiveFollowsTheLaunch(t *testing.T) {
+	d := openTemp(t)
+	const id = "11111111-1111-1111-1111-111111111111"
+	seen := func() bool {
+		t.Helper()
+		ok, err := d.TitleActive(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if seen() {
+		t.Fatal("an unknown session has a counterpart seen active")
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetTitleActive(id, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !seen() {
+		t.Fatal("not seen active after a pass at the launch's generation")
+	}
+	if err := d.Record(id, "p-"+id, "t", "/repo", "Detached", "now", ""); err != nil {
+		t.Fatal(err)
+	}
+	if seen() {
+		t.Fatal("still seen active after a relaunch")
+	}
+	if err := d.SetTitleActive(id, 1); err != nil {
+		t.Fatal(err)
+	}
+	if seen() {
+		t.Fatal("seen active by a pass that read the session before the relaunch")
+	}
+	if err := d.SetTitleActive(id, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !seen() {
+		t.Fatal("not seen active after a pass at the relaunch's generation")
+	}
+}
+
+// A database written before the title_active column existed gains it on Open,
+// with its rows not seen active and their launch generation kept.
+func TestMigrateAddsTitleActive(t *testing.T) {
+	path := oldSchemaDB(t, "title_active")
+	const id = "11111111-1111-1111-1111-111111111111"
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO sessions (uuid, screen, title, launch_gen) VALUES (?, 'p-1', 'one', 3)`, id); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	for i := range 2 {
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("Open #%d of old db: %v", i+1, err)
+		}
+		if ok, err := d.TitleActive(id); err != nil || ok {
+			t.Errorf("Open #%d: TitleActive = %v, %v, want false", i+1, ok, err)
+		}
+		if gens, _ := d.LaunchGens(); gens[id] != 3 {
+			t.Errorf("Open #%d: generation = %d, want 3 kept", i+1, gens[id])
+		}
+		var n int
+		if err := d.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='title_active' AND "notnull"=1 AND dflt_value='0'`).Scan(&n); err != nil || n != 1 {
+			t.Errorf("Open #%d: title_active columns = %d, %v, want one NOT NULL DEFAULT 0", i+1, n, err)
+		}
+		if i == 1 {
+			if err := d.SetTitleActive(id, 3); err != nil {
+				t.Fatal(err)
+			}
+			if ok, _ := d.TitleActive(id); !ok {
+				t.Error("not seen active after a pass at the kept generation")
+			}
+		}
+		d.Close()
 	}
 }

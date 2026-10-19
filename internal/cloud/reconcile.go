@@ -110,7 +110,8 @@ type titleKey struct{ title, cwd string }
 // live registry entry's bridgeSessionId == server id (stable, rename-proof). When
 // MatchTitle is set, sessions lacking a bridgeSessionId fall back to a Title+Cwd
 // match that only fires when EVERY server session sharing that Title+Cwd is
-// archived, so a session with a live cloud counterpart is never killed.
+// archived, so a session with a live cloud counterpart is never killed, and
+// only once a pass has seen one of them active since the session's launch.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	remote, err := r.Cloud.List(ctx)
 	if err != nil {
@@ -219,10 +220,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 				}
 			}
 		}
-		if !quit && !confirmFailed && r.MatchTitle && ls.Title != "" && archivedTitle[titleKey{ls.Title, cwd}] {
-			quit, match = true, "title_cwd"
-			if cloudStatus == "" {
-				cloudStatus = "archived"
+		title := titleKey{ls.Title, cwd}
+		byTitle := r.MatchTitle && ls.Title != ""
+		// Only a counterpart seen active since the launch is this launch's. One
+		// archived before it is a replaced claude's: a resumed session that has
+		// not bridged yet would be quit over it.
+		if !quit && !confirmFailed && byTitle && archivedTitle[title] {
+			seen, terr := st.TitleActive(ls.ID)
+			if terr != nil {
+				r.Log.Warn("session_sync", "phase", "title", "id", ls.ID, "error", terr.Error())
+			}
+			if seen {
+				quit, match = true, "title_cwd"
+				if cloudStatus == "" {
+					cloudStatus = "archived"
+				}
 			}
 		}
 
@@ -234,6 +246,11 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 			LaunchGen: gens[ls.ID],
 		}); err != nil {
 			r.Log.Warn("session_sync", "phase", "mirror", "id", ls.ID, "error", err.Error())
+		}
+		if byTitle && activeTitle[title] {
+			if err := st.SetTitleActive(ls.ID, gens[ls.ID]); err != nil {
+				r.Log.Warn("session_sync", "phase", "title", "id", ls.ID, "error", err.Error())
+			}
 		}
 
 		// On an inconclusive confirm, do nothing (don't quit, don't reset).
