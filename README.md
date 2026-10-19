@@ -363,7 +363,10 @@ clock (no mirror).
 > rename it). Sessions that never bridged have a `null` bridge id; those are
 > matched only if you opt in with `CLAUDE_REMOTE_MATCH_TITLE=on`, which falls
 > back to **title + cwd** (mutable, so off by default) and only fires when
-> *every* server session sharing that title+cwd is archived. The API shape
+> *every* server session sharing that title+cwd is archived, and only once the
+> sync has seen one of them active since the session was last launched. A
+> counterpart archived before any sync pass sees it active is never matched.
+> The API shape
 > (`session_status`, `session_context`, `bridgeSessionId`) isn't a documented
 > contract and may change across versions.
 

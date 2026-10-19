@@ -182,7 +182,7 @@ func TestReconcileIgnoresTheBridgeOfAStaleEntry(t *testing.T) {
 // cwd, and only archived ones get quit.
 func TestReconcileQuitsArchivedByTitleCwd(t *testing.T) {
 	cloudCl := &fakeCloud{sessions: []Session{
-		archived("test-2", "/repo"),
+		idle("test-2", "/repo"),
 		idle("test-keep", "/repo"),
 	}}
 	mgr := &fakeManager{
@@ -196,10 +196,33 @@ func TestReconcileQuitsArchivedByTitleCwd(t *testing.T) {
 		},
 	}
 	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), MatchTitle: true}
+	r.ReconcileOnce(context.Background()) // sees this launch's counterparts active
+	cloudCl.sessions[0] = archived("test-2", "/repo")
 	r.ReconcileOnce(context.Background())
 
 	if len(mgr.killed) != 1 || mgr.killed[0] != "uuid-arch" {
 		t.Fatalf("killed = %v, want [uuid-arch]", mgr.killed)
+	}
+}
+
+// Without a durable store, a title quit forgets the counterpart it saw active:
+// the session's next launch is not quit over that archived counterpart.
+func TestReconcileTitleQuitForgetsTheCounterpart(t *testing.T) {
+	cloudCl := &fakeCloud{sessions: []Session{idle("t", "/repo")}}
+	mgr := &fakeManager{
+		sessions: []session.Session{{ID: "uuid-1", Screen: "p-uuid-1", Title: "t"}},
+		regs:     []session.Registration{{SessionID: "uuid-1", Cwd: "/repo"}},
+	}
+	r := &Reconciler{Cloud: cloudCl, Manager: mgr, Log: testLogger(), MatchTitle: true}
+	r.ReconcileOnce(context.Background())
+	cloudCl.sessions[0] = archived("t", "/repo")
+	r.ReconcileOnce(context.Background())
+	if len(mgr.killed) != 1 {
+		t.Fatalf("killed = %v, want [uuid-1]", mgr.killed)
+	}
+	r.ReconcileOnce(context.Background()) // the session, resumed
+	if len(mgr.killed) != 1 {
+		t.Fatalf("killed = %v, want only the first quit", mgr.killed)
 	}
 }
 

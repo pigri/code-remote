@@ -134,6 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_events_uuid ON events(uuid);`
 		{"conv_id", "TEXT"},
 		{"profile", "TEXT NOT NULL DEFAULT ''"},
 		{"launch_gen", "INTEGER NOT NULL DEFAULT 0"},
+		{"title_active", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		var n int
 		if err := d.db.QueryRow(hasColumn, col.name).Scan(&n); err != nil {
@@ -263,6 +264,7 @@ ON CONFLICT(uuid) DO UPDATE SET
 	resumed_at=CASE WHEN sessions.archived_at IS NOT NULL THEN excluded.updated_at ELSE sessions.resumed_at END,
 	archived_at=NULL,
 	first_seen_archived=NULL,
+	title_active=0,
 	launch_gen=sessions.launch_gen+1,
 	updated_at=excluded.updated_at;`
 	now := time.Now().Unix()
@@ -366,6 +368,22 @@ func (d *DB) LaunchGens() (map[string]int64, error) {
 		out[id] = gen
 	}
 	return out, rows.Err()
+}
+
+// TitleActive reports whether a pass has seen the session's title counterpart
+// active since its last launch.
+func (d *DB) TitleActive(id string) (bool, error) {
+	var v int
+	err := d.db.QueryRow(`SELECT title_active FROM sessions WHERE uuid=?`, id).Scan(&v)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return v != 0, err
+}
+
+func (d *DB) SetTitleActive(id string, gen int64) error {
+	_, err := d.db.Exec(`UPDATE sessions SET title_active=1 WHERE uuid=? AND launch_gen=?`, id, gen)
+	return err
 }
 
 func (d *DB) logEvent(uuid, kind, detail string) error {

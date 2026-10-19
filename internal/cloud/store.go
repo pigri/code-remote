@@ -48,16 +48,25 @@ type Store interface {
 	// launch (create, resume, restart) increments. A session missing from the
 	// map is at generation 0.
 	LaunchGens() (map[string]int64, error)
+	// TitleActive reports whether a pass has seen, since the session's last
+	// launch, a cloud session with its title and cwd that was not archived.
+	TitleActive(id string) (bool, error)
+	// SetTitleActive records that sighting, unless the session has been
+	// launched since generation gen.
+	SetTitleActive(id string, gen int64) error
 }
 
 // memStore is the default in-process Store: it tracks the grace clock and drops
 // the mirror (UpsertSession is a no-op). Used when no durable store is wired.
 type memStore struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu          sync.Mutex
+	seen        map[string]time.Time
+	titleActive map[string]bool
 }
 
-func newMemStore() *memStore { return &memStore{seen: map[string]time.Time{}} }
+func newMemStore() *memStore {
+	return &memStore{seen: map[string]time.Time{}, titleActive: map[string]bool{}}
+}
 
 func (m *memStore) UpsertSession(SessionRecord) error { return nil }
 
@@ -82,10 +91,31 @@ func (m *memStore) ClearArchiveClock(id string) error {
 	return nil
 }
 
-func (m *memStore) MarkArchived(id string, _ time.Time) error { return m.ClearArchiveClock(id) }
+// MarkArchived also forgets the title sighting: knowing no launches, this
+// store treats the quit as the end of the launch.
+func (m *memStore) MarkArchived(id string, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.seen, id)
+	delete(m.titleActive, id)
+	return nil
+}
 
 func (m *memStore) LastBridge(string) (string, error) { return "", nil }
 
 // LaunchGens knows no launches (Record writes only a durable store), so
 // without one a pass that overlaps a relaunch is not detected.
 func (m *memStore) LaunchGens() (map[string]int64, error) { return nil, nil }
+
+func (m *memStore) TitleActive(id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.titleActive[id], nil
+}
+
+func (m *memStore) SetTitleActive(id string, _ int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.titleActive[id] = true
+	return nil
+}
