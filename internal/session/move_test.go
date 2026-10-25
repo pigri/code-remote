@@ -289,6 +289,34 @@ func TestCopyConvMovesTheWrongTypeAside(t *testing.T) {
 	}
 }
 
+// Empty dirs that were displaced are content too: they stay in the aside dir
+// while the move stands, and undo puts them back.
+func TestCopyConvKeepsDisplacedEmptyDirs(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeConv(t, src, sidecarConv(convX), nil)
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	if err := os.MkdirAll(filepath.Join(dst, log, "empty"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := tree(t, dst)
+	c, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo, err := c.run()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := asideFiles(t, dst, c)
+	if got[log] != "/" || got[filepath.Join(log, "empty")] != "/" {
+		t.Errorf("aside = %v, want the dir and its empty subdir", got)
+	}
+	undo()
+	if got := tree(t, dst); !mapsEqual(got, before) {
+		t.Errorf("target after undo = %v, want it as before: %v", got, before)
+	}
+}
+
 // When the aside dir cannot be made, the move fails as a conflict and the
 // target is untouched.
 func TestCopyConvAsideFailureIsAConflict(t *testing.T) {

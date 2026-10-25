@@ -32,8 +32,9 @@ type convCopy struct {
 	dirs     []copyEntry
 	files    []copyEntry
 
-	asideDir string // set by run: where it moved displaced entries; "" if none
-	asided   int    // regular files in them
+	asideDir  string   // set by run: where it moved displaced entries; "" if none
+	asideMade []string // the dirs run made under asideDir, parents first
+	asided    int      // regular files in them
 }
 
 // copyEntry is one dir or file of a convCopy, with the mode it gets.
@@ -259,10 +260,10 @@ func (c *convCopy) moveAside(rel, from string) (moved *asideMove, err error) {
 		if err != nil {
 			return nil, fail(err)
 		}
-		c.asideDir = d
+		c.asideDir, c.asideMade = d, []string{d}
 	}
 	to := filepath.Join(c.asideDir, rel)
-	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+	if err := c.mkdirAside(filepath.Dir(to)); err != nil {
 		return nil, fail(err)
 	}
 	n := fileCount(from)
@@ -284,26 +285,38 @@ func (c *convCopy) moveAside(rel, from string) (moved *asideMove, err error) {
 	}
 }
 
-// tidyAside removes the empty dirs of the aside dir, and the aside dir and
-// crctl-aside when they end up empty. It returns the aside dir's path
-// relative to the profile if something is left in it, else "".
+// mkdirAside makes dir, which is under the aside dir, noting each dir it makes.
+func (c *convCopy) mkdirAside(dir string) error {
+	var made []string
+	for p := dir; p != c.asideDir; p = filepath.Dir(p) {
+		if _, err := os.Lstat(p); err == nil {
+			break
+		}
+		made = append(made, p)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for i := len(made) - 1; i >= 0; i-- {
+		c.asideMade = append(c.asideMade, made[i])
+	}
+	return nil
+}
+
+// tidyAside removes the aside dirs run made, when they are empty, and
+// crctl-aside when it ends up empty. A dir that was displaced is never one of
+// them. It returns the aside dir's path relative to the profile if something
+// is left in it, else "".
 func (c *convCopy) tidyAside() string {
 	if c.asideDir == "" {
 		return ""
 	}
-	var dirs []string
-	_ = filepath.WalkDir(c.asideDir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			dirs = append(dirs, p)
-		}
-		return nil
-	})
-	for i := len(dirs) - 1; i >= 0; i-- {
-		_ = os.Remove(dirs[i])
+	for i := len(c.asideMade) - 1; i >= 0; i-- {
+		_ = os.Remove(c.asideMade[i])
 	}
 	_ = os.Remove(filepath.Dir(c.asideDir))
 	if _, err := os.Lstat(c.asideDir); err != nil {
-		c.asideDir = ""
+		c.asideDir, c.asideMade = "", nil
 		return ""
 	}
 	rel, _ := filepath.Rel(c.root, c.asideDir)
