@@ -37,6 +37,8 @@ type Session struct {
 	Outdated   bool   `json:"outdated,omitempty"`    // running an older claude than the installed one
 	NeedsTrust bool   `json:"needs_trust,omitempty"` // launched into a folder claude doesn't trust yet: it is waiting at the prompt
 	Profile    string `json:"profile,omitempty"`     // the profile (claude config dir) it runs under
+	MovedAside int    `json:"moved_aside,omitempty"` // files a move to another profile set aside in the target (see AsideDir)
+	AsideDir   string `json:"aside_dir,omitempty"`   // where they went: <target profile dir>/crctl-aside/<UTC stamp>
 
 	unrecorded bool     // parseSessions found no profile for it in the Store
 	guessed    bool     // its profile is only a guess (see resolveProfile)
@@ -579,7 +581,8 @@ func (m *Manager) Resume(id string) (Session, error) { return m.ResumeIn(id, "",
 // prof names the profile to launch under; "" is the session's own, and an
 // unknown one is ErrInvalidProfile. Another profile moves the session there:
 // its conversation is copied into that profile (see planCopy) and resumed
-// there as a fork. A different copy already there is ErrMoveConflict.
+// there as a fork. A different copy already there is moved aside, not
+// overwritten (see convCopy.run).
 //
 // A move forks the conversation (`--fork-session`): the history carries over,
 // under a new conversation id. That is what makes the move count server-side —
@@ -680,6 +683,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 		args = append(args, "--fork-session") // a move: see ResumeIn
 	}
 	undo := func() {}
+	setAside := func(*Session) {}
 	if move {
 		var err error
 		if undo, err = cp.run(); err != nil {
@@ -688,6 +692,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 			}
 			return Session{}, fmt.Errorf("copy the conversation to profile %q: %w", p.Name, err)
 		}
+		setAside = func(s *Session) { s.MovedAside, s.AsideDir = cp.asided, cp.asideDir }
 	}
 	cmd := execCommand(m.ScreenBin, append(args, rc...)...)
 	scrubEnv(cmd, p)
@@ -723,6 +728,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 			m.record(&s, cwd, p)
 			noteConv()
 			s.NeedsTrust = needsTrust
+			setAside(&s)
 			return s, nil
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -731,6 +737,7 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 	m.record(&s, cwd, p)
 	noteConv()
 	s.NeedsTrust = needsTrust
+	setAside(&s)
 	return s, nil
 }
 

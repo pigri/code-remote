@@ -426,6 +426,26 @@ func TestHandlersPassProfile(t *testing.T) {
 	}
 }
 
+// The files a move set aside are reported to the client; a move that set
+// none aside adds nothing to the response.
+func TestHandlersReportMovedAside(t *testing.T) {
+	aside := session.Session{ID: stubID, MovedAside: 2, AsideDir: "/p/crctl-aside/20260101T000000Z"}
+	for _, path := range []string{"/sessions/" + stubID + "/resume", "/sessions/" + stubID + "/restart"} {
+		rr := send(t, stubHandler(&stubMgr{resumeSess: aside, restartSess: aside}), http.MethodPost, path, `{"profile":"x"}`)
+		var got map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+			t.Fatalf("POST %s: body %s: %v", path, rr.Body, err)
+		}
+		if got["moved_aside"] != float64(2) || got["aside_dir"] != aside.AsideDir {
+			t.Errorf("POST %s: body %s, want moved_aside 2 and aside_dir", path, rr.Body)
+		}
+		rr = send(t, stubHandler(&stubMgr{resumeSess: session.Session{ID: stubID}, restartSess: session.Session{ID: stubID}}), http.MethodPost, path, `{}`)
+		if strings.Contains(rr.Body.String(), "aside") {
+			t.Errorf("POST %s: body %s, want no aside fields", path, rr.Body)
+		}
+	}
+}
+
 func TestHandlersProfileErrors(t *testing.T) {
 	invalid := fmt.Errorf("%w: %q", session.ErrInvalidProfile, "nope")
 	other := fmt.Errorf("%w: moving it is not supported", session.ErrOtherProfile)

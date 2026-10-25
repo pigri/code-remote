@@ -85,6 +85,9 @@ type fakeBackend struct {
 
 	profileList session.ProfileList
 	profilesErr error
+
+	aside    int    // files moved aside, reported by resume and restart
+	asideDir string // where
 }
 
 func (f *fakeBackend) profiles() (session.ProfileList, error) { return f.profileList, f.profilesErr }
@@ -100,12 +103,14 @@ func (f *fakeBackend) resume(id, dir, prof string) (session.Session, error) {
 	if err := f.resumeErrs[id]; err != nil {
 		return session.Session{}, err
 	}
-	return f.resumed, f.resumeErr
+	r := f.resumed
+	r.MovedAside, r.AsideDir = f.aside, f.asideDir
+	return r, f.resumeErr
 }
 func (f *fakeBackend) restart(id, dir, prof string) (session.Session, error) {
 	f.movedDir, f.movedProf = dir, prof
 	f.restartedID = id
-	return session.Session{ID: id, Screen: "p-" + id}, f.restartErr
+	return session.Session{ID: id, Screen: "p-" + id, MovedAside: f.aside, AsideDir: f.asideDir}, f.restartErr
 }
 func (f *fakeBackend) upgrade(restart, force bool, ids ...string) (session.UpgradeResult, error) {
 	f.gotRestart, f.gotForce, f.gotIDs = restart, force, ids
@@ -959,11 +964,15 @@ func TestLocalBackendPassesProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(proj, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A different copy in private makes a move refuse before it launches.
+	// A different copy in private that cannot be moved aside (a file holds the
+	// aside dir's place) makes a move refuse before it launches.
 	if err := os.MkdirAll(filepath.Join(private, "projects", "p"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(private, "projects", "p", id+".jsonl"), []byte("other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(private, "crctl-aside"), []byte("in the way\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(t.TempDir(), "missing")
@@ -991,7 +1000,7 @@ const (
 	unknownHint   = "CLAUDE_REMOTE_PROFILES"
 	moveHint      = "leave out --profile"
 	oldServerHint = "upgrade the API server to move it"
-	conflictHint  = "move that copy aside"
+	conflictHint  = "could not be moved aside"
 )
 
 // saysOnce reports whether a profile-move error says "not supported" once:
@@ -1031,6 +1040,36 @@ func TestProfileErrors(t *testing.T) {
 		for _, h := range c.notHints {
 			if contains(err.Error(), h) {
 				t.Errorf("%s: err = %v, should not say %q", c.name, err, h)
+			}
+		}
+	}
+}
+
+func TestMovedAsideLine(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cmd  func(backend, []string) error
+		args []string
+	}{
+		{"resume", resume, []string{"s1", "--profile", "private"}},
+		{"restart", restart, []string{"s1", "--profile", "private"}},
+	} {
+		for _, n := range []int{0, 1, 3} {
+			be := &fakeBackend{resumed: session.Session{ID: "s1"}}
+			if n > 0 {
+				be.aside, be.asideDir = n, "/p/crctl-aside/20260101T000000Z"
+			}
+			var err error
+			out := captureStdout(t, func() { err = c.cmd(be, c.args) })
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			want := fmt.Sprintf("moved aside %d files to /p/crctl-aside/20260101T000000Z", n)
+			if n == 1 {
+				want = "moved aside 1 file to /p/crctl-aside/20260101T000000Z"
+			}
+			if got := strings.Contains(out, "moved aside"); got != (n > 0) || (n > 0 && !strings.Contains(out, want)) {
+				t.Errorf("%s with %d aside: output %q, want %q: %v", c.name, n, out, want, n > 0)
 			}
 		}
 	}

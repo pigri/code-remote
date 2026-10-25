@@ -142,7 +142,28 @@ func TestCopyConvRefusesTraversal(t *testing.T) {
 	}
 }
 
-func TestCopyConvRefusesADifferentTarget(t *testing.T) {
+// asideFiles is the tree under the aside dir c reported, by path relative to it.
+func asideFiles(t *testing.T, dst string, c *convCopy) map[string]string {
+	t.Helper()
+	if c.asideDir == "" || filepath.Dir(filepath.Dir(c.asideDir)) != dst || filepath.Base(filepath.Dir(c.asideDir)) != "crctl-aside" {
+		t.Fatalf("aside dir = %q, want <target>/crctl-aside/<stamp>", c.asideDir)
+	}
+	return tree(t, c.asideDir)
+}
+
+// withoutAside is tree(dst) less the crctl-aside dir.
+func withoutAside(t *testing.T, dst string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for k, v := range tree(t, dst) {
+		if k != "crctl-aside" && !strings.HasPrefix(k, "crctl-aside"+string(filepath.Separator)) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func TestCopyConvMovesADifferentTargetAside(t *testing.T) {
 	log := filepath.Join("projects", "repo", convX+".jsonl")
 	side := filepath.Join("projects", "repo", convX, "tool-results", "a.txt")
 	for _, rel := range []string{log, side} {
@@ -155,16 +176,136 @@ func TestCopyConvRefusesADifferentTarget(t *testing.T) {
 					other = strings.Repeat("x", len(sidecarConv(convX)[rel]))
 				}
 				writeConv(t, dst, convFiles{rel: other}, nil)
-				before := tree(t, dst)
-				_, err := copyConv(t, src, dst, "repo", convX)
-				if !errors.Is(err, ErrMoveConflict) {
-					t.Fatalf("copyConv err = %v, want ErrMoveConflict", err)
+				c, err := planCopy(src, dst, "repo", convX)
+				if err != nil {
+					t.Fatal(err)
 				}
-				if got := tree(t, dst); !mapsEqual(got, before) {
-					t.Errorf("target = %v, want it unchanged: %v", got, before)
+				undo, err := c.run()
+				if err != nil {
+					t.Fatalf("run: %v", err)
+				}
+				if got, want := withoutAside(t, dst), tree(t, src); !mapsEqual(got, want) {
+					t.Errorf("target = %v, want the source's files: %v", got, want)
+				}
+				if got := asideFiles(t, dst, c)[rel]; got != other {
+					t.Errorf("aside %s = %q, want the old file", rel, got)
+				}
+				if c.asided != 1 {
+					t.Errorf("asided = %d, want 1", c.asided)
+				}
+				undo()
+				got := tree(t, dst)
+				if got[rel] != other || got["crctl-aside"] != "" {
+					t.Errorf("target after undo = %v, want the old file back and no aside dir", got)
 				}
 			})
 		}
+	}
+}
+
+// Every differing file is moved aside in one move, and undo puts each back.
+func TestCopyConvMovesSeveralFilesAside(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeConv(t, src, sidecarConv(convX), nil)
+	old := convFiles{}
+	for rel := range sidecarConv(convX) {
+		old[rel] = "old " + rel + "\n"
+	}
+	writeConv(t, dst, old, nil)
+	before := tree(t, dst)
+	c, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo, err := c.run()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if c.asided != len(old) {
+		t.Errorf("asided = %d, want %d", c.asided, len(old))
+	}
+	for rel, body := range old {
+		if got := asideFiles(t, dst, c)[rel]; got != body {
+			t.Errorf("aside %s = %q, want %q", rel, got, body)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dst, rel)); string(got) != sidecarConv(convX)[rel] {
+			t.Errorf("target %s = %q, want the source's", rel, got)
+		}
+	}
+	undo()
+	if got := tree(t, dst); !mapsEqual(got, before) {
+		t.Errorf("target after undo = %v, want it as before: %v", got, before)
+	}
+}
+
+// A file where a dir is needed, and a dir where a file goes, are moved aside
+// too.
+func TestCopyConvMovesTheWrongTypeAside(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		old  convFiles
+		rel  string // what lands in the aside dir, by its top path
+	}{
+		{"file for the project dir", convFiles{filepath.Join("projects", "repo"): "file\n"}, filepath.Join("projects", "repo")},
+		{"file for the sidecar dir", convFiles{filepath.Join("projects", "repo", convX): "file\n"}, filepath.Join("projects", "repo", convX)},
+		{"dir for the transcript", convFiles{filepath.Join("projects", "repo", convX+".jsonl", "x"): "in\n"}, filepath.Join("projects", "repo", convX+".jsonl", "x")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			writeConv(t, src, sidecarConv(convX), nil)
+			// writeConv cannot put a file where a dir is: build it by hand.
+			for rel, body := range tc.old {
+				if tc.name == "dir for the transcript" {
+					writeConv(t, dst, convFiles{rel: body}, nil)
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(dst, rel)), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dst, rel), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := tree(t, dst)
+			c, err := planCopy(src, dst, "repo", convX)
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+			undo, err := c.run()
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got, want := withoutAside(t, dst), tree(t, src); !mapsEqual(got, want) {
+				t.Errorf("target = %v, want the source's files: %v", got, want)
+			}
+			if got, ok := asideFiles(t, dst, c)[tc.rel]; !ok || (got != "/" && got != tc.old[tc.rel]) {
+				t.Errorf("aside = %v, want %s in it", asideFiles(t, dst, c), tc.rel)
+			}
+			undo()
+			if got := tree(t, dst); !mapsEqual(got, before) {
+				t.Errorf("target after undo = %v, want it as before: %v", got, before)
+			}
+		})
+	}
+}
+
+// When the aside dir cannot be made, the move fails as a conflict and the
+// target is untouched.
+func TestCopyConvAsideFailureIsAConflict(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeConv(t, src, sidecarConv(convX), nil)
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	writeConv(t, dst, convFiles{log: "other\n", "crctl-aside": "in the way\n"}, nil)
+	before := tree(t, dst)
+	c, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.run(); !errors.Is(err, ErrMoveConflict) {
+		t.Fatalf("run err = %v, want ErrMoveConflict", err)
+	}
+	if got := tree(t, dst); !mapsEqual(got, before) {
+		t.Errorf("target = %v, want it unchanged: %v", got, before)
 	}
 }
 
@@ -174,9 +315,16 @@ func TestCopyConvAcceptsAnIdenticalTarget(t *testing.T) {
 	writeConv(t, src, files, nil)
 	writeConv(t, dst, files, nil)
 	before := tree(t, dst)
-	undo, err := copyConv(t, src, dst, "repo", convX)
+	c, err := planCopy(src, dst, "repo", convX)
 	if err != nil {
-		t.Fatalf("copyConv onto an identical copy: %v", err)
+		t.Fatal(err)
+	}
+	undo, err := c.run()
+	if err != nil {
+		t.Fatalf("run onto an identical copy: %v", err)
+	}
+	if c.asided != 0 || c.asideDir != "" {
+		t.Errorf("asided %d into %q, want nothing moved aside", c.asided, c.asideDir)
 	}
 	undo()
 	if got := tree(t, dst); !mapsEqual(got, before) {
@@ -216,14 +364,16 @@ func TestCopyConvLeavesNoTempFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A dir where the transcript goes, made after the plan, fails its link,
-	// which comes after the sidecar's.
+	// which comes after the sidecar's. It cannot be moved aside either: a file
+	// holds the aside dir's place.
 	if err := os.Mkdir(filepath.Join(dst, "projects", "repo", convX+".jsonl"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	writeConv(t, dst, convFiles{asideName: "in the way\n"}, nil)
 	if _, err := c.run(); err == nil {
 		t.Fatal("run onto a dir = nil error")
 	}
-	want := map[string]string{"projects": "/", "projects/repo": "/", "projects/repo/" + convX + ".jsonl": "/"}
+	want := map[string]string{"projects": "/", "projects/repo": "/", "projects/repo/" + convX + ".jsonl": "/", asideName: "in the way\n"}
 	if got := tree(t, dst); !mapsEqual(got, want) {
 		t.Errorf("target = %v, want only the dir in the way: %v", got, want)
 	}
@@ -231,12 +381,17 @@ func TestCopyConvLeavesNoTempFile(t *testing.T) {
 
 // A file that appears in the target between the plan and the copy is never
 // replaced: the same content is accepted and left to whoever made it, other
-// content is ErrMoveConflict.
+// content is moved aside once and the copy retried. One that keeps coming
+// back is ErrMoveConflict.
 func TestCopyConvNeverReplacesAFileThatAppears(t *testing.T) {
 	log := filepath.Join("projects", "repo", convX+".jsonl")
-	for _, c := range []struct{ name, body string }{
-		{"identical", sidecarConv(convX)[log]},
-		{"different", "other\n"},
+	for _, c := range []struct {
+		name, body string
+		times      int // how often the file appears
+	}{
+		{"identical", sidecarConv(convX)[log], 1},
+		{"different", "other\n", 1},
+		{"different again", "other\n", 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src, dst := t.TempDir(), t.TempDir()
@@ -247,25 +402,45 @@ func TestCopyConvNeverReplacesAFileThatAppears(t *testing.T) {
 			}
 			orig := beforePublish
 			t.Cleanup(func() { beforePublish = orig })
+			n := 0
 			beforePublish = func(to string) {
-				if to == filepath.Join(dst, log) {
+				if to == filepath.Join(dst, log) && n < c.times {
+					n++
 					writeConv(t, dst, convFiles{log: c.body}, nil)
 				}
 			}
 			undo, err := cp.run()
-			if c.name == "different" {
+			switch c.name {
+			case "different again":
 				if !errors.Is(err, ErrMoveConflict) {
 					t.Fatalf("run err = %v, want ErrMoveConflict", err)
 				}
-			} else {
+				if got := tree(t, dst)[log]; got != c.body {
+					t.Errorf("target %s = %q, want the file that appeared, as it was", log, got)
+				}
+				return
+			case "different":
 				if err != nil {
 					t.Fatalf("run: %v", err)
 				}
+				if got := asideFiles(t, dst, cp)[log]; got != c.body {
+					t.Errorf("aside %s = %q, want the file that appeared", log, got)
+				}
+				if got := tree(t, dst)[log]; got != sidecarConv(convX)[log] {
+					t.Errorf("target %s = %q, want the source's", log, got)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("run: %v", err)
+				}
+				if cp.asided != 0 {
+					t.Errorf("asided = %d, want 0", cp.asided)
+				}
 				undo()
-			}
-			want := map[string]string{"projects": "/", "projects/repo": "/", log: c.body}
-			if got := tree(t, dst); !mapsEqual(got, want) {
-				t.Errorf("target = %v, want only the file that appeared, as it was: %v", got, want)
+				want := map[string]string{"projects": "/", "projects/repo": "/", log: c.body}
+				if got := tree(t, dst); !mapsEqual(got, want) {
+					t.Errorf("target = %v, want only the file that appeared, as it was: %v", got, want)
+				}
 			}
 		})
 	}
@@ -424,39 +599,36 @@ func TestMoveKeepsTheTitleOfTheSessionID(t *testing.T) {
 	}
 }
 
-// A conflict that appears while the session stops is still refused: nothing
-// is launched or overwritten, and the Store keeps A.
-func TestMoveConflictAfterTheStop(t *testing.T) {
-	m, fst, h := moveSetup(t)
+// A different copy that appears while the session stops is moved aside like
+// any other; the Store keeps A until the launch.
+func TestMoveAsideAfterTheStop(t *testing.T) {
+	m, _, h := moveSetup(t)
 	log := filepath.Join("projects", "repo", idA+".jsonl")
 	fs := &fakeScreen{created: []string{"test-rc-private-" + idA}}
 	fs.onKill = func() { writeConv(t, h.work, convFiles{log: "other\n"}, nil) }
 	withFakeScreen(t, fs)
-	if _, err := m.RestartIn(idA, "", "work"); !errors.Is(err, ErrMoveConflict) {
-		t.Fatalf("err = %v, want ErrMoveConflict", err)
+	s, err := m.RestartIn(idA, "", "work")
+	if err != nil {
+		t.Fatalf("err = %v, want the move to succeed", err)
 	}
-	if len(fs.killed) != 1 || len(fs.launches) != 0 || fst.stored[idA] != "private" {
-		t.Errorf("killed %v, launched %v, stored %q; want stopped, nothing launched, private kept",
-			fs.killed, fs.launches, fst.stored[idA])
+	if len(fs.launches) != 1 || s.MovedAside != 1 {
+		t.Errorf("launched %v, moved aside %d; want one launch and one file aside", fs.launches, s.MovedAside)
 	}
-	if got := tree(t, h.work); !mapsEqual(got, map[string]string{"projects": "/", "projects/repo": "/", log: "other\n"}) {
-		t.Errorf("work = %v, want only the conflicting file", got)
+	if got := tree(t, h.work)[log]; got != sidecarConv(idA)[log] {
+		t.Errorf("work %s = %q, want the source's", log, got)
+	}
+	if got := tree(t, s.AsideDir)[log]; got != "other\n" {
+		t.Errorf("aside %s = %q, want the old file", log, got)
 	}
 }
 
-// A conflict found only when a file is put in place reads as one too: API
-// clients tell it by the sentinel at the start of the text. The text names
-// no profile dir.
-func TestMoveConflictAtPublish(t *testing.T) {
+// A move whose aside dir cannot be made fails as a conflict: API clients tell
+// it by the sentinel at the start of the text. The text names no profile dir.
+func TestMoveConflictWhenAsideFails(t *testing.T) {
 	m, fst, h := moveSetup(t)
 	log := filepath.Join("projects", "repo", idA+".jsonl")
-	orig := beforePublish
-	t.Cleanup(func() { beforePublish = orig })
-	beforePublish = func(to string) {
-		if to == filepath.Join(h.work, log) {
-			writeConv(t, h.work, convFiles{log: "other\n"}, nil)
-		}
-	}
+	writeConv(t, h.work, convFiles{log: "other\n", "crctl-aside": "in the way\n"}, nil)
+	before := tree(t, h.work)
 	fs := &fakeScreen{}
 	withFakeScreen(t, fs)
 	_, err := m.ResumeIn(idA, "", "work")
@@ -469,8 +641,8 @@ func TestMoveConflictAtPublish(t *testing.T) {
 	if len(fs.launches) != 0 || fst.stored[idA] != "private" {
 		t.Errorf("launched %v, stored %q; want nothing launched, private kept", fs.launches, fst.stored[idA])
 	}
-	if got := tree(t, h.work); !mapsEqual(got, map[string]string{"projects": "/", "projects/repo": "/", log: "other\n"}) {
-		t.Errorf("work = %v, want only the file that appeared", got)
+	if got := tree(t, h.work); !mapsEqual(got, before) {
+		t.Errorf("work = %v, want it unchanged", got)
 	}
 }
 
@@ -549,17 +721,20 @@ func TestMoveRefusals(t *testing.T) {
 				fs.created = []string{"test-rc-private-" + idA}
 			}
 			withFakeScreen(t, fs)
-			writeConv(t, h.work, convFiles{filepath.Join("projects", "repo", idA+".jsonl"): "other\n"}, nil)
-			before := tree(t, h.work)
-			if _, err := m.RestartIn(idA, "", "work"); !errors.Is(err, ErrMoveConflict) {
-				t.Fatalf("err = %v, want ErrMoveConflict", err)
+			log := filepath.Join("projects", "repo", idA+".jsonl")
+			writeConv(t, h.work, convFiles{log: "other\n"}, nil)
+			s, err := m.RestartIn(idA, "", "work")
+			if err != nil {
+				t.Fatalf("err = %v, want the old copy moved aside", err)
 			}
-			if len(fs.killed)+len(fs.launches) != 0 || fst.stored[idA] != "private" {
-				t.Errorf("killed %v, launched %v, stored %q; want the session left alone in private",
-					fs.killed, fs.launches, fst.stored[idA])
+			if len(fs.launches) != 1 || fst.stored[idA] != "work" {
+				t.Errorf("launched %v, stored %q; want it moved to work", fs.launches, fst.stored[idA])
 			}
-			if got := tree(t, h.work); !mapsEqual(got, before) {
-				t.Errorf("work = %v, want it unchanged", got)
+			if got := tree(t, h.work)[log]; got != sidecarConv(idA)[log] {
+				t.Errorf("work %s = %q, want the source's", log, got)
+			}
+			if s.MovedAside != 1 || tree(t, s.AsideDir)[log] != "other\n" {
+				t.Errorf("moved aside %d into %q; want the old file there", s.MovedAside, s.AsideDir)
 			}
 		})
 	}
@@ -579,11 +754,14 @@ func TestMoveAcceptsAnIdenticalCopy(t *testing.T) {
 }
 
 func TestFailedMoveLaunch(t *testing.T) {
-	for _, pre := range []string{"empty target", "identical copy in the target"} {
+	for _, pre := range []string{"empty target", "identical copy in the target", "different copy in the target"} {
 		t.Run(pre, func(t *testing.T) {
 			m, fst, h := moveSetup(t)
-			if pre != "empty target" {
+			switch pre {
+			case "identical copy in the target":
 				writeConv(t, h.work, sidecarConv(idA), nil)
+			case "different copy in the target":
+				writeConv(t, h.work, convFiles{filepath.Join("projects", "repo", idA+".jsonl"): "other\n"}, nil)
 			}
 			before, private := tree(t, h.work), tree(t, h.private)
 			fs := &fakeScreen{failCreate: true}

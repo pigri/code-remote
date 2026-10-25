@@ -419,8 +419,8 @@ func profileErr(err error) error {
 		return fmt.Errorf("%w\n  this API server cannot move a session to another profile; upgrade the API server "+
 			"to move it, or leave out --profile to keep it in its own profile", err)
 	case errors.Is(err, session.ErrMoveConflict):
-		return fmt.Errorf("%w\n  nothing was overwritten; move that copy aside in the target profile's "+
-			"projects dir, then run this again", err)
+		return fmt.Errorf("%w\n  nothing was overwritten; the target profile's copy could not be moved aside "+
+			"(is its dir writable?). An API server from before this change refuses instead: upgrade it", err)
 	case errors.Is(err, session.ErrInvalidProfile):
 		return fmt.Errorf("%w\n  the profiles are the names in CLAUDE_REMOTE_PROFILES (the API server's, "+
 			"in remote mode); without it the only one is \"default\"", err)
@@ -554,6 +554,7 @@ func resume(be backend, args []string) error {
 		return profileErr(err)
 	}
 	fmt.Printf("resumed %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	asideNote(s)
 	trustHint(s)
 	return nil
 }
@@ -572,8 +573,22 @@ func restart(be backend, args []string) error {
 		return profileErr(err)
 	}
 	fmt.Printf("restarted %s\n  attach: screen -r %s\n", s.ID, s.Screen)
+	asideNote(s)
 	trustHint(s)
 	return nil
+}
+
+// asideNote tells the user when a move to another profile set files of the
+// target's older copy aside instead of overwriting them.
+func asideNote(s session.Session) {
+	if s.MovedAside == 0 {
+		return
+	}
+	noun := "files"
+	if s.MovedAside == 1 {
+		noun = "file"
+	}
+	fmt.Printf("  moved aside %d %s to %s\n", s.MovedAside, noun, s.AsideDir)
 }
 
 // trustHint tells the user when a session was launched into a folder claude

@@ -456,10 +456,9 @@ func readLaunchBody(w http.ResponseWriter, r *http.Request) (body launchBody, ok
 }
 
 // profileStatus maps the profile errors of ResumeIn and RestartIn to a
-// status: an unknown profile is a bad request. A move that would overwrite a
-// different copy of the conversation in the target profile conflicts with
-// what is there: the request is valid, and succeeds once that copy is moved
-// aside. 0 for any other error.
+// status: an unknown profile is a bad request. A move whose target copy of the
+// conversation cannot be moved aside conflicts with what is there. 0 for any
+// other error.
 func profileStatus(err error) int {
 	switch {
 	case errors.Is(err, session.ErrInvalidProfile):
