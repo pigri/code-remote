@@ -238,79 +238,130 @@ func fileCount(p string) int {
 	return n
 }
 
+// renameIfAbsent is renameNoReplace for a filesystem without the kernel's
+// flag; it can lose a race that the flag cannot.
+func renameIfAbsent(from, to string) error {
+	if _, err := os.Lstat(to); err == nil {
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: fs.ErrExist}
+	}
+	return os.Rename(from, to)
+}
+
+// moveAside renames from into the aside dir as rel, never onto an existing
+// path: a taken name gets a numeric suffix. A from that is gone has nothing to
+// move, and is reported as not moved. The dir is made on first use.
+func (c *convCopy) moveAside(rel, from string) (moved *asideMove, err error) {
+	fail := func(err error) error {
+		return fmt.Errorf("%w: cannot move %s aside: %v", ErrMoveConflict, rel, reason(err))
+	}
+	if c.asideDir == "" {
+		d, err := c.makeAsideDir()
+		if err != nil {
+			return nil, fail(err)
+		}
+		c.asideDir = d
+	}
+	to := filepath.Join(c.asideDir, rel)
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return nil, fail(err)
+	}
+	n := fileCount(from)
+	for i := 0; ; i++ {
+		dst := to
+		if i > 0 {
+			dst += "." + strconv.Itoa(i)
+		}
+		err := renameNoReplace(from, dst)
+		switch {
+		case err == nil:
+			c.asided += n
+			return &asideMove{from, dst}, nil
+		case errors.Is(err, fs.ErrNotExist):
+			return nil, nil
+		case !errors.Is(err, fs.ErrExist) || i >= 100:
+			return nil, fail(err)
+		}
+	}
+}
+
+// tidyAside removes the empty dirs of the aside dir, and the aside dir and
+// crctl-aside when they end up empty. It returns the aside dir's path
+// relative to the profile if something is left in it, else "".
+func (c *convCopy) tidyAside() string {
+	if c.asideDir == "" {
+		return ""
+	}
+	var dirs []string
+	_ = filepath.WalkDir(c.asideDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			dirs = append(dirs, p)
+		}
+		return nil
+	})
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i])
+	}
+	_ = os.Remove(filepath.Dir(c.asideDir))
+	if _, err := os.Lstat(c.asideDir); err != nil {
+		c.asideDir = ""
+		return ""
+	}
+	rel, _ := filepath.Rel(c.root, c.asideDir)
+	return rel
+}
+
 // run carries out the copy. What is displaced (see planCopy) is first renamed
 // into a fresh dir under the target profile, so nothing is overwritten or
 // deleted; if that cannot be done the error is ErrMoveConflict. An entry that
 // appeared in the target since the plan is never replaced or claimed: a dir is
 // used, a file must have the same content (see copyFile) or is displaced, once.
-// On failure run removes what it created, puts back what it moved aside and
-// returns the error; on success, undo does that.
+// On failure run removes what it created and puts back what it moved aside,
+// then returns the error, naming the aside dir if something could not be put
+// back; on success, undo does the same.
 func (c *convCopy) run() (undo func(), err error) {
-	var made []string
+	var madeFiles, madeDirs []string
 	var moved []asideMove
-	remove := func() {
-		for i := len(made) - 1; i >= 0; i-- {
-			_ = os.Remove(made[i])
+	// remove undoes run in order: the files it made, then its dirs (a dir
+	// may stand where a displaced file was), then the displaced entries.
+	remove := func() string {
+		for i := len(madeFiles) - 1; i >= 0; i-- {
+			_ = os.Remove(madeFiles[i])
+		}
+		for i := len(madeDirs) - 1; i >= 0; i-- {
+			_ = os.Remove(madeDirs[i])
 		}
 		for i := len(moved) - 1; i >= 0; i-- {
-			// Rename replaces a file, so only put it back where nothing is.
-			if _, err := os.Lstat(moved[i].from); missing(err) {
-				_ = os.Rename(moved[i].to, moved[i].from)
-			}
+			_ = renameNoReplace(moved[i].to, moved[i].from)
 		}
-		// Empty aside dirs, innermost first; a non-empty one ends the climb.
-		for _, m := range append(moved, asideMove{to: c.asideDir}) {
-			for p := filepath.Dir(m.to); m.to != "" && len(p) > len(c.root); p = filepath.Dir(p) {
-				if os.Remove(p) != nil {
-					break
-				}
-			}
+		return c.tidyAside()
+	}
+	fail := func(err error) (func(), error) {
+		if left := remove(); left != "" {
+			err = fmt.Errorf("%w (some files could not be put back; they are in %s)", err, left)
 		}
-		if c.asideDir != "" {
-			_ = os.Remove(c.asideDir)
-			_ = os.Remove(filepath.Dir(c.asideDir))
-		}
+		return nil, err
 	}
 	displace := func(rel, from string) error {
-		fail := func(err error) error {
-			return fmt.Errorf("%w: cannot move %s aside: %v", ErrMoveConflict, rel, reason(err))
+		m, err := c.moveAside(rel, from)
+		if m != nil {
+			moved = append(moved, *m)
 		}
-		if c.asideDir == "" {
-			d, err := c.makeAsideDir()
-			if err != nil {
-				return fail(err)
-			}
-			c.asideDir = d
-		}
-		to := filepath.Join(c.asideDir, rel)
-		if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
-			return fail(err)
-		}
-		n := fileCount(from)
-		if err := os.Rename(from, to); err != nil {
-			return fail(err)
-		}
-		moved = append(moved, asideMove{from, to})
-		c.asided += n
-		return nil
+		return err
 	}
 	for _, d := range c.displace {
 		if err := displace(d.rel, d.dst); err != nil {
-			remove()
-			return nil, err
+			return fail(err)
 		}
 	}
 	for _, d := range c.dirs {
 		if err := os.Mkdir(d.dst, d.mode); errors.Is(err, fs.ErrExist) {
 			continue
 		} else if err != nil {
-			remove()
-			return nil, err
+			return fail(err)
 		}
-		made = append(made, d.dst)
+		madeDirs = append(madeDirs, d.dst)
 		if err := os.Chmod(d.dst, d.mode); err != nil {
-			remove()
-			return nil, err
+			return fail(err)
 		}
 	}
 	for _, f := range c.files {
@@ -324,14 +375,14 @@ func (c *convCopy) run() (undo func(), err error) {
 			}
 		}
 		if err != nil {
-			remove()
-			return nil, err
+			return fail(err)
 		}
 		if created {
-			made = append(made, f.dst)
+			madeFiles = append(madeFiles, f.dst)
 		}
 	}
-	return remove, nil
+	c.tidyAside()
+	return func() { remove() }, nil
 }
 
 // beforePublish runs just before copyFile puts a file in place; a test seam.
