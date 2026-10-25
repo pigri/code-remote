@@ -418,6 +418,13 @@ func TestCopyConvNeverReplacesAFileThatAppears(t *testing.T) {
 				if got := tree(t, dst)[log]; got != c.body {
 					t.Errorf("target %s = %q, want the file that appeared, as it was", log, got)
 				}
+				if got := tree(t, cp.asideDir)[log]; got != c.body {
+					t.Errorf("aside %s = %q, want the first file that appeared", log, got)
+				}
+				rel, _ := filepath.Rel(dst, cp.asideDir)
+				if !strings.Contains(err.Error(), rel) || strings.Contains(err.Error(), dst) {
+					t.Errorf("err = %v, want it to name %s, not a profile dir", err, rel)
+				}
 				return
 			case "different":
 				if err != nil {
@@ -443,6 +450,100 @@ func TestCopyConvNeverReplacesAFileThatAppears(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A file that differs at the plan and appears again before the copy: both
+// copies end up in the aside dir, neither replaced.
+func TestCopyConvKeepsBothAsideCopies(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	writeConv(t, src, sidecarConv(convX), nil)
+	writeConv(t, dst, convFiles{log: "planned\n"}, nil)
+	cp, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := beforePublish
+	t.Cleanup(func() { beforePublish = orig })
+	once := false
+	beforePublish = func(to string) {
+		if to == filepath.Join(dst, log) && !once {
+			once = true
+			writeConv(t, dst, convFiles{log: "racer\n"}, nil)
+		}
+	}
+	if _, err := cp.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var bodies []string
+	for rel, body := range asideFiles(t, dst, cp) {
+		if body != "/" && strings.HasPrefix(rel, log) {
+			bodies = append(bodies, body)
+		}
+	}
+	slices.Sort(bodies)
+	if !slices.Equal(bodies, []string{"planned\n", "racer\n"}) || cp.asided != 2 {
+		t.Errorf("aside copies %q, asided %d; want planned and racer, 2", bodies, cp.asided)
+	}
+}
+
+// A planned displacement whose file is gone by the time of the run has
+// nothing to move aside.
+func TestCopyConvSkipsADisplacementThatVanished(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	writeConv(t, src, sidecarConv(convX), nil)
+	writeConv(t, dst, convFiles{log: "other\n"}, nil)
+	cp, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dst, log)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cp.run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if cp.asided != 0 || cp.asideDir != "" {
+		t.Errorf("asided %d into %q, want nothing", cp.asided, cp.asideDir)
+	}
+	if got, want := tree(t, dst), tree(t, src); !mapsEqual(got, want) {
+		t.Errorf("target = %v, want the source's files (and no aside dir): %v", got, want)
+	}
+}
+
+// A displacement that fails after another succeeded puts the first back and
+// leaves no aside dir.
+func TestCopyConvRollsBackAPartialAside(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root renames out of a read-only dir")
+	}
+	src, dst := t.TempDir(), t.TempDir()
+	log := filepath.Join("projects", "repo", convX+".jsonl")
+	side := filepath.Join("projects", "repo", convX, "tool-results", "a.txt")
+	writeConv(t, src, sidecarConv(convX), nil)
+	writeConv(t, dst, convFiles{log: "old log\n", side: "old a\n"}, nil)
+	before := tree(t, dst)
+	cp, err := planCopy(src, dst, "repo", convX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The sidecar file is displaced first; the transcript's parent refuses
+	// the second rename.
+	repo := filepath.Join(dst, "projects", "repo")
+	if err := os.Chmod(repo, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	_, err = cp.run()
+	if err := os.Chmod(repo, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(err, ErrMoveConflict) {
+		t.Fatalf("run err = %v, want ErrMoveConflict", err)
+	}
+	if got := tree(t, dst); !mapsEqual(got, before) {
+		t.Errorf("target = %v, want it as before: %v", got, before)
 	}
 }
 
