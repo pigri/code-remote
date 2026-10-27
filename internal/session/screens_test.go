@@ -167,8 +167,8 @@ func TestSingleProfileNamesAreUnchanged(t *testing.T) {
 	withFakeScreen(t, fs)
 	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
 
-	if got, _ := m.List(); len(got) != 1 || got[0].ID != idA {
-		t.Fatalf("List = %+v, want only %s: one profile has no profile-named screens", got, idA)
+	if got, _ := m.List(); len(got) != 2 {
+		t.Fatalf("List = %+v, want both %s and %s: a profile-named screen from before profiles were disabled is still visible", got, idA, idB)
 	}
 	s, err := m.Create("", "")
 	if err != nil {
@@ -254,6 +254,58 @@ func TestRelaunchUsesTheTargetProfileName(t *testing.T) {
 	})
 }
 
+// A screen launched under a profile that is no longer configured (profiles
+// disabled) is still listed as running: its SCREEN is alive, and hiding it
+// makes ListAll show it as Stopped while its process is up.
+func TestOrphanedProfileScreenIsListed(t *testing.T) {
+	fastStop(t)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+	set, err := profile.FromEnv("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	upgradeHome(t, home, idA, "", "")
+	orphan := "test-rc-private-" + idA
+
+	t.Run("listed as running", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{orphan}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
+		got, _ := m.List()
+		if len(got) != 1 || got[0].ID != idA {
+			t.Fatalf("List = %+v, want %s listed as running despite its profile being gone", got, idA)
+		}
+		if got[0].Status != "Detached" {
+			t.Errorf("status = %q, want Detached", got[0].Status)
+		}
+	})
+
+	t.Run("restart kills the orphan and relaunches", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{orphan}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
+		s, err := m.Restart(idA)
+		if err != nil {
+			t.Fatalf("Restart: %v", err)
+		}
+		want := "test-rc-" + idA
+		if !slices.Equal(fs.killed, []string{orphan}) || len(fs.launches) != 1 || launchedName(fs.launches[0]) != want || s.Screen != want {
+			t.Errorf("killed %v, launched %v as %+v; want %s killed and %s launched", fs.killed, fs.launches, s, orphan, want)
+		}
+	})
+
+	t.Run("resume blocks", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{orphan}}
+		withFakeScreen(t, fs)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
+		_, err := m.Resume(idA)
+		if !errors.Is(err, ErrAlreadyRunning) {
+			t.Errorf("Resume = %v, want ErrAlreadyRunning", err)
+		}
+	})
+}
+
 // Names match [a-z0-9_-]+ and the prefix may hold "-" too, so a name is split
 // by the configured prefix and the fixed-length id at its end, never at a "-".
 func TestHyphenatedProfileNames(t *testing.T) {
@@ -303,16 +355,6 @@ func TestHyphenatedProfileNames(t *testing.T) {
 // relaunch MUST NOT start a second claude next to it.
 func TestNoRelaunchNextToAnUnparsedScreen(t *testing.T) {
 	fastStop(t)
-	single := func(t *testing.T) *Manager {
-		t.Setenv("CLAUDE_REMOTE_PROFILES", "")
-		set, err := profile.FromEnv("", "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		home := t.TempDir()
-		upgradeHome(t, home, idA, "", "")
-		return &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
-	}
 	renamed := func(t *testing.T) *Manager {
 		set, h := twoProfiles(t, "")
 		upgradeHome(t, h.work, idA, "", "")
@@ -323,7 +365,6 @@ func TestNoRelaunchNextToAnUnparsedScreen(t *testing.T) {
 		manager func(*testing.T) *Manager
 		screen  string
 	}{
-		{"one profile, a profile-named screen", single, "test-rc-work-" + idA},
 		{"a profile no longer configured", renamed, "test-rc-old-" + idA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -346,9 +387,16 @@ func TestNoRelaunchNextToAnUnparsedScreen(t *testing.T) {
 	}
 
 	t.Run("other ids and foreign screens do not count", func(t *testing.T) {
+		t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+		set, err := profile.FromEnv("", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := t.TempDir()
+		upgradeHome(t, home, idA, "", "")
 		fs := &fakeScreen{created: []string{"test-rc-work-" + idB, "other-rc-" + idA, "test-rcx-" + idA}}
 		withFakeScreen(t, fs)
-		m := single(t)
+		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Profiles: set}
 		if _, err := m.Resume(idA); err != nil || len(fs.launches) != 1 {
 			t.Errorf("Resume = %v, launched %v; want one launch", err, fs.launches)
 		}

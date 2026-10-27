@@ -192,8 +192,10 @@ func (m *Manager) launchName(p profile.Profile, id string) string {
 }
 
 // parseName is the session id a screen called name runs, and the profile the
-// name carries: "" for <Prefix>-<id>. With CLAUDE_REMOTE_PROFILES it is also
-// <Prefix>-<profile>-<id> for a configured profile. The id is the name's
+// name carries: "" for <Prefix>-<id>, else <Prefix>-<profile>-<id>. With
+// CLAUDE_REMOTE_PROFILES the profile must be a configured one; without it any
+// profile segment is accepted, so a screen launched when profiles were
+// configured stays visible after they are disabled. The id is the name's
 // fixed-length tail, so a "-" in the prefix or a profile name splits nothing.
 // ok is false for a name that is not one of ours.
 func (m *Manager) parseName(name string) (id, named string, ok bool) {
@@ -203,16 +205,19 @@ func (m *Manager) parseName(name string) (id, named string, ok bool) {
 		return "", "", false
 	case m.ValidID(rest):
 		return rest, "", true
-	case !m.Profiles.Multi():
-		return "", "", false
 	}
 	cut := len(rest) - len("00000000-0000-0000-0000-000000000000") - 1
 	if cut < 1 || rest[cut] != '-' {
 		return "", "", false
 	}
 	named, id = rest[:cut], rest[cut+1:]
-	if _, known := m.Profiles.Get(named); !known || !m.ValidID(id) {
+	if !m.ValidID(id) {
 		return "", "", false
+	}
+	if m.Profiles.Multi() {
+		if _, known := m.Profiles.Get(named); !known {
+			return "", "", false
+		}
 	}
 	return id, named, true
 }
@@ -877,8 +882,8 @@ func (m *Manager) screenLS() string {
 // running returns session id, with no profile, if a screen of it runs: it
 // reads screen names only, enough to tell whether a session runs. Any screen
 // <Prefix>-...-<id> counts, even one parseName rejects (a profile that is not
-// configured here, or a profile name with one profile): a launch next to it
-// would run a second claude in the conversation.
+// configured in multi-profile mode): a launch next to it would run a second
+// claude in the conversation.
 func (m *Manager) running(id string) (Session, bool) {
 	return find(m.screensOf(id), id)
 }
