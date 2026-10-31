@@ -42,6 +42,7 @@ type Session struct {
 
 	unrecorded bool     // parseSessions found no profile for it in the Store
 	guessed    bool     // its profile is only a guess (see resolveProfile)
+	unresolved bool     // the Store records a profile that is not configured (see resolveProfile)
 	named      string   // the profile its screen name carries; "" for <prefix>-<id>
 	screens    []string // every screen parseScreens found for it, as <pid>.<name>
 }
@@ -382,19 +383,29 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 		return running, nil
 	}
 	// Each stopped session's profile is resolved once, here or below.
-	resolved := map[string]profile.Profile{}
-	profileOf := func(id string) profile.Profile {
-		p, ok := resolved[id]
+	type resolution struct {
+		p          profile.Profile
+		unresolved bool
+	}
+	resolved := map[string]resolution{}
+	resolve := func(id string) resolution {
+		r, ok := resolved[id]
 		if !ok {
-			p = m.profileOf(id)
-			resolved[id] = p
+			r.p, _, _, r.unresolved = m.resolveProfile(id, "")
+			resolved[id] = r
 		}
-		return p
+		return r
 	}
 	// A stopped session is resumable when the conversation it was last in
 	// (storedConv; the session id itself unless it drifted) still has a log.
+	// One whose recorded profile is not configured has no dir to look in; it
+	// stays listed, and resuming it is refused with the reason.
 	resumable := func(id string) bool {
-		home := profileOf(id).Dir
+		r := resolve(id)
+		if r.unresolved {
+			return true
+		}
+		home := r.p.Dir
 		return logIn(home, m.storedConv(home, id)) != ""
 	}
 	stopped, err := store.StoppedSessions(running, resumable)
@@ -403,7 +414,7 @@ func (m *Manager) ListAll(store StoppedLister) ([]Session, error) {
 	}
 	for i := range stopped {
 		id := stopped[i].ID
-		p := profileOf(id)
+		p := resolve(id).p
 		conv := m.storedConv(p.Dir, id)
 		stopped[i].Status = "Stopped"
 		stopped[i].Profile = p.Name
@@ -601,7 +612,10 @@ func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	if !m.ValidID(id) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
-	own := m.profileOf(id)
+	own, err := m.ownProfile(id)
+	if err != nil {
+		return Session{}, err
+	}
 	if prof != "" && !m.hasConv(own, id) {
 		// Not found comes before any check of prof, as it would without one.
 		if _, running := m.running(id); !running {
@@ -963,8 +977,8 @@ func (m *Manager) parseSessions(out string) []Session {
 	sessions := m.parseScreens(out)
 	for i := range sessions {
 		s := &sessions[i]
-		p, unrecorded, guessed := m.resolveProfile(s.ID, s.named)
-		s.Profile, s.unrecorded, s.guessed = p.Name, unrecorded, guessed
+		p, unrecorded, guessed, unresolved := m.resolveProfile(s.ID, s.named)
+		s.Profile, s.unrecorded, s.guessed, s.unresolved = p.Name, unrecorded, guessed, unresolved
 		s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 	}
 	return sessions

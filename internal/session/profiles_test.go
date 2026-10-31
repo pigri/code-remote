@@ -293,19 +293,19 @@ func TestRecordWritesTheResolvedProfile(t *testing.T) {
 		}
 	})
 
-	t.Run("single profile keeps a stored profile across a restart", func(t *testing.T) {
+	t.Run("single profile refuses a restart of a session recorded elsewhere", func(t *testing.T) {
 		fastStop(t)
 		home := t.TempDir()
 		upgradeHome(t, home, idA, "", "")
 		fs, fst := &fakeScreen{created: []string{"test-rc-" + idA}}, &fakeStore{stored: map[string]string{idA: "private"}}
 		withFakeScreen(t, fs)
 		m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home, Store: fst}
-		if _, err := m.RestartIn(idA, "", ""); err != nil {
-			t.Fatal(err)
+		if _, err := m.RestartIn(idA, "", ""); !errors.Is(err, ErrInvalidProfile) {
+			t.Errorf("RestartIn err = %v, want ErrInvalidProfile", err)
 		}
-		if len(fs.launches) != 1 || !slices.Equal(fst.profiles, []string{""}) || fst.stored[idA] != "private" {
-			t.Errorf("launches %d, recorded %q, stored %q; want one launch recording no profile, private kept",
-				len(fs.launches), fst.profiles, fst.stored[idA])
+		if len(fs.launches) != 0 || len(fs.killed) != 0 || len(fst.profiles) != 0 || fst.stored[idA] != "private" {
+			t.Errorf("launches %d, killed %d, recorded %q, stored %q; want nothing touched, private kept",
+				len(fs.launches), len(fs.killed), fst.profiles, fst.stored[idA])
 		}
 	})
 }
@@ -1426,6 +1426,10 @@ func TestRecordedProfileNotConfigured(t *testing.T) {
 		if p := m.profileOf(idA); p.Dir == home {
 			t.Errorf("profileOf = %+v, want a profile that is not ClaudeHome %q", p, home)
 		}
+		p, unrecorded, _, unresolved := m.resolveProfile(idA, "")
+		if p.Name != "private" || unrecorded || !unresolved {
+			t.Errorf("resolveProfile = %+v unrecorded=%v unresolved=%v, want private, recorded, unresolved", p, unrecorded, unresolved)
+		}
 	})
 
 	t.Run("resume and restart refuse, naming the profile", func(t *testing.T) {
@@ -1482,16 +1486,16 @@ func TestNothingRecordedKeepsTheFallbackOrder(t *testing.T) {
 	t.Run("single profile: ClaudeHome", func(t *testing.T) {
 		home := t.TempDir()
 		m := &Manager{ClaudeHome: home, Store: &fakeStore{}}
-		p, unrecorded, guessed := m.resolveProfile(idA, "")
-		if p.Dir != home || unrecorded || guessed {
-			t.Errorf("resolveProfile = %+v unrecorded=%v guessed=%v, want ClaudeHome, neither unrecorded nor guessed", p, unrecorded, guessed)
+		p, unrecorded, guessed, unresolved := m.resolveProfile(idA, "")
+		if p.Dir != home || unrecorded || guessed || unresolved {
+			t.Errorf("resolveProfile = %+v unrecorded=%v guessed=%v unresolved=%v, want ClaudeHome and no flag set", p, unrecorded, guessed, unresolved)
 		}
 	})
 	t.Run("screen name before transcript", func(t *testing.T) {
 		set, h := twoProfiles(t, "")
 		writeTitledLog(t, h.work, idA, "t")
 		m := &Manager{Profiles: set, Store: &fakeStore{}}
-		if p, _, _ := m.resolveProfile(idA, "private"); p.Name != "private" {
+		if p, _, _, _ := m.resolveProfile(idA, "private"); p.Name != "private" {
 			t.Errorf("profile = %q, want private from the screen name", p.Name)
 		}
 	})
