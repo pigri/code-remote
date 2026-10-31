@@ -596,3 +596,24 @@ func TestLoadTildeUsesUserHome(t *testing.T) {
 		t.Errorf("w dir = %q, want %q", p.Dir, filepath.Join(h, ".c"))
 	}
 }
+
+func TestLoadIgnoresARelativeConfigPath(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	if err := os.MkdirAll(filepath.Join(cwd, ".config", "crctl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".config", "crctl", "config"), []byte("CLAUDE_REMOTE_PROFILES=x=/planted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load("/fallback", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Multi() || s.Default().Dir != "/fallback" {
+		t.Errorf("Load = %v, default %+v; want the single default at /fallback, not the working directory's file", s.Names(), s.Default())
+	}
+}

@@ -103,7 +103,8 @@ func FromEnv(fallbackDir, userHome string) (Set, error) {
 // CLAUDE_REMOTE_PROFILES and CLAUDE_REMOTE_DEFAULT_PROFILE from the
 // environment and, for each one that is unset or empty, from the config file
 // $XDG_CONFIG_HOME/crctl/config (<userHome>/.config/crctl/config when
-// XDG_CONFIG_HOME is unset, empty or not absolute). Per key the precedence is
+// XDG_CONFIG_HOME is unset, empty or not absolute; no file when neither is
+// absolute). Per key the precedence is
 // the environment, then the config file, then nothing; with no profiles from
 // either, there is one profile "default" at fallbackDir, as in FromEnv.
 //
@@ -150,16 +151,24 @@ func build(fallbackDir, userHome string, spec, def source) (Set, error) {
 	return s, nil
 }
 
+// configPath is the config file's path, or "" when there is no absolute one:
+// a relative path would read a file from the working directory.
 func configPath(userHome string) string {
 	if x := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(x) {
 		return filepath.Join(x, "crctl", "config")
+	}
+	if !filepath.IsAbs(userHome) {
+		return ""
 	}
 	return filepath.Join(userHome, ".config", "crctl", "config")
 }
 
 // readConfig returns the KEY=value pairs in the file at path, none when it
-// does not exist.
+// does not exist or path is "".
 func readConfig(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
