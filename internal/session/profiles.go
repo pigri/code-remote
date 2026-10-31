@@ -65,7 +65,8 @@ func (m *Manager) profileOf(id string) profile.Profile {
 }
 
 // ownProfile is profileOf for a session about to be acted on: a session whose
-// recorded profile is not configured is an error naming it, not the default.
+// recorded profile is not in the set (see resolveProfile) is an error naming it,
+// not the default.
 func (m *Manager) ownProfile(id string) (profile.Profile, error) {
 	p, _, _, unresolved := m.resolveProfile(id, "")
 	if unresolved {
@@ -75,7 +76,7 @@ func (m *Manager) ownProfile(id string) (profile.Profile, error) {
 }
 
 // errUnresolved is the refusal to act on session id, which the Store records
-// under profile name, one that is not configured.
+// under profile name, one the set does not hold.
 func errUnresolved(id, name string) error {
 	return fmt.Errorf("%w: session %s is recorded under profile %q, which is not configured "+
 		"(define it in CLAUDE_REMOTE_PROFILES)", ErrInvalidProfile, id, name)
@@ -88,10 +89,13 @@ func errUnresolved(id, name string) error {
 // profile for id ("" recorded), and whether the profile is only a guess, found
 // by neither the Store, the name nor a transcript.
 //
-// unresolved is set when no profiles are configured and the Store records a
-// profile for id all the same: the session belongs to an account this
-// configuration cannot reach, so p is only that name, with no dir, and not the
-// implicit default. Listing shows it; acting on it is refused (see ownProfile).
+// unresolved is set when the set holds one profile, configured or implicit,
+// and the Store records a different one for id: the session belongs to an
+// account this configuration cannot reach, so p is only that name, with no
+// dir, and not the one profile. Listing shows it; acting on it is refused (see
+// ownProfile). The test is len(list) == 1, not !Multi(): with one explicit
+// profile the latter would fall through to returning it, which resolves a
+// removed profile to another account.
 func (m *Manager) resolveProfile(id, named string) (p profile.Profile, unrecorded, guessed, unresolved bool) {
 	list := m.profiles()
 	if ps, ok := m.Store.(profileStore); ok {
