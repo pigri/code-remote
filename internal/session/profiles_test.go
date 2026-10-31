@@ -1432,23 +1432,23 @@ func TestRecordedProfileNotConfigured(t *testing.T) {
 		}
 	})
 
-	t.Run("resume and restart refuse, naming the profile", func(t *testing.T) {
-		fs := &fakeScreen{}
-		m, _ := storeRecordsUnconfigured(t, fs)
-		for name, act := range map[string]func() error{
-			"resume":  func() error { _, err := m.ResumeIn(idA, "", ""); return err },
-			"restart": func() error { _, err := m.RestartIn(idA, "", ""); return err },
-			"move":    func() error { _, err := m.ResumeIn(idA, "", "default"); return err },
-		} {
-			err := act()
+	for name, act := range map[string]func(*Manager) error{
+		"resume":  func(m *Manager) error { _, err := m.ResumeIn(idA, "", ""); return err },
+		"restart": func(m *Manager) error { _, err := m.RestartIn(idA, "", ""); return err },
+		"move":    func(m *Manager) error { _, err := m.ResumeIn(idA, "", "default"); return err },
+	} {
+		t.Run(name+" refuses, naming the profile", func(t *testing.T) {
+			fs := &fakeScreen{}
+			m, _ := storeRecordsUnconfigured(t, fs)
+			err := act(m)
 			if err == nil || !strings.Contains(err.Error(), `"private"`) || !strings.Contains(err.Error(), "not configured") {
-				t.Errorf("%s err = %v, want one naming the unconfigured profile \"private\"", name, err)
+				t.Errorf("err = %v, want one naming the unconfigured profile \"private\"", err)
 			}
-		}
-		if len(fs.launches) != 0 {
-			t.Errorf("launches = %v, want none", fs.launches)
-		}
-	})
+			if len(fs.launches) != 0 {
+				t.Errorf("launches = %v, want none", fs.launches)
+			}
+		})
+	}
 
 	t.Run("listing keeps the session and shows the recorded name", func(t *testing.T) {
 		m, _ := storeRecordsUnconfigured(t, &fakeScreen{created: []string{"test-rc-" + idA}})
