@@ -614,6 +614,11 @@ func (m *Manager) ResumeIn(id, dir, prof string) (Session, error) {
 	}
 	own, err := m.ownProfile(id)
 	if err != nil {
+		// A running session is reported as such even when its profile is not
+		// configured: nothing is launched for it either way.
+		if s, up := m.alreadyRunning(id); up {
+			return s, ErrAlreadyRunning
+		}
 		return Session{}, err
 	}
 	if prof != "" && !m.hasConv(own, id) {
@@ -640,6 +645,18 @@ func (m *Manager) storedCwd(id string) string {
 	return c
 }
 
+// alreadyRunning returns the live session id, and whether it is running.
+func (m *Manager) alreadyRunning(id string) (Session, bool) {
+	r, up := m.running(id)
+	if !up {
+		return Session{}, false
+	}
+	if s, ok, _ := m.get(id); ok {
+		return s, true
+	}
+	return r, true
+}
+
 // resume relaunches session id's screen, resuming conversation conv. The two
 // differ only when claude moved the session onto a new conversation id while it
 // ran (see Restart); the screen name always stays on id. The Remote Control
@@ -657,11 +674,8 @@ func (m *Manager) resume(id, conv, dir string, from, p profile.Profile) (Session
 
 	// Already running? Resuming would launch a second claude against the same
 	// session id — refuse and hand back the live session so the caller can 409.
-	if r, up := m.running(id); up {
-		if s, ok, _ := m.get(id); ok {
-			return s, ErrAlreadyRunning
-		}
-		return r, ErrAlreadyRunning
+	if s, up := m.alreadyRunning(id); up {
+		return s, ErrAlreadyRunning
 	}
 
 	// The session must exist on disk to resume. When its profile has no dir we
