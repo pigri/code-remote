@@ -1407,3 +1407,92 @@ func TestNonStringProcStartKeepsTheEntry(t *testing.T) {
 		})
 	}
 }
+
+// storeRecordsUnconfigured is a Manager with no CLAUDE_REMOTE_PROFILES, whose
+// ClaudeHome holds a log for idA, and whose Store records idA under "private".
+func storeRecordsUnconfigured(t *testing.T, fs *fakeScreen) (*Manager, string) {
+	t.Helper()
+	home := t.TempDir()
+	upgradeHome(t, home, idA, "", "")
+	withFakeScreen(t, fs)
+	m := &Manager{Prefix: "test-rc", ClaudeBin: "claude", ScreenBin: "screen", ClaudeHome: home,
+		Store: &fakeStore{stored: map[string]string{idA: "private"}}}
+	return m, home
+}
+
+func TestRecordedProfileNotConfigured(t *testing.T) {
+	t.Run("does not resolve to the implicit default", func(t *testing.T) {
+		m, home := storeRecordsUnconfigured(t, &fakeScreen{})
+		if p := m.profileOf(idA); p.Dir == home {
+			t.Errorf("profileOf = %+v, want a profile that is not ClaudeHome %q", p, home)
+		}
+	})
+
+	t.Run("resume and restart refuse, naming the profile", func(t *testing.T) {
+		fs := &fakeScreen{}
+		m, _ := storeRecordsUnconfigured(t, fs)
+		for name, act := range map[string]func() error{
+			"resume":  func() error { _, err := m.ResumeIn(idA, "", ""); return err },
+			"restart": func() error { _, err := m.RestartIn(idA, "", ""); return err },
+			"move":    func() error { _, err := m.ResumeIn(idA, "", "default"); return err },
+		} {
+			err := act()
+			if err == nil || !strings.Contains(err.Error(), `"private"`) || !strings.Contains(err.Error(), "not configured") {
+				t.Errorf("%s err = %v, want one naming the unconfigured profile \"private\"", name, err)
+			}
+		}
+		if len(fs.launches) != 0 {
+			t.Errorf("launches = %v, want none", fs.launches)
+		}
+	})
+
+	t.Run("listing keeps the session and shows the recorded name", func(t *testing.T) {
+		m, _ := storeRecordsUnconfigured(t, &fakeScreen{created: []string{"test-rc-" + idA}})
+		got, err := m.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != idA || got[0].Profile != "private" {
+			t.Errorf("List = %+v, want %s listed under private", got, idA)
+		}
+	})
+
+	t.Run("listing keeps a stopped session", func(t *testing.T) {
+		m, _ := storeRecordsUnconfigured(t, &fakeScreen{})
+		m.Store = &fakeStore{stored: map[string]string{idA: "private"}, stopped: []Session{{ID: idA}}}
+		got, err := m.ListAll(m.Store.(StoppedLister))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Profile != "private" || got[0].Status != "Stopped" {
+			t.Errorf("ListAll = %+v, want %s stopped under private", got, idA)
+		}
+	})
+}
+
+func TestRecordedProfileConfigured(t *testing.T) {
+	set, h := twoProfiles(t, "")
+	m := &Manager{Profiles: set, Store: &fakeStore{stored: map[string]string{idA: "private"}}}
+	if p := m.profileOf(idA); p.Name != "private" || p.Dir != h.private {
+		t.Errorf("profileOf = %+v, want private at %s", p, h.private)
+	}
+}
+
+func TestNothingRecordedKeepsTheFallbackOrder(t *testing.T) {
+	t.Run("single profile: ClaudeHome", func(t *testing.T) {
+		home := t.TempDir()
+		m := &Manager{ClaudeHome: home, Store: &fakeStore{}}
+		p, unrecorded, guessed := m.resolveProfile(idA, "")
+		if p.Dir != home || unrecorded || guessed {
+			t.Errorf("resolveProfile = %+v unrecorded=%v guessed=%v, want ClaudeHome, neither unrecorded nor guessed", p, unrecorded, guessed)
+		}
+	})
+	t.Run("screen name before transcript", func(t *testing.T) {
+		set, h := twoProfiles(t, "")
+		writeTitledLog(t, h.work, idA, "t")
+		m := &Manager{Profiles: set, Store: &fakeStore{}}
+		if p, _, _ := m.resolveProfile(idA, "private"); p.Name != "private" {
+			t.Errorf("profile = %q, want private from the screen name", p.Name)
+		}
+	})
+}
