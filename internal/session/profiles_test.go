@@ -1500,3 +1500,56 @@ func TestNothingRecordedKeepsTheFallbackOrder(t *testing.T) {
 		}
 	})
 }
+
+func TestRecordedProfileNotConfiguredRunning(t *testing.T) {
+	t.Run("resume of a running session reports it already running", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{"test-rc-" + idA}}
+		m, _ := storeRecordsUnconfigured(t, fs)
+		s, err := m.ResumeIn(idA, "", "")
+		if !errors.Is(err, ErrAlreadyRunning) || s.ID != idA {
+			t.Errorf("ResumeIn = %+v, %v, want session %s and ErrAlreadyRunning", s, err, idA)
+		}
+		if len(fs.launches) != 0 {
+			t.Errorf("launches = %v, want none", fs.launches)
+		}
+	})
+
+	t.Run("restart refuses, killing and launching nothing", func(t *testing.T) {
+		fs := &fakeScreen{created: []string{"test-rc-" + idA}}
+		m, _ := storeRecordsUnconfigured(t, fs)
+		_, err := m.RestartIn(idA, "", "")
+		if !errors.Is(err, ErrInvalidProfile) {
+			t.Errorf("RestartIn err = %v, want ErrInvalidProfile", err)
+		}
+		if len(fs.killed) != 0 || len(fs.launches) != 0 {
+			t.Errorf("killed=%v launches=%v, want none", fs.killed, fs.launches)
+		}
+	})
+
+	t.Run("upgrade fails the session, killing and launching nothing", func(t *testing.T) {
+		fastStop(t)
+		const oldV, newV = "2.1.285", "2.1.287"
+		fs := &fakeScreen{version: oldV, updateTo: newV, created: []string{"test-rc-" + idA}}
+		m, home := storeRecordsUnconfigured(t, fs)
+		upgradeHome(t, home, idA, oldV, "idle")
+		res, err := m.Upgrade(true, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Sessions) != 1 || res.Sessions[0].ID != idA || res.Sessions[0].Action != ActionFailed ||
+			!strings.Contains(res.Sessions[0].Reason, `"private"`) || !strings.Contains(res.Sessions[0].Reason, "not configured") {
+			t.Errorf("sessions = %+v, want %s failed, naming the unconfigured profile \"private\"", res.Sessions, idA)
+		}
+		if len(fs.killed) != 0 || len(fs.launches) != 0 {
+			t.Errorf("killed=%v launches=%v, want none", fs.killed, fs.launches)
+		}
+	})
+}
+
+func TestMoveToClearsUnresolved(t *testing.T) {
+	s := Session{ID: idA, Profile: "private", unresolved: true}
+	moveTo(&s, profile.Profile{Name: "work", Dir: t.TempDir()})
+	if s.Profile != "work" || s.unresolved {
+		t.Errorf("after moveTo: profile=%q unresolved=%v, want work, resolved", s.Profile, s.unresolved)
+	}
+}
