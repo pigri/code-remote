@@ -980,7 +980,7 @@ func moveTo(s *Session, p profile.Profile) {
 	if s.Profile == p.Name {
 		return
 	}
-	s.Profile, s.guessed = p.Name, false
+	s.Profile, s.guessed, s.unresolved = p.Name, false, false
 	s.Title, s.LastActive = titleIn(p.Dir, s.ID), lastActiveIn(p.Dir, s.ID)
 }
 
