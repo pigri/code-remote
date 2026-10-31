@@ -34,6 +34,7 @@ func Isolate(dir string) error {
 	set := map[string]string{
 		"HOME":             dir,
 		"XDG_DATA_HOME":    filepath.Join(dir, "data"),
+		"XDG_CONFIG_HOME":  filepath.Join(dir, "config"),
 		"CLAUDE_REMOTE_DB": filepath.Join(dir, "code-remote.db"),
 	}
 	for k, v := range set {
