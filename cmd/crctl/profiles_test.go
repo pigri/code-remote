@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -140,5 +142,26 @@ func TestProfileFlagLeadingDash(t *testing.T) {
 		if len(errs) == 2 && errs[0] != errs[1] {
 			t.Errorf("%s: --profile -work says %q, --profile=-work says %q; want the same", name, errs[0], errs[1])
 		}
+	}
+}
+
+func TestProfilesCommandLocalConfigFile(t *testing.T) {
+	t.Setenv("CLAUDE_REMOTE_API_URL", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.MkdirAll(filepath.Join(xdg, "crctl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "CLAUDE_REMOTE_PROFILES=work=~/.claude,private=~/.claude-private\nCLAUDE_REMOTE_DEFAULT_PROFILE=private\n"
+	if err := os.WriteFile(filepath.Join(xdg, "crctl", "config"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	out := captureStdout(t, func() { err = run([]string{"profiles"}) })
+	if err != nil || out != "  work\n* private\n" {
+		t.Errorf("profiles from the config file = %q, %v; want work, then private marked default", out, err)
 	}
 }
