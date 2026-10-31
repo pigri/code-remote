@@ -134,6 +134,8 @@ func (m *Manager) Upgrade(restart, force bool, ids ...string) (UpgradeResult, er
 			o.Action, o.Reason = ActionSkipped, "already on "+res.After
 		case known && !force && reg.Status != "" && reg.Status != "idle":
 			o.Action, o.Reason = ActionSkipped, reg.Status+" (use force to restart anyway)"
+		case s.unresolved:
+			o.Action, o.Reason = ActionFailed, errUnresolved(s.ID, s.Profile).Error()
 		default:
 			if _, rerr := m.restartAs(s, info, "", p, p); rerr != nil {
 				o.Action, o.Reason = ActionFailed, rerr.Error()
@@ -184,11 +186,13 @@ func (m *Manager) RestartIn(id, dir, prof string) (Session, error) {
 		return Session{}, fmt.Errorf("%w: %q is not a valid session id", ErrNotResumable, id)
 	}
 	s, running, c := m.get(id)
-	var own profile.Profile
+	own, err := m.ownProfile(id)
+	if err != nil {
+		return Session{}, err
+	}
 	if running {
 		own = m.sessionProfile(s)
 	} else {
-		own = m.profileOf(id)
 		// Not found comes before any check of prof, as it would without one.
 		if prof != "" && !m.hasConv(own, id) {
 			return Session{}, fmt.Errorf("%w: no session %s", ErrNotResumable, id)

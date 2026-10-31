@@ -60,8 +60,26 @@ func (m *Manager) lookupProfile(name string) (profile.Profile, error) {
 // one at ~/.claude, where every session from before profiles lives; else the
 // default.
 func (m *Manager) profileOf(id string) profile.Profile {
-	p, _, _ := m.resolveProfile(id, "")
+	p, _, _, _ := m.resolveProfile(id, "")
 	return p
+}
+
+// ownProfile is profileOf for a session about to be acted on: a session whose
+// recorded profile is not in the set (see resolveProfile) is an error naming it,
+// not the default.
+func (m *Manager) ownProfile(id string) (profile.Profile, error) {
+	p, _, _, unresolved := m.resolveProfile(id, "")
+	if unresolved {
+		return p, errUnresolved(id, p.Name)
+	}
+	return p, nil
+}
+
+// errUnresolved is the refusal to act on session id, which the Store records
+// under profile name, one the set does not hold.
+func errUnresolved(id, name string) error {
+	return fmt.Errorf("%w: session %s is recorded under profile %q, which is not configured "+
+		"(define it in CLAUDE_REMOTE_PROFILES)", ErrInvalidProfile, id, name)
 }
 
 // resolveProfile is profileOf for a session whose screen name carries profile
@@ -70,36 +88,47 @@ func (m *Manager) profileOf(id string) profile.Profile {
 // Store recorded since wins. It also returns whether the Store holds no
 // profile for id ("" recorded), and whether the profile is only a guess, found
 // by neither the Store, the name nor a transcript.
-func (m *Manager) resolveProfile(id, named string) (p profile.Profile, unrecorded, guessed bool) {
+//
+// unresolved is set when the set holds one profile, configured or implicit,
+// and the Store records a different one for id: the session belongs to an
+// account this configuration cannot reach, so p is only that name, with no
+// dir, and not the one profile. Listing shows it; acting on it is refused (see
+// ownProfile). The test is len(list) == 1, not !Multi(): with one explicit
+// profile the latter would fall through to returning it, which resolves a
+// removed profile to another account.
+func (m *Manager) resolveProfile(id, named string) (p profile.Profile, unrecorded, guessed, unresolved bool) {
 	list := m.profiles()
-	if len(list) == 1 {
-		return list[0], false, false
-	}
 	if ps, ok := m.Store.(profileStore); ok {
 		if name, err := ps.Profile(id); err == nil {
 			if p, err := m.lookupProfile(name); err == nil && name != "" {
-				return p, false, false
+				return p, false, false, false
+			}
+			if name != "" && len(list) == 1 {
+				return profile.Profile{Name: name}, false, false, true
 			}
 			unrecorded = name == ""
 		}
 	}
+	if len(list) == 1 {
+		return list[0], false, false, false
+	}
 	if named != "" {
 		if p, err := m.lookupProfile(named); err == nil {
-			return p, unrecorded, false
+			return p, unrecorded, false, false
 		}
 	}
 	for _, p := range list {
 		if logIn(p.Dir, id) != "" {
-			return p, unrecorded, false
+			return p, unrecorded, false, false
 		}
 	}
 	for _, p := range list {
 		if p.IsUserClaude() {
-			return p, unrecorded, true
+			return p, unrecorded, true, false
 		}
 	}
 	p, _ = m.lookupProfile("")
-	return p, unrecorded, true
+	return p, unrecorded, true, false
 }
 
 // noteProfile best-effort records in the Store the profile running session s
