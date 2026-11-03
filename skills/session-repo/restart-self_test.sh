@@ -17,6 +17,18 @@ if [ "$1" = help ]; then
 	[ "${STUB_OLD:-}" ] || echo "  one moves the session there: its conversation is copied"
 	exit 0
 fi
+if [ "$1" = profiles ]; then
+	# Like the real one: the env variable, else the config file, else "default".
+	if [ "${STUB_PROFILES_FAIL:-}" ]; then echo "crctl: profiles unavailable" >&2; exit 1; fi
+	list=${CLAUDE_REMOTE_PROFILES:-}
+	if [ -z "$list" ] && [ -f "${STUB_CONFIG:-}" ]; then
+		list=$(sed -n 's/^CLAUDE_REMOTE_PROFILES=//p' "$STUB_CONFIG")
+	fi
+	[ -n "$list" ] || { echo "* default"; exit 0; }
+	printf '%s\n' "$list" | tr ',' '\n' | sed 's/=.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' |
+		awk 'NR == 1 { print "* " $0; next } { print "  " $0 }'
+	exit 0
+fi
 echo "prefix=${CLAUDE_REMOTE_SESSION_PREFIX:-} $*" >>"$STUB_LOG"
 EOF
 chmod +x "$tmp/bin/crctl"
@@ -53,7 +65,25 @@ rs STY=1.pigri-dev-remote-$id -- --check
 if [ "$rc" != 0 ] || [ "$out" != "session: $id
 current: $tmp/home" ]; then fail "legacy --check without profiles"; fi
 rs STY=1.pigri-dev-remote-$id -- --check --profile work
-want 1 "needs CLAUDE_REMOTE_PROFILES" "--profile without profiles"
+want 1 "crctl profiles lists none" "--profile without profiles"
+rs STY=1.pigri-dev-remote-$id -- --check "$tmp/repo"
+want 0 "target:  $tmp/repo" "plain repo move without profiles"
+
+# Profiles only in crctl's config file: no CLAUDE_REMOTE_PROFILES anywhere.
+printf 'CLAUDE_REMOTE_PROFILES=%s\n' "$profiles" >"$tmp/crctl-config"
+C=STUB_CONFIG=$tmp/crctl-config
+rs "$C" STY=1.pigri-dev-remote-private-$id -- --check --profile work "$tmp/repo"
+want 0 "profile: private" "profile from the config file"
+want 0 "move:    to profile work" "move with profiles only in the config file"
+lacks "CLAUDE_REMOTE_PROFILES" "no complaint about the variable"
+rs "$C" STY=1.pigri-dev-remote-other-$id -- --check
+want 1 "which crctl does not know" "unknown profile in the name, config file"
+
+# crctl profiles failing: refuse, with crctl's error, rather than assume none.
+rs STUB_PROFILES_FAIL=1 STY=1.pigri-dev-remote-$id -- --check
+want 1 "crctl profiles failed, so the profiles cannot be told: crctl: profiles unavailable" "crctl profiles fails"
+rs STUB_PROFILES_FAIL=1 STY=1.pigri-dev-remote-$id -- --check "$tmp/repo"
+want 1 "crctl profiles failed" "crctl profiles fails, repo move"
 
 P=CLAUDE_REMOTE_PROFILES=$profiles
 rs "$P" STY=1.pigri-dev-remote-$id -- --check
@@ -88,6 +118,8 @@ rs "$P" STY=1.pigri-dev-remote-work-$id -- --check --profile work "$tmp/repo"
 want 0 "target:  $tmp/repo" "same profile with a dir"
 rs "$P" STY=1.pigri-dev-remote-work-$id -- --check --profile nope
 want 1 "no profile 'nope'; the profiles are: work private my-lab" "unknown profile"
+rs "$C" STY=1.pigri-dev-remote-work-$id -- --check --profile nope
+want 1 "the profiles are: work private my-lab" "unknown profile, config file"
 cwd=$tmp/repo rs "$P" STUB_OLD=1 STY=1.pigri-dev-remote-work-$id -- --check --profile private
 want 1 "cannot restart a session under profiles" "crctl without the move"
 rs STUB_OLD=1 STY=1.pigri-dev-remote-$id -- --check "$tmp/repo"
