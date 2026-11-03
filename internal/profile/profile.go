@@ -94,23 +94,105 @@ func Parse(spec, userHome string) ([]Profile, error) {
 // When CLAUDE_REMOTE_PROFILES is unset there is one profile, "default", whose
 // dir is fallbackDir.
 func FromEnv(fallbackDir, userHome string) (Set, error) {
-	spec := os.Getenv("CLAUDE_REMOTE_PROFILES")
-	if spec == "" {
+	return build(fallbackDir, userHome,
+		source{os.Getenv("CLAUDE_REMOTE_PROFILES"), "CLAUDE_REMOTE_PROFILES"},
+		source{os.Getenv("CLAUDE_REMOTE_DEFAULT_PROFILE"), "CLAUDE_REMOTE_DEFAULT_PROFILE"})
+}
+
+// Load is FromEnv for the crctl CLI, which has no systemd env file. It reads
+// CLAUDE_REMOTE_PROFILES and CLAUDE_REMOTE_DEFAULT_PROFILE from the
+// environment and, for each one that is unset or empty, from the config file
+// $XDG_CONFIG_HOME/crctl/config (<userHome>/.config/crctl/config when
+// XDG_CONFIG_HOME is unset, empty or not absolute; no file when neither is
+// absolute). Per key the precedence is
+// the environment, then the config file, then nothing; with no profiles from
+// either, there is one profile "default" at fallbackDir, as in FromEnv.
+//
+// The file holds KEY=value lines, as the server's env file does. Blank lines
+// and lines starting with '#' are skipped, as are unknown keys. One pair of
+// surrounding quotes is stripped from a value. A missing file is not an error.
+func Load(fallbackDir, userHome string) (Set, error) {
+	path := configPath(userHome)
+	vals, err := readConfig(path)
+	if err != nil {
+		return Set{}, err
+	}
+	pick := func(key string) source {
+		if v := os.Getenv(key); v != "" {
+			return source{v, key}
+		}
+		if v := vals[key]; v != "" {
+			return source{v, path + ": " + key}
+		}
+		return source{}
+	}
+	return build(fallbackDir, userHome, pick("CLAUDE_REMOTE_PROFILES"), pick("CLAUDE_REMOTE_DEFAULT_PROFILE"))
+}
+
+// source is a setting's value and the name it is reported under in errors.
+type source struct{ value, label string }
+
+func build(fallbackDir, userHome string, spec, def source) (Set, error) {
+	if spec.value == "" {
 		return Set{list: []Profile{{Name: "default", Dir: fallbackDir, home: userHome}}}, nil
 	}
-	list, err := Parse(spec, userHome)
+	list, err := Parse(spec.value, userHome)
 	if err != nil {
-		return Set{}, fmt.Errorf("CLAUDE_REMOTE_PROFILES: %w", err)
+		return Set{}, fmt.Errorf("%s: %w", spec.label, err)
 	}
 	s := Set{list: list, multi: true}
-	if name := os.Getenv("CLAUDE_REMOTE_DEFAULT_PROFILE"); name != "" {
-		i := s.index(name)
+	if def.value != "" {
+		i := s.index(def.value)
 		if i < 0 {
-			return Set{}, fmt.Errorf("CLAUDE_REMOTE_DEFAULT_PROFILE: no profile named %q", name)
+			return Set{}, fmt.Errorf("%s: no profile named %q", def.label, def.value)
 		}
 		s.def = i
 	}
 	return s, nil
+}
+
+// configPath is the config file's path, or "" when there is no absolute one:
+// a relative path would read a file from the working directory.
+func configPath(userHome string) string {
+	if x := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(x) {
+		return filepath.Join(x, "crctl", "config")
+	}
+	if !filepath.IsAbs(userHome) {
+		return ""
+	}
+	return filepath.Join(userHome, ".config", "crctl", "config")
+}
+
+// readConfig returns the KEY=value pairs in the file at path, none when it
+// does not exist or path is "".
+func readConfig(path string) (map[string]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	vals := map[string]string{}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s: line %d: want KEY=value", path, i+1)
+		}
+		v = strings.TrimSpace(v)
+		if n := len(v); n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n-1] == v[0] {
+			v = v[1 : n-1]
+		}
+		vals[strings.TrimSpace(k)] = v
+	}
+	return vals, nil
 }
 
 func (s Set) index(name string) int {

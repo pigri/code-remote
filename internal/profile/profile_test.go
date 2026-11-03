@@ -451,3 +451,169 @@ func TestValidName(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad(t *testing.T) {
+	const both = "CLAUDE_REMOTE_PROFILES=work=~/.claude,private=~/.claude-private\nCLAUDE_REMOTE_DEFAULT_PROFILE=private\n"
+	tests := []struct {
+		name        string
+		file        string // config file content; "-" means no file, "dir" a directory
+		envProfiles string
+		envDefault  string
+		relXDG      bool
+		want        []Profile
+		wantDef     string
+		wantMulti   bool
+		wantErr     []string // each must appear in the error; {file} is the config path
+	}{
+		{name: "file alone", file: both,
+			want:    []Profile{pr("work", "{h}/.claude"), pr("private", "{h}/.claude-private")},
+			wantDef: "private", wantMulti: true},
+		{name: "env beats file", envProfiles: "a=/a,b=/b", envDefault: "b",
+			file: both, want: []Profile{pr("a", "/a"), pr("b", "/b")}, wantDef: "b", wantMulti: true},
+		{name: "profiles from file, default from env", envDefault: "work",
+			file: both, want: []Profile{pr("work", "{h}/.claude"), pr("private", "{h}/.claude-private")},
+			wantDef: "work", wantMulti: true},
+		{name: "profiles from env, default from file", envProfiles: "a=/a,private=/p",
+			file: both, want: []Profile{pr("a", "/a"), pr("private", "/p")}, wantDef: "private", wantMulti: true},
+		{name: "default from file unknown to env profiles", envProfiles: "a=/a",
+			file: both, wantErr: []string{"{file}", "CLAUDE_REMOTE_DEFAULT_PROFILE", `"private"`}},
+		{name: "first is default", file: "CLAUDE_REMOTE_PROFILES=a=/a,b=/b\n",
+			want: []Profile{pr("a", "/a"), pr("b", "/b")}, wantDef: "a", wantMulti: true},
+		{name: "neither", file: "-", want: []Profile{{Name: "default", Dir: "/fallback", home: "{h}"}}, wantDef: "default"},
+		{name: "empty file", file: "", want: []Profile{{Name: "default", Dir: "/fallback", home: "{h}"}}, wantDef: "default"},
+		{name: "file with other keys only", file: "FOO=bar\n",
+			want: []Profile{{Name: "default", Dir: "/fallback", home: "{h}"}}, wantDef: "default"},
+		{name: "comments blanks unknown keys", wantDef: "b", wantMulti: true,
+			file: "# a comment\n\n   # indented comment\nOTHER=1\n  CLAUDE_REMOTE_PROFILES = a=/a,b=/b \r\n\tCLAUDE_REMOTE_DEFAULT_PROFILE=b\n",
+			want: []Profile{pr("a", "/a"), pr("b", "/b")}},
+		{name: "double quotes", file: `CLAUDE_REMOTE_PROFILES="a=/a,b=/b"` + "\n" + `CLAUDE_REMOTE_DEFAULT_PROFILE='b'` + "\n",
+			want: []Profile{pr("a", "/a"), pr("b", "/b")}, wantDef: "b", wantMulti: true},
+		{name: "one quote pair stripped", file: `CLAUDE_REMOTE_PROFILES="'a=/a'"` + "\n",
+			wantErr: []string{"{file}", "invalid profile name"}},
+		{name: "mismatched quotes kept", file: `CLAUDE_REMOTE_PROFILES="a=/a'` + "\n",
+			wantErr: []string{"{file}", "invalid profile name"}},
+		{name: "value with equals", file: "CLAUDE_REMOTE_PROFILES=a=/a=b\n",
+			want: []Profile{pr("a", "/a=b")}, wantMulti: true, wantDef: "a"},
+		{name: "empty value in file ignored", file: "CLAUDE_REMOTE_PROFILES=\n",
+			want: []Profile{{Name: "default", Dir: "/fallback", home: "{h}"}}, wantDef: "default"},
+		{name: "relative XDG_CONFIG_HOME ignored", relXDG: true, file: both,
+			want:    []Profile{pr("work", "{h}/.claude"), pr("private", "{h}/.claude-private")},
+			wantDef: "private", wantMulti: true},
+		{name: "file is a directory", file: "dir", wantErr: []string{"{file}"}},
+		{name: "line without =", file: "# ok\n\nCLAUDE_REMOTE_PROFILES=a=/a\nnonsense\n",
+			wantErr: []string{"{file}", "line 4"}},
+		{name: "bad spec in file", file: "CLAUDE_REMOTE_PROFILES=a\n",
+			wantErr: []string{"{file}", "CLAUDE_REMOTE_PROFILES", "missing '='"}},
+		{name: "unknown default in file", file: "CLAUDE_REMOTE_PROFILES=a=/a\nCLAUDE_REMOTE_DEFAULT_PROFILE=zz\n",
+			wantErr: []string{"{file}", "CLAUDE_REMOTE_DEFAULT_PROFILE", `"zz"`}},
+		{name: "bad env spec keeps env prefix", envProfiles: "a", file: both,
+			wantErr: []string{"CLAUDE_REMOTE_PROFILES: ", "missing '='"}},
+		{name: "unknown env default keeps env prefix", envDefault: "zz", file: both,
+			wantErr: []string{"CLAUDE_REMOTE_DEFAULT_PROFILE: no profile named \"zz\""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := t.TempDir()
+			xdg := filepath.Join(t.TempDir(), "xdg")
+			file := filepath.Join(xdg, "crctl", "config")
+			if tt.relXDG {
+				t.Setenv("XDG_CONFIG_HOME", "relative/xdg")
+				file = filepath.Join(h, ".config", "crctl", "config")
+			} else {
+				t.Setenv("XDG_CONFIG_HOME", xdg)
+			}
+			t.Setenv("CLAUDE_REMOTE_PROFILES", tt.envProfiles)
+			t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", tt.envDefault)
+			switch tt.file {
+			case "-":
+			case "dir":
+				if err := os.MkdirAll(file, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(tt.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s, err := Load("/fallback", h)
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatalf("Load = %v, want an error", s.Names())
+				}
+				for _, w := range tt.wantErr {
+					w = strings.ReplaceAll(w, "{file}", file)
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("Load error = %q, want it to contain %q", err, w)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			want := make([]Profile, len(tt.want))
+			for i, p := range tt.want {
+				p.Dir = strings.ReplaceAll(p.Dir, "{h}", h)
+				p.home = strings.ReplaceAll(p.home, "{h}", h)
+				if p.explicit {
+					p.home = h
+				}
+				want[i] = p
+			}
+			if !reflect.DeepEqual(s.list, want) {
+				t.Errorf("Load profiles = %+v, want %+v", s.list, want)
+			}
+			if got := s.Default().Name; got != tt.wantDef {
+				t.Errorf("Load default = %q, want %q", got, tt.wantDef)
+			}
+			if s.Multi() != tt.wantMulti {
+				t.Errorf("Load Multi = %v, want %v", s.Multi(), tt.wantMulti)
+			}
+		})
+	}
+}
+
+func TestLoadTildeUsesUserHome(t *testing.T) {
+	h := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	if err := os.MkdirAll(filepath.Join(xdg, "crctl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "crctl", "config"), []byte("CLAUDE_REMOTE_PROFILES=w=~/.c\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load("", h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.Get("w"); p.Dir != filepath.Join(h, ".c") {
+		t.Errorf("w dir = %q, want %q", p.Dir, filepath.Join(h, ".c"))
+	}
+}
+
+func TestLoadIgnoresARelativeConfigPath(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("CLAUDE_REMOTE_PROFILES", "")
+	t.Setenv("CLAUDE_REMOTE_DEFAULT_PROFILE", "")
+	if err := os.MkdirAll(filepath.Join(cwd, ".config", "crctl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, ".config", "crctl", "config"), []byte("CLAUDE_REMOTE_PROFILES=x=/planted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load("/fallback", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Multi() || s.Default().Dir != "/fallback" {
+		t.Errorf("Load = %v, default %+v; want the single default at /fallback, not the working directory's file", s.Names(), s.Default())
+	}
+}

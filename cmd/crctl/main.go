@@ -141,7 +141,7 @@ func pickBackend() (backend, error) {
 	}
 	home := claudeHome()
 	userHome, _ := os.UserHomeDir()
-	profiles, err := profile.FromEnv(home, userHome)
+	profiles, err := profile.Load(home, userHome)
 	if err != nil {
 		return nil, err
 	}
