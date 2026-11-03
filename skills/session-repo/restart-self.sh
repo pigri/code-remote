@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Restart the crctl-managed claude session this script is run from, moving it
-# into a git repository, or with CLAUDE_REMOTE_PROFILES into another profile
-# (Claude account). The restart is handed to a detached helper that waits for
+# into a git repository, or, when crctl has profiles configured, into another
+# profile (Claude account). The restart is handed to a detached helper that waits for
 # the session to go idle, so the turn that asked for it can finish first.
 #
 #   restart-self.sh <dir>                    schedule the move (returns immediately)
@@ -11,7 +11,21 @@
 set -euo pipefail
 
 CRCTL=${CRCTL:-crctl}
-profiles=${CLAUDE_REMOTE_PROFILES:-} # a session inherits it from whatever launched it
+die() { echo "restart-self: $*" >&2; exit 1; }
+
+# What crctl knows, so the env variable and crctl's config file both count:
+# "* name" for the default profile, "  name" for the others. With none
+# configured it prints exactly "* default". A single explicit profile named
+# "default" prints the same, so it is treated as no profiles.
+# It cannot be told whether profiles exist without it, so a failure is fatal.
+# The detached helper inherits SESSIONS_DIR from the run that started it and
+# does not ask again.
+if [ "${1:-}" != "--run" ] || [ -z "${SESSIONS_DIR:-}" ]; then
+	crctl_profiles=$("$CRCTL" profiles 2>&1) ||
+		die "crctl profiles failed, so the profiles cannot be told: $crctl_profiles"
+fi
+profiles=
+[ "${crctl_profiles:-* default}" = "* default" ] || profiles=1
 if [ -n "$profiles" ]; then
 	# Where this session's claude writes: CLAUDE_HOME is the server's setting,
 	# and a session can inherit one that is not its own profile.
@@ -22,10 +36,8 @@ fi
 IDLE_WAIT=${IDLE_WAIT:-600} # seconds to wait for the session to go idle
 uuid_re='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
-die() { echo "restart-self: $*" >&2; exit 1; }
-
-# Profile names in CLAUDE_REMOTE_PROFILES ("name=dir,name=dir"), one per line.
-names() { printf '%s\n' "$profiles" | tr ',' '\n' | sed 's/=.*//; s/^[[:space:]]*//; s/[[:space:]]*$//'; }
+# Profile names from `crctl profiles`, one per line (the 2-char mark dropped).
+names() { printf '%s\n' "$crctl_profiles" | sed 's/^..//'; }
 
 # $STY is "<pid>.<screen name>". The name is <prefix>-<session id>, and with
 # profiles also <prefix>-<profile>-<session id>. Without profiles the split
@@ -45,7 +57,7 @@ session() {
 	*) die "screen '$name' does not start with '$p-', the CLAUDE_REMOTE_SESSION_PREFIX crctl looks for" ;;
 	esac
 	[ -z "$profile" ] || names | grep -qxF -- "$profile" ||
-		die "screen '$name' names profile '$profile', which is not in CLAUDE_REMOTE_PROFILES"
+		die "screen '$name' names profile '$profile', which crctl does not know (see: crctl profiles)"
 	prefix=
 }
 
@@ -99,7 +111,7 @@ echo "session: $id"
 [ -z "$profiles" ] || echo "profile: ${profile:-not in the screen name (a session from before profiles)}"
 echo "current: $(pwd)"
 if [ -n "$to" ]; then
-	[ -n "$profiles" ] || die "--profile needs CLAUDE_REMOTE_PROFILES, which this session does not have"
+	[ -n "$profiles" ] || die "--profile needs profiles configured for crctl (CLAUDE_REMOTE_PROFILES or the crctl config file); crctl profiles lists none"
 	names | grep -qxF -- "$to" || die "no profile '$to'; the profiles are: $(names | paste -sd' ')"
 	[ "$to" != "$profile" ] || [ -n "$dir" ] || die "this session already runs in profile '$to'"
 	echo "move:    to profile $to; it comes back under that account, and its old entry stays in the" \
@@ -141,7 +153,7 @@ $check && exit 0
 log=${XDG_STATE_HOME:-$HOME/.local/state}/crctl/self-restart-$id.log
 mkdir -p "$(dirname "$log")"
 # Own session + no terminal: the helper must outlive the screen it restarts.
-setsid nohup "$0" --run "$id" "$prefix" "$repo" "$to" >"$log" 2>&1 </dev/null &
+SESSIONS_DIR=$SESSIONS_DIR setsid nohup "$0" --run "$id" "$prefix" "$repo" "$to" >"$log" 2>&1 </dev/null &
 if [ -n "$to" ]; then
 	echo "scheduled: moves to profile $to${repo:+ in $repo} once this session is idle (log: $log)"
 else
