@@ -49,13 +49,13 @@ file) lets the session do it to itself.
 
 ## Move to another profile
 
-With profiles (`CLAUDE_REMOTE_PROFILES`), each profile is a separate Claude
+With profiles configured (`crctl profiles` lists them), each profile is a separate Claude
 account. A session can move to another one and keep its history.
 
 1. **Check.** Run `restart-self.sh --check`. Without a `profile:` line there
    are no profiles to move between: tell the user and stop.
-2. **Pick the profile** the user named. Only the names in
-   `CLAUDE_REMOTE_PROFILES` count. If unsure which one, ask.
+2. **Pick the profile** the user named. Only the names
+   `crctl profiles` lists count. If unsure which one, ask.
 3. **Confirm.** Run `restart-self.sh --check --profile <name>`, adding a repo
    dir if the user also asked to move into one. Relay any error as is. The
    `trust:` line names the dir the move marks as a trusted folder in the

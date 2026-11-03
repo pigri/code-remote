@@ -411,6 +411,13 @@ stopping it would move it nowhere.
 remote mode it reads `GET /profiles`; against a server from before that route,
 it fails with an error that says to upgrade the server.
 
+A local `crctl` reads `CLAUDE_REMOTE_PROFILES` and
+`CLAUDE_REMOTE_DEFAULT_PROFILE` from the environment, else from its config
+file, `$XDG_CONFIG_HOME/crctl/config` (`~/.config/crctl/config`), one
+`KEY=value` per line. Each key is looked up on its own: the environment, then
+the file, then the single `default` profile. The server reads only its env
+file, never this one.
+
 A local `crctl` MUST have the same `CLAUDE_REMOTE_PROFILES` as the API server
 whose DB (`CLAUDE_REMOTE_DB`) it shares. Without it, `crctl ls` shows every
 session as `default`, does not list, stop or upgrade a session whose screen
@@ -438,7 +445,7 @@ API instead (then `CLAUDE_REMOTE_API_TOKEN` is required).
 | `CLAUDE_WORKSPACE_ROOT` | local | optional; limits `--dir` to paths under it (unset = any directory) |
 | `CLAUDE_REMOTE_TRUST_DIRS` | local | `1` = always behave as if `--trust` was passed |
 | `CLAUDE_BIN` · `SCREEN_BIN` · `CLAUDE_CONFIG_DIR` · `CLAUDE_HOME` · `CLAUDE_REMOTE_SESSION_PREFIX` | local | optional overrides (`CLAUDE_CONFIG_DIR` wins over `CLAUDE_HOME`) |
-| `CLAUDE_REMOTE_PROFILES` · `CLAUDE_REMOTE_DEFAULT_PROFILE` | local | the profiles `--profile` picks from, as on the API server |
+| `CLAUDE_REMOTE_PROFILES` · `CLAUDE_REMOTE_DEFAULT_PROFILE` | local | the profiles `--profile` picks from, as on the API server; or set them in `~/.config/crctl/config` (environment first) |
 | `CLAUDE_REMOTE_DB` | both | path to the SQLite mirror (default `$XDG_DATA_HOME/code-remote/code-remote.db`) |
 
 `crctl ls` lists **running** sessions plus **resumable** ones — sessions
